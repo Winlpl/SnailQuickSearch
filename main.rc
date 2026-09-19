@@ -1,0 +1,17 @@
+#pragma code_page(65001)   /* 本文件是 UTF-8 (无 BOM), 显式声明避免 rc.exe 按系统 ANSI 误读中文文件名 */
+// main.rc - 资源文件
+// 定义应用程序图标
+
+// 主应用程序图标（使用标准 IDI_APPLICATION 值 32512）
+32512 ICON "snailsearch.ico"
+
+// 完整 ico 文件字节原样嵌入 (标题栏 D2D 绘制: WIC 内存解码取最大帧; 与 32512 同源, 不读磁盘)
+205 RCDATA "snailsearch.ico"
+
+// 赞助二维码 (设置 - 赞助页, RCDATA 原样嵌入, 运行期 WIC 解码)
+201 RCDATA "sponsor-wechat.png"
+202 RCDATA "sponsor-alipay.jpg"
+
+// 内置文档 (md4c 解析 + D2D 排版, 通用引擎见 xjs_md.cpp)
+203 RCDATA "搜索模式简介.md"        /* 设置 - 搜索模式 分类 */
+204 RCDATA "THIRD-PARTY-NOTICES.md" /* 设置 - 许可证 分类 */
