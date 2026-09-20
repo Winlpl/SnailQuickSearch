@@ -25,8 +25,9 @@ static void XjsLogPath(const wchar_t* name, wchar_t* out, DWORD cap) {
 /* 排最前的 VEH: 只记录致命类异常, 静默写 startup_stack.txt (阶段+逐帧 模块!偏移)。
    良性探测(线程命名/调试输出/断点/单步)不记录不拦截, 直接放行给后续处理器 */
 static LONG CALLBACK XjsVecStackLogger(PEXCEPTION_POINTERS ei) {
-    static int s_busy = 0;
-    if (s_busy) return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG s_busy = 0;
+    /* VEH 可在任意线程并发进入 (UI/引擎/钩子线程同时崩), 置位必须原子 */
+    if (InterlockedCompareExchange(&s_busy, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
     DWORD code = ei->ExceptionRecord ? ei->ExceptionRecord->ExceptionCode : 0;
     if (!(code == 0xC0000005 || code == 0xC0000002 || code == 0xC0000409 ||
           code == 0xC00000FD || code == 0xC000001D || code == 0xC0000094))
@@ -63,7 +64,7 @@ static LONG CALLBACK XjsVecStackLogger(PEXCEPTION_POINTERS ei) {
         }
         CloseHandle(f);
     }
-    s_busy = 0;
+    InterlockedExchange(&s_busy, 0);
     return EXCEPTION_CONTINUE_SEARCH;   /* 只取证不吞异常, 后续处理器照常工作 */
 }
 
@@ -79,6 +80,7 @@ void XjsApplyZoom(int tenths) {
     g_uiZoomTenths = tenths;
     XjsRecreateTextFormats();
     XjsUpdateEditFont();
+    XjsClampScroll();   /* 行高随缩放变化: 不重新钳制时深处滚动的 scrollTop 可越界 (渲染循环 first=-1) */
     XjsSaveConfig();
     XjsSearchWindow::Cur()->Invalidate();
 }
@@ -159,7 +161,10 @@ struct XjsForegroundBorrow {
 void XjsSummonActivate(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) return;
     XjsForegroundBorrow borrow;
-    ShowWindow(hwnd, SW_RESTORE);   /* 兼顾藏托盘与最小化两种隐藏态 */
+    /* SW_RESTORE 对"可见且最大化"的窗口语义是还原成普通尺寸 — 每次热键/双击 Ctrl 唤起
+       都会把最大化窗口拽回普通尺寸。按状态分档: 最小化=还原, 隐藏(托盘)=显示, 可见=不动 */
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    else if (!IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
 }
 
@@ -651,7 +656,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (!g_engine) {
                     MessageBoxW(hwnd, XjsT(L"错误.创建引擎失败"), XjsT(L"通用词.错误"), MB_OK | MB_ICONERROR);
                     PostQuitMessage(0);
-                    return 0;
+                    return -1;   /* 中止窗口创建 (CreateWindowExW 返回 NULL); return 0 = 继续创建,
+                                    空引擎指针会流入 xjs_db_Load/插件加载 */
                 }
                 xjs_SetDefaultEngine(g_engine);
                 xjs_SetCallback(g_engine, XJS_EVENT_LOAD_COMPLETE, (const void*)Xjs_LoadComplete, NULL);
@@ -761,7 +767,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (hr == (HRESULT)D2DERR_RECREATE_TARGET || s_endDrawFailStreak >= 2) {
                     s_endDrawFailStreak = 0;
                     XjsBackdropDiscard();
-                    XjsDeviceDiscard();
+                    XjsDeviceDiscardCtx(*w);   /* 显式上下文: 撕毁期嵌套消息可重绑 Cur (xjs_app.h 口径) */
                     XjsDeviceCreate();
                     g_needFullPaint = true;
                     w->Invalidate();
@@ -793,6 +799,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 SetWindowPos(hwnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
                     SWP_NOZORDER | SWP_NOACTIVATE);
             }
+            XjsClampScroll();   /* 行高随 DPI 变化: 跨屏降到低 DPI 时原 scrollTop 可越界, 不钳则渲染循环 first=-1 */
             w->Invalidate();
             return 0;
         }
@@ -1139,17 +1146,23 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             w->Invalidate();
             return 0;
         }
-        case WM_KEYDOWN: {
-            if (XjsHandleZoomKey(wParam)) return 0;
-            /* Ctrl+N = 创建新搜索窗口 (与 ☰菜单 同入口) */
-            if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'N') { XjsSearchWindow::OpenNew(); return 0; }
-            /* Alt+←/→ = 搜索历史后退/前进 (源样式全局口径, 鼠标侧键同源) */
-            if ((GetKeyState(VK_MENU) & 0x8000) && (wParam == VK_LEFT || wParam == VK_RIGHT)) {
+        case WM_SYSKEYDOWN:
+            /* Alt+←/→ = 搜索历史导航: 本窗带 WS_SYSMENU, Alt 组合产生的是 WM_SYSKEYDOWN,
+               原 WM_KEYDOWN 分支里的 VK_MENU 判定收不到本消息 (键盘历史导航从未生效);
+               未命中的键 (F10/Alt 本身等) 必须还给 DefWindowProc, 尾部 return 0 会吞系统处理 */
+            if ((GetKeyState(VK_MENU) & 0x8000) && (wParam == VK_LEFT || wParam == VK_RIGHT)
+                && !XjsRenameActive()) {
                 XjsHistoryNav(wParam == VK_LEFT ? -1 : 1);
                 return 0;
             }
-            /* 行内重命名编辑态: 全量吞键 (Esc/Enter 在 XjsRenameKey 内收尾) */
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        case WM_KEYDOWN: {
+            /* 行内重命名编辑态: 全量吞键 (Esc/Enter 在 XjsRenameKey 内收尾) — 必须先于
+               缩放/Ctrl+N 全局命令, 否则编辑中按 Ctrl+N 会新建窗口、Ctrl+- 会改缩放 */
             if (XjsRenameActive()) { XjsRenameKey(wParam); return 0; }
+            if (XjsHandleZoomKey(wParam)) return 0;
+            /* Ctrl+N = 创建新搜索窗口 (与 ☰菜单 同入口) */
+            if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'N') { XjsSearchWindow::OpenNew(); return 0; }
             if (g_searchFocused) {
                 XjsSearchKey(wParam);
                 return 0;   /* 聚焦搜索框时全量吞键 (原 EDIT 子窗口同款), 不漏给列表 */
@@ -1419,12 +1432,20 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_QUERYENDSESSION:
             return TRUE;
         case WM_ENDSESSION:
-            if (wParam) XjsEngineShutdown(false);
+            /* 会话结束 (注销/关机): 进程随后被杀, 不会走主窗 WM_DESTROY 收尾 — 配置在此落盘
+               (窗口矩形/历史/每窗设置; 引擎库随后同存), 漏存 = 用户会话内全部设置丢失 */
+            if (wParam) {
+                XjsSaveWindowRect();
+                XjsSaveConfig();
+                XjsEngineShutdown(false);
+            }
             return 0;
         case WM_DESTROY: {
             /* 钉住本窗上下文: 撕毁过程会同步触发其他窗口的激活/绘制消息 (嵌套 Enter 重绑 Cur),
                之后所有 g_* 宏必须仍解析到本窗 — 否则 double-free (外部 WM_CLOSE 多窗崩溃根因) */
             XjsWindowScope scope(w);
+            XjsPostToUiDropWindow(w);   /* 本窗已投未处理的引擎消息将随 DestroyWindow 被系统清除,
+                                           其闸门计数一并返还 (否则 s_postPending 永久泄漏) */
             XjsPluginOnWindowDestroyed(hwnd);   /* 窗口令牌代递增 (插件持旧令牌失效, 防槽位复用串窗) */
             KillTimer(hwnd, ID_TIMER_STATUS);
             KillTimer(hwnd, ID_TIMER_ANIM);
@@ -1537,7 +1558,6 @@ void XjsSearchWindow::OpenNew(int profileSlot) {
         XjsToastShow(g_hWnd, XjsT(L"提示.扫描中禁止新建窗口"), XTOAST_WARN, XSF(1));
         return;
     }
-    if (XjsSearchWindow::Count() >= 16) { XjsToastShow(g_hWnd, XjsT(L"提示.窗口数上限"), XTOAST_WARN, XSF(1)); return; }
     HINSTANCE hInst = GetModuleHandleW(NULL);
     /* 级联: 依主窗位置向右下错开 (每窗 +28), 出工作区则折回主窗位 */
     RECT mr = { 0, 0, 0, 0 };
@@ -1580,6 +1600,8 @@ void XjsSearchWindow::OpenNew(int profileSlot) {
         XjsSearchWindow* stale = XjsSearchWindow::At(i);
         if (stale && !stale->hWnd) stale->DestroyAndFree();
     }
+    /* 上限判定放裸上下文清扫之后: 死槽占位会把真实窗口数顶过 16 造成误拒 */
+    if (XjsSearchWindow::Count() >= 16) { XjsToastShow(g_hWnd, XjsT(L"提示.窗口数上限"), XTOAST_WARN, XSF(1)); return; }
     XjsSearchWindow::RegisterPending(false, profileSlot >= 0 ? profileSlot : XjsUiProfileCount());
     CreateWindowExW(0, L"SnailQuickSearchWnd", XjsT(L"应用.名称"),
         WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
@@ -1694,6 +1716,12 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     /* 计划任务自启动 (--autostart): 以隐藏方式创建 (仅托盘, 经托盘/双击 Ctrl 唤起) */
     bool autoStart = lpCmdLine && wcsstr(lpCmdLine, L"--autostart") != NULL;
     XjsCreateMainWindow(hInstance, autoStart ? SW_HIDE : nCmdShow);
+    if (!XjsSearchWindow::MainHwnd()) {
+        /* 主窗创建失败 (引擎创建失败/系统资源不足): PostQuitMessage 已投, 直接退出 —
+           不判空则空 g_engine 继续流入插件加载与 xjs_db_Load;
+           插件/数据库都尚未初始化 (顺序在下方), 无需任何收尾 */
+        return 0;
+    }
     XjsDoubleCtrlApply();   /* 双击 Ctrl 目标载入后按有效性实时装卸钩子 (禁用/名称失效 = 零钩子) */
     /* 插件系统: 扫描 plugins\ + 按配置加载已启用 (主窗已建 — 插件回调/Toast 有宿主窗可用;
        引擎此刻尚未提交加载, 插件侧查询由引擎状态门槛自理, 见 SDK 头"直连搜索引擎") */
@@ -1720,8 +1748,11 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     }
     XjsSearchWindow::Cur()->Invalidate();
     XjsSetPhase(L"message-loop");
-    MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+    MSG msg = {};   /* 零初始化: GetMessage 返回 -1 时 wParam 未写入, 不初始化则退出码未定义 */
+    while (true) {
+        int r = GetMessageW(&msg, NULL, 0, 0);
+        if (r == 0) break;   /* WM_QUIT */
+        if (r == -1) { PostQuitMessage(1); continue; }   /* 队列句柄错误: 置退出码后循环收尾 */
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

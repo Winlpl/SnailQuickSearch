@@ -23,7 +23,10 @@ enum XjsSetAct {
     ACT_ROWHOVER = 313,    /* 高亮鼠标经过行 (每窗) */
     ACT_HOVERFADE = 314,   /* 鼠标经过残影 (每窗, 依赖 ACT_ROWHOVER) */
     ACT_WINNAME = 315,     /* 重命名窗口 (每窗, 主窗固定名不可改) */
-    ACT_WINGM_DEL = 316,   /* 窗口管理: 删除窗口档案 (316+档案槽, 已打开则连窗销毁+卸热键) */
+    /* 窗口管理: 删除窗口档案 (1900+档案槽, 已打开则连窗销毁+卸热键)。
+       基址曾在 316: 段宽 64 横穿 320..379 上 13 个动作常量, 显式 case 优先于范围判定 —
+       删第 5 档案 (槽4) 实际执行 ACT_CLEARHIST 清空搜索历史, 属数据丢失级撞号, 已挪到最高空闲段 */
+    ACT_WINGM_DEL = 1900,
     ACT_WINGM_REN = 1440,  /* 窗口管理: 重命名窗口档案 (1440+档案槽, 上限 59 — 避开 EXCL_DEL 400..1423
                               与 OPEN 1500; 作用对象 = 档案槽: 存活窗改窗口名, 未打开档案改档案名,
                               与 窗口名称行 同一入口 XjsSetApplyWindowRename) */
@@ -52,6 +55,12 @@ enum XjsSetAct {
     ACT_PLUGINS_TOGGLE  = 1602   /* +插件下标 启用/禁用 (上限 200, 同票号上限; 首次启用过确认框) */
 };
 static_assert(ACT_APPEAR + XJS_APPEAR_COUNT <= ACT_EXCL_DEL, "ACT_APPEAR 档位段越界, 与 ACT_EXCL_DEL 重叠");
+/* 段位互斥锁死 (枚举值即运行时命令 id, 曾发生 ACT_WINGM_DEL 段横穿后加常量 = 点删除执行别的动作):
+   任何新动作段必须落在已锁段之外并在此补断言 */
+static_assert(ACT_PLUGINS_TOGGLE + 200 <= ACT_WINGM_DEL, "插件段与窗口管理删除段重叠");
+static_assert(ACT_WINGM_DEL + 64 <= 4096, "窗口管理删除段 (64 档案) 越出保留区");
+static_assert(ACT_EXCL_DEL + 1024 <= ACT_WINGM_REN, "排除目录删除段与重命名段重叠");
+static_assert(ACT_WINGM_REN + 60 <= ACT_OPEN, "窗口重命名段 (上限 59 档案) 与打开行为段重叠");
 
 /* 出现位置档位文字 (设置行当前值 + 下拉菜单同源; 档位序 = xjs_app.h XJS_APPEAR_*)。
    合成串走函数内 static 缓冲: 两处调用都即时拷进 std::wstring, 不跨调用持有 */
@@ -883,6 +892,24 @@ static void XjsSetFreeResources() {
     if (s_set.imgWechat) { s_set.imgWechat->Release(); s_set.imgWechat = NULL; }
     if (s_set.imgAlipay) { s_set.imgAlipay->Release(); s_set.imgAlipay = NULL; }
     s_set.imgTried = false;
+    /* 纯色画刷是独立 COM 对象 (不随 RT 释放), 只置空 = 每次换肤/DPI 变化泄漏一轮 */
+    if (s_set.brBg) { s_set.brBg->Release(); }
+    if (s_set.brBorder) { s_set.brBorder->Release(); }
+    if (s_set.brHover) { s_set.brHover->Release(); }
+    if (s_set.brText) { s_set.brText->Release(); }
+    if (s_set.brDim) { s_set.brDim->Release(); }
+    if (s_set.brFaint) { s_set.brFaint->Release(); }
+    if (s_set.brAccent) { s_set.brAccent->Release(); }
+    if (s_set.brPanel) { s_set.brPanel->Release(); }
+    if (s_set.brPanel2) { s_set.brPanel2->Release(); }
+    if (s_set.brBorderStrong) { s_set.brBorderStrong->Release(); }
+    if (s_set.brDanger) { s_set.brDanger->Release(); }
+    if (s_set.brWhite) { s_set.brWhite->Release(); }
+    if (s_set.brAccentSoft) { s_set.brAccentSoft->Release(); }
+    if (s_set.brMask) { s_set.brMask->Release(); }
+    if (s_set.brOkFill) { s_set.brOkFill->Release(); }
+    if (s_set.brOkHover) { s_set.brOkHover->Release(); }
+    if (s_set.brWarn) { s_set.brWarn->Release(); }
     s_set.brBg = s_set.brBorder = s_set.brHover = s_set.brText = s_set.brDim = NULL;
     s_set.brFaint = s_set.brAccent = s_set.brPanel = s_set.brPanel2 = NULL;
     s_set.brBorderStrong = s_set.brDanger = s_set.brWhite = s_set.brAccentSoft = NULL;
@@ -1152,8 +1179,9 @@ static void XjsSetDrawRebuildDialog(float w, float vh) {
         s_set.rt->DrawLine(rb, top, s_set.brDanger, 1.6f);
         s_set.rt->DrawLine(XjsPoint2F(ax, ayMid - SS(2.5f)), XjsPoint2F(ax, ayMid + SS(2)), s_set.brDanger, 1.6f);
         s_set.rt->FillEllipse(XjsEllipseF(XjsPoint2F(ax, ayMid + SS(4)), SS(1), SS(1)), s_set.brDanger);
-        s_set.rt->DrawText(XjsT(L"设置.数据维护.重建索引"), 4, s_set.tfName,
-            XjsRectF(cx + SS(24), cy - SS(2), dr.right - padH, cy + SS(22)), s_set.brText);
+        { const wchar_t* t = XjsT(L"设置.数据维护.重建索引");   /* 长度必须 wcslen: 硬编码 4 = 中文恰巧, 译文被截断 */
+          s_set.rt->DrawText(t, (UINT32)wcslen(t), s_set.tfName,
+            XjsRectF(cx + SS(24), cy - SS(2), dr.right - padH, cy + SS(22)), s_set.brText); }
     }
     cy += SS(22) + SS(8);
     /* 说明文字 */
@@ -1187,8 +1215,9 @@ static void XjsSetDrawRebuildDialog(float w, float vh) {
         s_set.rt->FillRoundedRectangle(XjsRoundedRectF(dp, SS(9), SS(9)), s_set.brPanel2);
         s_set.rt->DrawRoundedRectangle(XjsRoundedRectF(dp, SS(9), SS(9)), s_set.brBorder, 1.0f);
         float dy = dp.top + SS(12);
-        s_set.rt->DrawText(XjsT(L"重建.选择驱动器"), 5, s_set.tfName,
-            XjsRectF(dp.left + SS(12), dy, dp.right - SS(12), dy + SS(18)), s_set.brText);
+        { const wchar_t* t = XjsT(L"重建.选择驱动器");
+          s_set.rt->DrawText(t, (UINT32)wcslen(t), s_set.tfName,
+            XjsRectF(dp.left + SS(12), dy, dp.right - SS(12), dy + SS(18)), s_set.brText); }
         dy += SS(18) + SS(4);
         s_set.rt->DrawText(XjsT(L"重建.仅NTFS"), (UINT32)wcslen(XjsT(L"重建.仅NTFS")),
             s_set.tfDesc, XjsRectF(dp.left + SS(12), dy, dp.right - SS(12), dy + SS(16)), s_set.brDim);
@@ -1224,7 +1253,7 @@ static void XjsSetDrawRebuildDialog(float w, float vh) {
         {
             const wchar_t* t = XjsT(L"通用词.取消");
             float tw = XjsMeasureText(t, s_set.tfBtn);
-            s_set.rt->DrawText(t, 2, s_set.tfBtn,
+            s_set.rt->DrawText(t, (UINT32)wcslen(t), s_set.tfBtn,
                 XjsRectF(cnR.left + (cancelW - tw) / 2, cnR.top, cnR.left + (cancelW + tw) / 2, cnR.bottom),
                 s_set.brText);
         }
@@ -1233,7 +1262,7 @@ static void XjsSetDrawRebuildDialog(float w, float vh) {
         {
             const wchar_t* t = XjsT(L"重建.开始重建");
             float tw = XjsMeasureText(t, s_set.tfBtn);
-            s_set.rt->DrawText(t, 4, s_set.tfBtn,
+            s_set.rt->DrawText(t, (UINT32)wcslen(t), s_set.tfBtn,
                 XjsRectF(okR.left + (okW - tw) / 2, okR.top, okR.left + (okW + tw) / 2, okR.bottom),
                 s_set.brWhite);
         }
@@ -1879,11 +1908,14 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
 
 static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     XjsSettingsState* p = &s_set;
+    /* 整个 WndProc 统一钉在 owner 上下文 (与 WM_PAINT 同口径): 各搜索窗的 100ms 同步定时器
+       会不停把 Cur 重绑到别的窗, 不钉则命中/滚动的 SS() (→Cur()->uiZoom) 与绘制侧 (owner)
+       两套尺度 — 画好的开关点不中; owner 悬垂回落主窗也顺带消除了裸 SS() 的空指针窗口 */
+    XjsWindowScope scope(XjsSetOwner());
     switch (msg) {
         case WM_PAINT: {
             /* 设置窗是独立 hwnd: 画刷/行模型取色跟随 owner 窗口皮肤 (多窗皮肤各异, g_skin 是竞态镜像)。
-               作用域只换上下文, g_skin 须显式认回 (EnsureBrushes 按它取色); 已同步时 SyncSkin 零开销 */
-            XjsWindowScope scope(XjsSetOwner());
+               作用域已在入口统一钉住, 这里只须显式认回皮肤 (EnsureBrushes 按它取色); 已同步时零开销 */
             if (s_setOwner) s_setOwner->SyncSkin();
             PAINTSTRUCT ps;
             BeginPaint(hwnd, &ps);
@@ -2338,11 +2370,14 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
-                /* 纯修饰键: 等待组合中的普通键, 实时回显已按住的组合 (抬起也随之刷新) */
+                /* 纯修饰键: 等待组合中的普通键, 实时回显已按住的组合 (抬起也随之刷新)。
+                   必须 rowsDirty 强制重建行模型 — XjsSetBuildRows 在 !rowsDirty 时早退,
+                   只 InvalidateRect 画不出新的组合文字 (实时回显曾整体失效) */
                 if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
                     vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
                     vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
                     vk == VK_LWIN || vk == VK_RWIN) {
+                    p->rowsDirty = true;
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
@@ -2405,7 +2440,8 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         }
         case WM_KEYUP:
         case WM_SYSKEYUP:
-            if (p->recHotkey) {   /* 修饰键抬起: 刷新实时组合回显 */
+            if (p->recHotkey) {   /* 修饰键抬起: 刷新实时组合回显 (须重建行模型, 同按下分支) */
+                p->rowsDirty = true;
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }

@@ -415,10 +415,12 @@ static void GdiDrawEffects(HDC dc, GdiLayout* L, const XjsRect& r) {
     auto lines = GdiWrapLines(dc, f, L->text, r.right - r.left);
     /* 与 GdiDrawMultiLine 同一 UNIFORM 基线平移 (效果范围叠画必须落回基线, 否则相对正文漂移) */
     float yOff = 0;
-    if (f->spacingMethod == 1) {
+    float ascPx = 0;
+    {
         TEXTMETRICW tm = {};
         GetTextMetricsW(dc, &tm);
-        yOff = f->baseline - (float)tm.tmAscent;
+        if (f->spacingMethod == 1) yOff = f->baseline - (float)tm.tmAscent;
+        ascPx = (float)tm.tmAscent;   /* 下划线 y = 文本顶 + ascent (+1px) — 曾误用段宽 p2 当纵向偏移 */
     }
     std::vector<UINT32> starts;
     UINT32 off = 0;
@@ -446,8 +448,9 @@ static void GdiDrawEffects(HDC dc, GdiLayout* L, const XjsRect& r) {
                 if (under) {
                     HPEN pen = CreatePen(PS_SOLID, 1, clr);
                     HPEN op = (HPEN)SelectObject(dc, pen);
-                    MoveToEx(dc, (int)floorf(x0), (int)floorf(y + yOff + p2), NULL);
-                    LineTo(dc, (int)floorf(x0 + p2), (int)floorf(y + yOff + p2));
+                    int uy = (int)floorf(y + yOff + ascPx + 1.0f);
+                    MoveToEx(dc, (int)floorf(x0), uy, NULL);
+                    LineTo(dc, (int)floorf(x0 + p2), uy);
                     SelectObject(dc, op);
                     DeleteObject(pen);
                 }

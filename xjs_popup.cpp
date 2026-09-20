@@ -58,6 +58,9 @@ static void XjsPopupFreeResources(XjsPopupState* p) {
     p->brBg = NULL; p->brBorder = NULL; p->brHover = NULL;
     p->brText = NULL; p->brDim = NULL; p->brAccent = NULL;
     p->brIcon = NULL; p->brDanger = NULL; p->brWhite = NULL;
+    /* tfTitle 带字符级省略号 (SetCharEllipsis): 释放前先从签名缓存摘除本格式条目,
+       否则缓存键悬垂 (地址复用画错省略号) */
+    XjsEllSignCacheDropFormat(p->tfTitle);
     if (p->tfTitle) { p->tfTitle->Release(); p->tfTitle = NULL; }
     if (p->tfSub) { p->tfSub->Release(); p->tfSub = NULL; }
     if (p->tfKb) { p->tfKb->Release(); p->tfKb = NULL; }
@@ -298,13 +301,24 @@ static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
     }
 }
 
+/* 撤钟罩/关闭浮层后重绘被盖住的 owner 窗: 目标 = owner (浮层可由任意搜索窗发起, 关闭时
+   Cur 往往是别的窗 — 用 Cur 曾把重绘刷错窗, owner 停留在虚化+暗罩残影)。
+   owner = 搜索窗 → 实例 Invalidate (统一入口); 其它 (设置窗等) → 直接失效 */
+static void XjsInvalidateOverlayOwner(HWND owner) {
+    XjsSearchWindow* w = XjsSearchWindow::OfHwnd(owner);
+    if (w) w->Invalidate();
+    else if (owner && IsWindow(owner)) InvalidateRect(owner, NULL, FALSE);
+}
+
 static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     XjsPopupState* p = &s_popup;
+    /* 整个 WndProc 统一钉在 owner 上下文: 弹窗是独立 hwnd 不过 Enter 绑定, Cur() = 最后处理消息的
+       窗口 (其它搜索窗的定时器消息随时重绑) — 只绑 WM_PAINT 时, 鼠标/键盘分支的 XSF 几何
+       (✎/✕ 命中框、子面板行高) 与绘制侧两套尺度, 多窗不同 DPI/缩放时命中错位 */
+    XjsWindowScope scope(XjsSearchWindow::Alive(p->ownerCtx) ? p->ownerCtx : XjsSearchWindow::Cur());
     switch (msg) {
         case WM_PAINT: {
-            /* 弹窗是独立 hwnd 不过 Enter 绑定: Cur() = 最后处理消息的窗口 (多窗皮肤各异时取色必错)。
-               作用域绑 owner 修 XSF 尺度 (dpiS 每窗); 颜色一律读打开时刻的 skin 快照 */
-            XjsWindowScope scope(XjsSearchWindow::Alive(p->ownerCtx) ? p->ownerCtx : XjsSearchWindow::Cur());
+            /* 弹窗是独立 hwnd: 作用域已在入口钉住 owner (XSF 尺度); 颜色一律读打开时刻的 skin 快照 */
             if (!p->rt) {
                 RECT rc; GetClientRect(hwnd, &rc);
                 g_gfx->CreateWindowRt(hwnd, ximax(rc.right, 1), ximax(rc.bottom, 1), &p->rt);
@@ -432,7 +446,7 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                         const wchar_t* ct = XjsT(L"模式对话框.确定删除");
                         float tw = XjsMeasureText(ct, p->tfKb);
                         float pcx = (pill.left + pill.right) / 2;
-                        p->rt->DrawText(ct, 4, p->tfKb, XjsRectF(pcx - tw / 2, pr.top, pcx + tw / 2, pr.bottom), p->brWhite);
+                        p->rt->DrawText(ct, (UINT32)wcslen(ct), p->tfKb, XjsRectF(pcx - tw / 2, pr.top, pcx + tw / 2, pr.bottom), p->brWhite);
                     } else if (it.delBtn) {   /* ✕ 常态: 行悬停染红提示可删 (源样式 .mode-del: 对角 12 单位×0.5) */
                         float u = XSF(3.0f);
                         XjsBrush* db = hovered ? (XjsBrush*)p->brDanger : (XjsBrush*)p->brDim;
@@ -626,7 +640,7 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             /* 菜单销毁把激活态还给 owner (原生菜单口径): 菜单弹出曾抢走前台, owner 若靠
                WM_ACTIVATE(WA_INACTIVE) 做"失活即取消"(别名框)会跟着关掉/收不回焦点 */
             if (p->owner && IsWindow(p->owner)) SetForegroundWindow(p->owner);
-            XjsSearchWindow::Cur()->Invalidate();
+            XjsInvalidateOverlayOwner(p->owner);
             return 0;
         }
     }
@@ -1842,7 +1856,7 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
             s.pressBtn = 0;
             s.hwnd = NULL;
-            XjsSearchWindow::Cur()->Invalidate();
+            XjsInvalidateOverlayOwner(s.owner);
             return 0;
         }
     }
@@ -2086,7 +2100,7 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
             if (s.tfBtn) { s.tfBtn->Release(); s.tfBtn = NULL; }
             s.hwnd = NULL;
-            XjsSearchWindow::Cur()->Invalidate();   /* owner (主窗) 撤钟罩重绘 */
+            XjsInvalidateOverlayOwner(s.owner);   /* owner 撤钟罩重绘 (曾用 Cur, 多窗下刷错窗) */
             return 0;
         }
     }

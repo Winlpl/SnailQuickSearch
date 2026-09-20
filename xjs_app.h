@@ -99,8 +99,10 @@
  * 解卡后洪泛重绘。post 前查未处理计数: 达上限 = 静默丢弃 (回调内堆分配就地释放),
  * 消息处理分支末尾递减。上限只此一处定义, 调用点禁止写死数字。 */
 constexpr long XJS_POST_QUEUE_LIMIT = 20000;
+class XjsSearchWindow;   /* 前置声明: 本节声明在类定义之前 */
 bool XjsPostToUi(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);   /* 计数入队 post; 队满=返回 false (未投递) */
 void XjsPostToUiDone();                                        /* 引擎消息处理完毕递减 (每条恰好一次) */
+void XjsPostToUiDropWindow(XjsSearchWindow* w);                /* 窗口销毁: 返还该窗已投未处理消息的闸门计数 */
 
 /* 崩溃取证阶段标记 (定义在 main.cpp; VEH 落盘 startup_stack.txt 首行 phase=)。
    插件扫描/加载/回调入口也标阶段 (plugin-scan / plugin-load:<id> / plugin-call:<id>) */
@@ -996,6 +998,8 @@ public:
     std::atomic<int> searchFingerprint{-1};
     std::atomic<bool> searching{false};     /* 搜索防抖: 提交→完成间冻结列表快照 */
     std::atomic<bool> fileChangePending{false};  /* 文件变化待刷新 (源样式 m_文件变化待刷新, 绑窗成员): 结果变化回调置位, ID_TIMER_SYNCWATCH 时钟节流消费重绘 */
+    std::atomic<int> uiPostPending{0};      /* 已投给本窗、未处理的引擎消息数 (闸门每窗账): DestroyWindow 会整批清除队列里
+                                               本窗的未处理消息, 全局闸门计数按此账返还 (XjsPostToUiFor/DropWindow) */
     std::vector<int> debounceIds;
     int debounceFirst = 0;
     int debounceCount = 0;
@@ -1444,6 +1448,7 @@ void XjsDeviceResize(int w, int h);              /* 窗口尺寸变化: HwndRT R
 void XjsDeviceDiscardCtx(XjsSearchWindow& w);   /* 显式上下文: 撕毁期 Cur() 可能被嵌套消息重绑 */
 void XjsDeviceDiscard();                        /* Cur() 便捷版 (撕毁路径一律用 Ctx 显式传参) */
 void XjsReleaseTextFormats();
+void XjsEllSignCacheDropFormat(XjsFormat* fmt);   /* 格式被单独释放 (弹窗旁路) 前从省略号签名缓存摘除 */
 void XjsRecreateTextFormats();   /* 页面缩放变化后按新倍率重建文本格式 */
 void XjsSyncTextFormats();       /* 窗口上下文切换后调用: 当前窗 DPI/缩放与格式构建时失配 → 重建 */
 XjsBitmap* XjsDecodeImage(const void* data, int len);

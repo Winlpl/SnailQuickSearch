@@ -503,6 +503,16 @@ static IDWriteInlineObject* XjsEllipsisSign(XjsFormat* fmt) {
     return sign;
 }
 
+/* 从签名缓存摘除指定格式的条目: 格式不经 XjsReleaseTextFormats 而被单独释放前必须调用 —
+   弹窗 tfTitle 旁路统一释放, 不摘则键悬垂 (地址被新格式复用会命中旧签名画错省略号) */
+void XjsEllSignCacheDropFormat(XjsFormat* fmt) {
+    auto it = g_ellSignCache.find(fmt);
+    if (it != g_ellSignCache.end()) {
+        if (it->second) it->second->Release();
+        g_ellSignCache.erase(it);
+    }
+}
+
 /* 彩色字体绘制 (emoji 走 Segoe UI Emoji 的 COLR 字形): g_dc 可用时带 ENABLE_COLOR_FONT,
    否则退 g_rt 单色轮廓。文件名/搜索框等含 emoji 的内容一律走这两个入口 */
 void XjsDrawTextC(const wchar_t* s, UINT32 len, XjsFormat* fmt,

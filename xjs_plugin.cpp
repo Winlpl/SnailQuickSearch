@@ -20,6 +20,7 @@
 #include "xjs_plugin_sdk.h"
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <cwctype>
 #include <algorithm>
 #include <thread>
 
@@ -626,13 +627,24 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
     si.hStdOutput = outW; si.hStdError = errW;
     PROCESS_INFORMATION pi = {};
     std::vector<wchar_t> clBuf(cl.begin(), cl.end()); clBuf.push_back(L'\0');
-    BOOL ok = CreateProcessW(NULL, clBuf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
+    /* 作业对象收口整棵进程树: 孙进程继承管道写端时不杀它, 读线程 ReadFile 永不 EOF,
+       t1.join() 永久挂死 (插件在 UI 线程同步调用 = 全程序冻结) */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl = {};
+        jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
+    }
+    BOOL ok = CreateProcessW(NULL, clBuf.data(), NULL, NULL, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL,
                              cw.empty() ? NULL : cw.c_str(), &si, &pi);
     CloseHandle(outW); CloseHandle(errW);   /* 父端写端先关, 读端才能 EOF */
     if (!ok) {
         CloseHandle(outR); CloseHandle(errR);
+        if (job) CloseHandle(job);
         return XJS_PLUGIN_ERR_NOTFOUND;
     }
+    if (job) AssignProcessToJobObject(job, pi.hProcess);   /* 先入作业再放行 (挂起态防逃逸) */
+    ResumeThread(pi.hThread);
     const int XJS_EXEC_CAP = 4 * 1024 * 1024;
     auto reader = [&](HANDLE rd, std::string* s) {
         char ch[8192]; DWORD n = 0;
@@ -644,13 +656,18 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
     bool timedOut = false;
     if (WaitForSingleObject(pi.hProcess, timeoutMs > 0 ? (DWORD)timeoutMs : INFINITE) == WAIT_TIMEOUT) {
         timedOut = true;
-        TerminateProcess(pi.hProcess, (UINT)-1);
+        if (job) TerminateJobObject(job, (UINT)-1);   /* 杀整棵树 (孙进程一并), 管道写端随之关闭 */
+        else TerminateProcess(pi.hProcess, (UINT)-1);
         WaitForSingleObject(pi.hProcess, 5000);
     }
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
+    /* 子进程已退出仍可能有孙进程持有管道写端: 不收割则 join 挂死 — 终结作业放行 EOF。
+       TerminateJobObject 对已退出成员无害, exit code 已在上方取出 */
+    if (job) TerminateJobObject(job, (UINT)code);
     t1.join(); t2.join();
     CloseHandle(outR); CloseHandle(errR); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job);
     bool trunc = so.size() >= (size_t)XJS_EXEC_CAP || se.size() >= (size_t)XJS_EXEC_CAP;
     std::string j = "{\"exitCode\":";
     j += std::to_string((long long)(int)code);
@@ -684,11 +701,13 @@ static int FnClipSet(XjsPluginCtx* ctx, const char* utf8) {
     size_t bytes = (w.size() + 1) * sizeof(wchar_t);
     HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!g) return XJS_PLUGIN_ERR_FAIL;
-    memcpy(GlobalLock(g), w.c_str(), bytes);
+    void* lk = GlobalLock(g);   /* 极端内存压力下可为 NULL, 直写 NULL = 崩溃 */
+    if (!lk) { GlobalFree(g); return XJS_PLUGIN_ERR_FAIL; }
+    memcpy(lk, w.c_str(), bytes);
     GlobalUnlock(g);
     if (!OpenClipboard(NULL)) { GlobalFree(g); return XJS_PLUGIN_ERR_STATE; }
     EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, g);   /* 成功后剪贴板接管 g */
+    if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);   /* 成功后剪贴板接管 g; 失败句柄仍归我, 不放 = 泄漏 */
     CloseClipboard();
     return XJS_PLUGIN_OK;
 }
@@ -880,7 +899,11 @@ static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
 static int FnPrevBitmap(XjsPluginCtx* ctx, int requestId, int w, int h, const void* bgra, int stride) {
     XjsPluginEntry* p; int e;
     if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
-    if (!bgra || w <= 0 || h <= 0 || stride < w * 4) return XJS_PLUGIN_ERR_ARG;
+    /* 外部输入硬上限: 先限 w/h 再算 stride (先判 stride < w*4 时 w 大会符号溢出),
+       总字节数再封顶 — 曾只挡下限, stride=h=大开可击出数百 GB 分配直接压垮宿主 */
+    if (!bgra || w <= 0 || h <= 0 || w > 32768 || h > 32768) return XJS_PLUGIN_ERR_ARG;
+    if (stride < w * 4) return XJS_PLUGIN_ERR_ARG;
+    if ((long long)stride * (long long)h > 256LL * 1024 * 1024) return XJS_PLUGIN_ERR_ARG;
     return XjsPreviewPluginDeliverBitmap(requestId, w, h, bgra, stride) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 static int FnPrevText(XjsPluginCtx* ctx, int requestId, const char* utf8) {
@@ -1205,7 +1228,7 @@ void XjsPluginStatusBarCommand(int i, unsigned long long window) {
         XjsPluginEntry& e = s_plugins[pi];
         if (!PluginActive(e) || !(e.mf.caps & XPC_STATUSBAR)) continue;
         if (i >= (int)e.mf.statusBar.size()) { i -= (int)e.mf.statusBar.size(); continue; }
-        if (!e.fnOnCommand) return;
+        if (!e.fnOnCommand) continue;   /* 声明了 statusBar 但无 OnCommand 导出: 跳过该插件继续找 (return 会吞掉后续插件的项) */
         std::string cmd = Utf16ToUtf8(e.mf.statusBar[i].cmd.c_str());
         e.fnOnCommand(e.ctx, cmd.c_str(), window, NULL, 0, XJS_PLUGIN_CTX_NONE);
         return;
@@ -1248,8 +1271,27 @@ void XjsPluginOnSyncAfter() {
    自取 (v3 口径); manifest 扩展名过滤仍由宿主用名称完成 (不命中不回调) */
 bool XjsPluginPreviewTake(int fileId, int requestId, unsigned long long window) {
     if (s_plugins.empty() || !PluginUiThread()) return false;
+    /* 清单 "预览.扩展名" 过滤 (宿主侧执行, 不命中不回调 — 见开发指南"接管的扩展名"):
+       按文件名扩展名 (小写无点, 与收录口径一致) 比对; 空表 = 未声明, 保持原行为全回调 */
+    std::wstring ext;
+    {
+        const char* nm = g_engine ? xjs_db_GetName(g_engine, fileId) : NULL;
+        if (nm && *nm) {
+            std::wstring name = Utf8ToUtf16(nm);
+            size_t dot = name.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot + 1 < name.size())
+                ext = name.substr(dot + 1);
+            for (auto& c : ext) c = towlower(c);
+        }
+    }
     for (auto& e : s_plugins) {
         if (!PluginActive(e) || !(e.mf.caps & XPC_PREVIEW) || !e.fnOnPreview) continue;
+        if (!e.mf.previewExts.empty()) {
+            if (ext.empty()) continue;   /* 声明了扩展名表而目标无扩展名 (目录/无后缀) = 不命中 */
+            bool hit = false;
+            for (auto& x : e.mf.previewExts) if (x == ext) { hit = true; break; }
+            if (!hit) continue;
+        }
         if (e.fnOnPreview(e.ctx, requestId, window, fileId) == 1) return true;   /* 已接管, 异步交付 */
     }
     return false;

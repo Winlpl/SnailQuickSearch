@@ -171,6 +171,9 @@ void XjsPreviewUpdateSelection() {
         s_pvMarqueeLastLoad = now;
     }
     XjsPluginOnSelectionChanged();   /* 插件 events 订阅: 预览刷新 = 选中变化的统一汇点 */
+    /* 锁定 (面板头部图钉): 面板钉住当前文件, 选中变化不再跟随 — 只保留上方插件事件派发。
+       无内容时 (fileId<0) 不算"钉住", 放行走正常装载, 装到内容后锁定才生效 */
+    if (g_previewLocked && g_previewFileId >= 0) return;
     int idx = XjsSelPrimaryIdx();
     int fileId = -1;
     if (idx >= 0 && g_result) fileId = xjs_result_GetFileId(g_result, idx);
@@ -316,6 +319,10 @@ void XjsPreviewRender() {
     g_rt->FillRectangle(body, g_br[XTH_PANEL]);
     g_rt->FillRectangle(XjsRectF(body.left, body.top, body.left + 1, body.bottom), g_br[XTH_BORDER]);
     s_hits.valid = true;
+    /* 命中表 = 本帧真实画出的按钮: 分支按钮先全部清零, 由下面各分支画到才回写 —
+       否则上一帧 (驱动器卡/文件卡) 的按钮矩形残留仍可命中, 点出错误命令 */
+    s_hits.copySerial = s_hits.bigDirs = s_hits.bigFiles = {};
+    s_hits.locate = s_hits.open = {};
     float px = body.left + XSF(14);
     float pw = body.right - px;
 
@@ -600,10 +607,10 @@ static void XjsPreviewRunCmd(int cmd) {
         g_previewLocked = !g_previewLocked;
     } else if (cmd == 4) {
         wchar_t sb[32];
-        /* 序列号从行数据再取一次 */
+        /* 序列号从行数据再取一次 (仅驱动器行有意义; 双保险 — 命中表已按帧清零) */
         int idx = XjsSelPrimaryIdx();
-        XjsRowData* rd = idx >= 0 ? XjsEnsureRowData(idx) : NULL;
-        if (rd) {
+        XjsRowData* rd = (idx >= 0 && idx < g_resultCount) ? XjsEnsureRowData(idx) : NULL;
+        if (rd && rd->isDrive) {
             _snwprintf(sb, 32, L"%04X-%04X", HIWORD(rd->driveSerial), LOWORD(rd->driveSerial));
             XjsCopyClipboard(sb);
         }

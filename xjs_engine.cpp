@@ -9,19 +9,29 @@
 
 /* ==================== SDK 回调 (SDK 线程 → PostMessage → UI 线程) ==================== */
 
+/* 记账版 post: w = 消息归属窗 (引擎线程已持有指针, 禁止在此查实例表 — 见 OfResult 注释)。
+   DestroyWindow 会把队列里本窗的未处理消息整批清除, 处理分支的 XjsPostToUiDone 轮不到它们
+   → 全局闸门计数按每窗账在窗口销毁时返还 (XjsPostToUiDropWindow), 否则配额慢性泄漏 */
+static bool XjsPostToUiFor(XjsSearchWindow* w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (!w || !w->hWnd) return false;
+    if (!XjsPostToUi(w->hWnd, msg, wp, lp)) return false;
+    w->uiPostPending.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 INT XJS_CALLBACK Xjs_EnumProgress(void* userData, xjs_engine* engine, const char* driveLetter, int totalCount, int enumeratedCount) {
-    if (XjsSearchWindow::MainHwnd()) {
+    {
         XjsScanProgressData* d = new XjsScanProgressData();
         d->drive = driveLetter ? (wchar_t)driveLetter[0] : L'?';
         d->enumerated = enumeratedCount;
         d->total = totalCount;
-        if (!XjsPostToUi(XjsSearchWindow::MainHwnd(), WM_SCAN_PROGRESS, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
+        if (!XjsPostToUiFor(XjsSearchWindow::Main(), WM_SCAN_PROGRESS, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
     }
     return 0;
 }
 
 void XJS_CALLBACK Xjs_LoadComplete(void* userData, xjs_engine* engine, int fileCount) {
-    if (XjsSearchWindow::MainHwnd()) XjsPostToUi(XjsSearchWindow::MainHwnd(), WM_LOAD_COMPLETE, (WPARAM)fileCount, 0);
+    XjsPostToUiFor(XjsSearchWindow::Main(), WM_LOAD_COMPLETE, (WPARAM)fileCount, 0);
 }
 
 /* 文件同步变化回调 (同步_文件创建/修改/移动/删除, SDK 线程, 引擎写锁内): 源样式 引擎_文件同步变化
@@ -44,21 +54,21 @@ INT XJS_CALLBACK Xjs_SyncFileMoved(void* userData, xjs_engine* engine, const cha
 }
 
 void XJS_CALLBACK Xjs_EnumPartition(void* userData, xjs_engine* engine, const char* driveLetter) {
-    if (XjsSearchWindow::MainHwnd()) {
+    {
         wchar_t* d = new wchar_t[2];
         d[0] = driveLetter ? (wchar_t)driveLetter[0] : L'?';
         d[1] = 0;
-        if (!XjsPostToUi(XjsSearchWindow::MainHwnd(), WM_SCAN_DRIVE, (WPARAM)d, 0)) delete[] d;   /* 队满: 静默丢弃 */
+        if (!XjsPostToUiFor(XjsSearchWindow::Main(), WM_SCAN_DRIVE, (WPARAM)d, 0)) delete[] d;   /* 队满: 静默丢弃 */
     }
 }
 
 void XJS_CALLBACK Xjs_EnumComplete(void* userData, xjs_engine* engine, int elapsedMs) {
     g_isScanning = false;
-    if (XjsSearchWindow::MainHwnd()) {
+    {
         XjsScanCompleteData* d = new XjsScanCompleteData();
         d->fileCount = xjs_db_GetFileCount(engine);
         d->elapsedMs = elapsedMs;
-        if (!XjsPostToUi(XjsSearchWindow::MainHwnd(), WM_SCAN_COMPLETE, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
+        if (!XjsPostToUiFor(XjsSearchWindow::Main(), WM_SCAN_COMPLETE, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
     }
 }
 
@@ -68,7 +78,7 @@ static int XJS_CALLBACK Xjs_SearchComplete(void* userData, xjs_engine* engine, x
     if (w && w->hWnd && !discarded) {
         XjsSearchCompleteData* d = new XjsSearchCompleteData();
         d->resultCount = xjs_result_GetCount(result);
-        if (!XjsPostToUi(w->hWnd, WM_SEARCH_COMPLETE, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
+        if (!XjsPostToUiFor(w, WM_SEARCH_COMPLETE, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
     }
     return 0;
 }
@@ -86,7 +96,7 @@ static int XJS_CALLBACK Xjs_SearchFailed(void* userData, xjs_engine* engine, xjs
     XjsSearchWindow* w = XjsSearchWindow::OfResult(result);
     if (w && w->hWnd && errorJson) {
         std::string* err = new std::string(errorJson);
-        if (!XjsPostToUi(w->hWnd, WM_SEARCH_FAILED, (WPARAM)err, (LPARAM)searchFingerprint)) delete err;   /* 队满: 静默丢弃 */
+        if (!XjsPostToUiFor(w, WM_SEARCH_FAILED, (WPARAM)err, (LPARAM)searchFingerprint)) delete err;   /* 队满: 静默丢弃 */
     }
     return 0;
 }
@@ -115,7 +125,7 @@ static int XJS_CALLBACK Xjs_IconAsk(void* userData, xjs_engine* engine, xjs_resu
    下一帧渲染经 GetFileIco 同步取得就绪图标。图标缓存进程共享 → 发主窗, 处理时广播各窗 */
 static void XJS_CALLBACK Xjs_DrawIcon(void* userData, xjs_engine* engine, xjs_result* result, int searchFingerprint, int id, int itemIndex, const void* iconData, int iconLength, const char* callbackInfo) {
     (void)userData; (void)engine; (void)result; (void)searchFingerprint; (void)id; (void)itemIndex; (void)iconData; (void)iconLength; (void)callbackInfo;
-    if (XjsSearchWindow::MainHwnd()) XjsPostToUi(XjsSearchWindow::MainHwnd(), WM_ICON_READY, 0, 0);   /* 队满: 静默丢弃 (本回调无堆分配) */
+    XjsPostToUiFor(XjsSearchWindow::Main(), WM_ICON_READY, 0, 0);   /* 队满/主窗未建: 静默丢弃 (本回调无堆分配) */
 }
 
 /* ==================== 结果对象 / 搜索 ==================== */
@@ -734,8 +744,10 @@ static void XjsPmStrArr(const picojson::value& v, std::vector<std::wstring>* out
     for (auto& e : v.get<picojson::array>()) {
         if (!e.is<std::string>()) continue;
         std::wstring s = Utf8ToUtf16(e.get<std::string>().c_str());
-        if (lowerExt) {   /* 扩展名表: 小写、去前导点 ("*.jpg" 这类带星写法不带星收录, 匹配侧不管星) */
+        if (lowerExt) {   /* 扩展名表: 小写、去前导点与通配星 ("*.jpg"/".jpg"/"jpg" 三种写法统一收录为 "jpg",
+                             匹配侧做严格相等 — 曾只剥点不剥星, 带星写法被原样收录后永不匹配且无诊断) */
             for (auto& c : s) c = towlower(c);
+            if (!s.empty() && s[0] == L'*') s.erase(0, 1);
             if (!s.empty() && s[0] == L'.') s.erase(0, 1);
         }
         if (!s.empty()) out->push_back(s);
@@ -915,11 +927,20 @@ void XjsConfig::Load() {
 void XjsConfig::WriteBack() {
     std::string utf8 = picojson::value(m_obj).serialize(true);   /* true = 格式化 (缩进) 输出 */
     std::wstring p = XjsGetExeDir() + L"\\xjs_config.json";
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* 原子落盘 (同索引库 XjsEngineShutdown 口径): CREATE_ALWAYS 直写会在 CreateFile 成功瞬间
+       截断旧文件, 写一半崩溃/断电 = 全部配置丢失且被启动期的默认骨架覆盖 —
+       先写 .tmp, 成功后原子改名顶上; 中途崩溃最多残留 .tmp (启动加载前不清理配置 tmp,
+       下次 WriteBack 的 CREATE_ALWAYS 会复用它), 旧配置始终完整 */
+    std::wstring tmp = p + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD wr = 0;
-    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &wr, NULL);
+    bool ok = (DWORD)utf8.size() == 0 ||
+              (WriteFile(h, utf8.data(), (DWORD)utf8.size(), &wr, NULL) && wr == (DWORD)utf8.size());
     CloseHandle(h);
+    if (!ok) { DeleteFileW(tmp.c_str()); return; }   /* 半成品丢弃, 旧配置保持不动 */
+    if (!MoveFileExW(tmp.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING))
+        DeleteFileW(tmp.c_str());   /* 替换失败删临时文件 (旧配置保持上一次的完整版) */
 }
 
 picojson::object& XjsConfig::Obj(const char* key) {

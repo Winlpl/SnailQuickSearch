@@ -868,6 +868,9 @@ void XjsListRender() {
     int first = XjsRowAtY(g_scrollTop);
     int last = XjsRowAtY(g_scrollTop + XjsListViewHeight());
     if (last < 0) last = XjsPaintCount() - 1;
+    /* scrollTop 越界 (缩放下调/跨屏 DPI 降低改行高后未钳制的偏移) 时 XjsRowAtY 返回 -1:
+       不钳则循环从 -1 跑到 count-1, 负下标先传进引擎, 且视口外每行照常取数 = 大结果集整帧卡死 */
+    if (first < 0) first = 0;
     /* 可见区间回写: ICON_ASK 闸门据此放行"正在显示的表项" (图标线程只读) */
     g_visFirst = first;
     g_visLast = last;

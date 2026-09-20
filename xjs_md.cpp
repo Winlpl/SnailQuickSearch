@@ -82,17 +82,26 @@ using MdCell = XjsMdDoc::MdCell;
 using MdBlock = XjsMdDoc::MdBlock;
 
 struct MdParseCtx {
+    /* 行内文本落点栈: 存下标而非 &runs — blocks/rows 扩容搬移会让元素指针悬垂,
+       之后再写入 = 堆损坏 (tight 列表项内嵌代码块再跟直属文本即可构造, 曾潜伏) */
+    struct MdSink { int block = -1; int cellRow = -1, cellCol = -1; };   /* cell<0 = 块顶层 runs */
     std::vector<MdBlock>* blocks = NULL;
-    std::vector<std::vector<MdRun>*> sinks;   /* 行内文本落点栈 (块内容 / 表格单元格) */
+    std::vector<MdSink> sinks;
     std::vector<int> listNext;                /* 每层列表: -1 = 无序, 否则 = 下一序号 */
     int strong = 0, em = 0, codeSpan = 0, link = 0;   /* 行内样式嵌套深度 */
     bool inCodeBlock = false;
+
+    std::vector<MdRun>* SinkRuns() {
+        const MdSink& sk = sinks.back();
+        MdBlock& b = (*blocks)[sk.block];
+        return (sk.cellRow < 0) ? &b.runs : &b.rows[sk.cellRow][sk.cellCol].runs;
+    }
 
     void AppendText(const std::wstring& t) {
         if (t.empty()) return;
         if (inCodeBlock) { blocks->back().codeRaw += t; return; }
         if (sinks.empty()) return;
-        auto& runs = *sinks.back();
+        auto& runs = *SinkRuns();
         MdRun nr;
         nr.strong = strong > 0; nr.em = em > 0; nr.code = codeSpan > 0; nr.link = link > 0;
         if (!runs.empty() && runs.back().SameStyle(nr)) runs.back().text += t;
@@ -112,7 +121,7 @@ int MdEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
             c->blocks->push_back({});
             c->blocks->back().type = type;
             c->blocks->back().level = (int)((MD_BLOCK_H_DETAIL*)detail)->level;
-            c->sinks.push_back(&c->blocks->back().runs);
+            c->sinks.push_back({ (int)c->blocks->size() - 1, -1, -1 });
             break;
         case MD_BLOCK_LI: {
             c->blocks->push_back({});
@@ -120,13 +129,13 @@ int MdEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
             b.type = type;
             b.depth = c->listNext.empty() ? 0 : (int)c->listNext.size() - 1;
             if (!c->listNext.empty() && c->listNext.back() >= 0) b.ord = c->listNext.back()++;
-            c->sinks.push_back(&b.runs);
+            c->sinks.push_back({ (int)c->blocks->size() - 1, -1, -1 });
             break;
         }
         case MD_BLOCK_P:
             c->blocks->push_back({});
             c->blocks->back().type = type;
-            c->sinks.push_back(&c->blocks->back().runs);
+            c->sinks.push_back({ (int)c->blocks->size() - 1, -1, -1 });
             break;
         case MD_BLOCK_UL: c->listNext.push_back(-1); break;
         case MD_BLOCK_OL: c->listNext.push_back((int)((MD_BLOCK_OL_DETAIL*)detail)->start); break;
@@ -139,9 +148,10 @@ int MdEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
         }
         case MD_BLOCK_TR: c->blocks->back().rows.emplace_back(); break;
         case MD_BLOCK_TH: case MD_BLOCK_TD: {
-            auto& row = c->blocks->back().rows.back();
-            row.push_back({});
-            c->sinks.push_back(&row.back().runs);
+            MdBlock& b = c->blocks->back();
+            b.rows.back().push_back({});
+            c->sinks.push_back({ (int)c->blocks->size() - 1,
+                                 (int)b.rows.size() - 1, (int)b.rows.back().size() - 1 });
             break;
         }
         case MD_BLOCK_CODE: c->blocks->push_back({}); c->blocks->back().type = type; c->inCodeBlock = true; break;
@@ -550,7 +560,9 @@ void XjsMdPaint(XjsMdDoc* d, XjsRt* rt, float x, float yTop, float unit, float c
                         XjsRectF(x + it.xOff - 7 * unit - bw, iy, x + it.xOff - 7 * unit, iy + it.h),
                         d->brAccent);
                 }
-                rt->DrawTextLayout(XjsPoint2F(ix, iy), it.lay, d->brText, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                /* MdMakeInline 失败时 lay=NULL: 传 NULL 布局进 DWrite = 崩溃 (case 2/3 均有守卫) */
+                if (it.lay)
+                    rt->DrawTextLayout(XjsPoint2F(ix, iy), it.lay, d->brText, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 break;
             }
             case 1: {   /* 分隔线 */

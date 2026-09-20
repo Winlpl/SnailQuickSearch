@@ -1107,6 +1107,16 @@ void XjsShowAppMenu() {
             c.id = IDM_MENU_BASE + 80 + k;
             c.title = w ? w->name : (prof->name.empty() ? XjsT(L"菜单.未命名窗口") : prof->name);
             c.checked = (w != NULL);   /* ✓ = 已打开 (点击激活, 不再新建) */
+            /* sub = 该窗口私有的全局快捷键 (存活窗读窗口字段, 未打开读档案 — 与注册事实源同源);
+               兼为双击 Ctrl 目标时追加 " / 双击Ctrl" (按档案名匹配, 口径同 XjsDoubleCtrlTargetSlot) */
+            UINT hkMod = 0, hkVk = 0;
+            if (w) { hkMod = w->hotkeyMod; hkVk = w->hotkeyVk; }
+            else   { hkMod = prof->hotkeyMod; hkVk = prof->hotkeyVk; }
+            if (hkVk) c.sub = XjsHotkeyText(hkMod, hkVk);
+            if (!g_doubleCtrlTarget.empty() && prof->name == g_doubleCtrlTarget) {
+                if (!c.sub.empty()) c.sub += L" / ";
+                c.sub += XjsT(L"菜单.双击Ctrl");
+            }
             nw.children.push_back(c);
         }
         items.push_back(nw);

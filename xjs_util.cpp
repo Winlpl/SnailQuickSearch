@@ -148,9 +148,14 @@ void XjsCopyClipboard(const std::wstring& text) {
     size_t sz = (text.length() + 1) * sizeof(wchar_t);
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sz);
     if (hMem) {
-        memcpy(GlobalLock(hMem), text.c_str(), sz);
-        GlobalUnlock(hMem);
-        SetClipboardData(CF_UNICODETEXT, hMem);
+        void* lk = GlobalLock(hMem);   /* 极端内存压力下可为 NULL, 直写 NULL = 崩溃 */
+        if (lk) {
+            memcpy(lk, text.c_str(), sz);
+            GlobalUnlock(hMem);
+            if (!SetClipboardData(CF_UNICODETEXT, hMem)) GlobalFree(hMem);   /* 未被接管才释放 */
+        } else {
+            GlobalFree(hMem);
+        }
     }
     CloseClipboard();
     g_clipSeqOurs = GetClipboardSequenceNumber();   /* 剪贴板监听忽略自己 */
@@ -419,6 +424,7 @@ static HGLOBAL XjsBuildHDropGlobal(const std::vector<std::wstring>& paths) {
     HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!hDrop) return NULL;
     DROPFILES* df = (DROPFILES*)GlobalLock(hDrop);
+    if (!df) { GlobalFree(hDrop); return NULL; }
     df->pFiles = sizeof(DROPFILES);
     df->pt.x = df->pt.y = 0;
     df->fNC = FALSE;
@@ -441,9 +447,10 @@ static void XjsSetClipboardFiles(const std::vector<std::wstring>& paths, bool cu
     HGLOBAL hFx = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
     if (hDrop && hFx) {
         DWORD* fx = (DWORD*)GlobalLock(hFx);
+        if (!fx) { GlobalFree(hDrop); GlobalFree(hFx); CloseClipboard(); return; }
         *fx = cut ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
         GlobalUnlock(hFx);
-        SetClipboardData(CF_HDROP, hDrop);
+        if (!SetClipboardData(CF_HDROP, hDrop)) GlobalFree(hDrop);   /* 未被接管才释放 */
         FORMATETC fe = { (CLIPFORMAT)RegisterClipboardFormatW(L"Preferred DropEffect"), NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
         STGMEDIUM sm = {};
         sm.tymed = TYMED_HGLOBAL;

@@ -320,9 +320,16 @@ XjsSearchWindow::~XjsSearchWindow() {
     if (brProgress) { brProgress->Release(); brProgress = NULL; }
     for (auto& kv : iconCache) { if (kv.second) kv.second->Release(); }   /* 位图持 RT 引用, 先于 RT 释放 */
     iconCache.clear();
-    if (rt) { rt->Release(); rt = NULL; }
+    /* rt 与 hwndRt 指向同一 COM 包装 (XjsDeviceCreate 里 g_rt = g_hwndRt, 见 xjs_d2d.cpp 生命周期注释):
+       只能经 hwndRt 释放一次, 先 Release rt 会把对象打回 0、再 Release hwndRt = 释放已释放内存。
+       正常销毁路径 XjsDeviceDiscardCtx 已把两者置空, 此处只兜 hwndRt 一处 */
     if (hwndRt) { hwndRt->Release(); hwndRt = NULL; }
-    if (result) { xjs_result_Destroy(result); result = NULL; }
+    rt = NULL;
+    if (result) {
+        /* 先摘 UserValue: 回调线程经 OfResult 取窗, 销毁竞态窗口内不再拿到本上下文 */
+        xjs_result_SetUserValue(result, NULL);
+        xjs_result_Destroy(result); result = NULL;
+    }
 }
 
 /* 窗口销毁后从注册表摘除并释放上下文 */
@@ -418,7 +425,23 @@ bool XjsPostToUi(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return false;
 }
 
-void XjsPostToUiDone() { s_postPending.fetch_sub(1, std::memory_order_relaxed); }
+void XjsPostToUiDone() {
+    s_postPending.fetch_sub(1, std::memory_order_relaxed);
+    /* 每窗账同步对冲: 处理分支都在目标窗 WndProc 内, Cur 即消息所属窗。
+       CAS 下限 0: 约定被破坏时宁可少冲账也不把窗账减负 (销毁返还按窗账, 负账会多减全局) */
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (w) {
+        int p = w->uiPostPending.load(std::memory_order_relaxed);
+        while (p > 0 && !w->uiPostPending.compare_exchange_weak(p, p - 1, std::memory_order_relaxed)) {}
+    }
+}
+
+/* 窗口销毁: 队列里本窗的未处理消息将被 DestroyWindow 整批清除, 全局闸门计数按窗账返还 */
+void XjsPostToUiDropWindow(XjsSearchWindow* w) {
+    if (!w) return;
+    int p = w->uiPostPending.exchange(0, std::memory_order_relaxed);
+    if (p > 0) s_postPending.fetch_sub((long)p, std::memory_order_relaxed);
+}
 
 const int g_modeToKeyword[4] = { XJS_KEYWORD_WILDCARD, XJS_KEYWORD_REGEX, XJS_KEYWORD_SQL, XJS_KEYWORD_LUA };
 const wchar_t* g_modeName[4] = { L"通配符", L"正则表达式", L"SQL", L"Lua 脚本" };
