@@ -1336,8 +1336,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_debounceIds.clear();
             XjsClearRowCache();
             XjsClampScroll();
-            /* 默认选中第一个表项 (每窗设置): 新结果集就绪即选中首项, 预览面板随之联动 */
-            if (g_defaultSel == 1 && g_resultCount > 0) {
+            /* 默认选中第一个表项 (每窗设置): 新结果集就绪即选中首项, 预览面板随之联动;
+               selFirstPending = 搜索框回车/↓提交后的待落地选中 (defaultSel=0 的回车口径), 就绪即消费 */
+            const bool selFirstNow = (g_defaultSel == 1 || w->selFirstPending);
+            w->selFirstPending = false;
+            if (selFirstNow && g_resultCount > 0) {
                 XjsSelectOnly(0);
                 XjsEnsureVisible(0);
             }
@@ -1361,6 +1364,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 g_searching.store(false);
                 g_debounceIds.clear();
                 XjsClearRowCache();
+                w->selFirstPending = false;   /* 本场搜索已失败: 待落地选中作废 */
             }
             delete err;
             w->Invalidate();

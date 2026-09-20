@@ -186,9 +186,13 @@ void XjsSearchCaretToEnd() {   /* 光标归末尾 (工具函数; 打字聚焦入
 
 /* 回车/↓: 选中列表首项并聚焦列表 (源样式口径; 预览开启时经 XjsSelectOnly 联动) */
 void XjsSearchJumpToList(bool commit) {
-    if (commit) XjsSearchNow(true);
+    if (commit) XjsSearchNow(true);   /* 提交型: 引擎在新查询提交时自行清空选中, 此刻的行属上一场 */
     XjsSearchYieldKeys();   /* 键给列表, 光标不灭 (后续打字/退格/←→ 仍直接编辑搜索框) */
-    if (g_resultCount > 0) {
+    if (g_searching.load()) {
+        /* 新查询已在途: 立即选中的首项必被结果集换血冲掉 (defaultSel=0 时无人补选) ——
+           记待落地标记, WM_SEARCH_COMPLETE 新结果就绪后再选首项 */
+        XjsSearchWindow::Cur()->selFirstPending = true;
+    } else if (g_resultCount > 0) {
         XjsSelectOnly(0);
         XjsEnsureVisible(0);
     }

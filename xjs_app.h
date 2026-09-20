@@ -955,6 +955,7 @@ public:
     bool taskbarIcon = true;     /* 任务栏图标 (关 = WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示) */
     int mouseOpen = 0;           /* 鼠标打开文件: 0=双击 1=单击 (单击模式 Ctrl/Shift+点击仍为多选) */
     int defaultSel = 0;          /* 默认选中表项: 0=不选 1=结果刷新后自动选中第一个 */
+    bool selFirstPending = false; /* 选中首项待落地 (运行期瞬态, 不入档案): 搜索框回车/↓提交了新查询, 新结果集就绪时选中首项 */
     int uiZoom = 10;             /* 页面缩放 (十分位: 5..20 = 50%..200%; 每窗私有, 文本格式随窗重建) */
     int lang = XLANG_AUTO;       /* 界面语言 (每窗私有; auto=按系统 UI 语言) */
     int createFill = 0;          /* 创建窗口填入搜索框: 0=清空 1=用户指定关键词 2=上一次输入的搜索词 */

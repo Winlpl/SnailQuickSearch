@@ -1547,7 +1547,13 @@ bool XjsListKey(WPARAM vk) {
         case VK_DELETE: XjsDeleteSelected(); return true;
         case VK_RETURN: {
             std::vector<int> sel = XjsSelIndices();
-            if (sel.empty()) return true;
+            if (sel.empty()) {
+                /* 无选中 = 两段式第一段: 选中首项, 再按才打开 (与搜索框回车"选中首项并聚焦列表"同口径;
+                   搜索在途时立即选会被结果集换血冲掉, 记 selFirstPending 待 WM_SEARCH_COMPLETE 落地) */
+                if (g_searching.load()) XjsSearchWindow::Cur()->selFirstPending = true;
+                else if (g_resultCount > 0) { XjsSelectOnly(0); XjsEnsureVisible(0); }
+                return true;
+            }
             if (ctrl) { XjsOpenFolderAndSelect(XjsItemPath(sel[0])); return true; }      /* Ctrl+Enter 定位 */
             if (GetKeyState(VK_MENU) & 0x8000) { XjsShowProperties(sel[0]); return true; } /* Alt+Enter 属性 */
             XjsOpenFile(XjsItemPath(sel[0]));
