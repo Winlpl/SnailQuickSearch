@@ -186,13 +186,21 @@ static XjsSearchWindow* PluginWindowOfToken(unsigned long long tok) {
     return w;
 }
 
+/* s_plugins 本体重建 (PluginScan, UI 线程) 与插件线程取条目 (PluginApiCheck) 的同步。
+   共享锁只护"读 size + 取下标"瞬间 (vector 内部指针撕裂读 = 唯一内存险), 条目本体由
+   退役注册表保活, 解锁后 p 的后续读取内存安全; 锁绝不横跨插件代码, 无重入死锁面 */
+static SRWLOCK s_regLock = SRWLOCK_INIT;
+
 /* 宿主 API 入口统一校验: ctx 身份 → 宿主闸门(enabled) → 权限位 → 线程 */
 static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPluginEntry** out) {
     *out = NULL;
-    if (!ctx || ctx->magic != XJS_CTX_MAGIC || ctx->idx < 0 || ctx->idx >= (int)s_plugins.size())
-        return XJS_PLUGIN_ERR_ARG;
-    XjsPluginEntry* p = &s_plugins[ctx->idx];
-    if (p->ctx != ctx) return XJS_PLUGIN_ERR_ARG;      /* 指针↔下标双向对表 (重扫后 idx 刷新前的旧 ctx) */
+    if (!ctx || ctx->magic != XJS_CTX_MAGIC) return XJS_PLUGIN_ERR_ARG;
+    AcquireSRWLockShared(&s_regLock);   /* 护取下标瞬间: 重扫 (PluginScan 排他锁) 不得并发读 vector 本体 */
+    bool inRange = ctx->idx >= 0 && ctx->idx < (int)s_plugins.size();
+    XjsPluginEntry* p = inRange ? &s_plugins[ctx->idx] : NULL;
+    ReleaseSRWLockShared(&s_regLock);
+    /* 解锁后读 p 安全: 条目缓冲重扫时整体移入退役注册表保活 (值可能已 stale, ctx↔下标双向对表兜底) */
+    if (!p || p->ctx != ctx) return XJS_PLUGIN_ERR_ARG;  /* 指针↔下标双向对表 (重扫后 idx 刷新前的旧 ctx) */
     if (!p->enabled) return XJS_PLUGIN_ERR_PERM;       /* 禁用 = 宿主强制闸门 (照正式版口径) */
     if (perm && !(p->mf.perms & perm)) return XJS_PLUGIN_ERR_PERM;
     if (uiOnly && !PluginUiThread()) return XJS_PLUGIN_ERR_THREAD;
@@ -237,6 +245,7 @@ static std::vector<std::vector<XjsPluginEntry>*> s_retiredRegistries;
 
 /* 重扫: 目录 → 清单 → 与既有条目按 id 合并 (已加载的 DLL 状态原样保留, 清单刷新) */
 static void PluginScan() {
+    AcquireSRWLockExclusive(&s_regLock);   /* 重建期间挡住插件线程的取条目共享锁 */
     std::vector<XjsPluginEntry>* old = new std::vector<XjsPluginEntry>(std::move(s_plugins));
     s_plugins.clear();
     WIN32_FIND_DATAW fd;
@@ -288,6 +297,7 @@ static void PluginScan() {
     if (old->empty()) delete old;
     else s_retiredRegistries.push_back(old);   /* 退役缓冲不释放 (见 s_retiredRegistries 注) */
     s_scanned = true;
+    ReleaseSRWLockExclusive(&s_regLock);
 }
 
 /* 加载单个插件 (幂等): 校验 abi/id → LoadLibrary → 解析导出 → Init。失败返回 false+原因 (不卸载) */

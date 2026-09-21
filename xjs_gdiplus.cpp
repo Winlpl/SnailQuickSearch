@@ -71,6 +71,7 @@ struct GdiBitmap {
     Gdiplus::Bitmap* bmp = NULL;
     std::vector<BYTE> own;      /* Bitmap(scan0) 不拷贝内存 → 缓冲随包装共存亡 */
     UINT w = 0, h = 0;
+    ~GdiBitmap() { delete bmp; }   /* 原生 Bitmap 无第二释放点: 包装销毁即回收 (曾逐次泄漏) */
 };
 struct GdiStroke { bool round = true; };
 struct GdiGeo { Gdiplus::GraphicsPath* path = NULL; };

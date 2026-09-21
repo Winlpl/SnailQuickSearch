@@ -75,11 +75,9 @@ void XJS_CALLBACK Xjs_EnumComplete(void* userData, xjs_engine* engine, int elaps
 /* 搜索类回调按 结果对象→所属窗 定位 (每窗独立 xjs_result; 引擎线程禁用 Cur()) */
 static int XJS_CALLBACK Xjs_SearchComplete(void* userData, xjs_engine* engine, xjs_result* result, int searchFingerprint, const char* keyword, BOOL discarded) {
     XjsSearchWindow* w = XjsSearchWindow::OfResult(result);
-    if (w && w->hWnd && !discarded) {
-        XjsSearchCompleteData* d = new XjsSearchCompleteData();
-        d->resultCount = xjs_result_GetCount(result);
-        if (!XjsPostToUiFor(w, WM_SEARCH_COMPLETE, (WPARAM)d, 0)) delete d;   /* 队满: 静默丢弃 */
-    }
+    /* 计数按值直传 (曾堆分配载荷: 每次搜索完成一次堆分配, 且子窗销毁时队列残留无人释放) */
+    if (w && w->hWnd && !discarded)
+        XjsPostToUiFor(w, WM_SEARCH_COMPLETE, (WPARAM)xjs_result_GetCount(result), 0);
     return 0;
 }
 
@@ -94,10 +92,9 @@ static int XJS_CALLBACK Xjs_SearchChange(void* userData, xjs_engine* engine, xjs
 
 static int XJS_CALLBACK Xjs_SearchFailed(void* userData, xjs_engine* engine, xjs_result* result, int searchFingerprint, const char* errorJson) {
     XjsSearchWindow* w = XjsSearchWindow::OfResult(result);
-    if (w && w->hWnd && errorJson) {
-        std::string* err = new std::string(errorJson);
-        if (!XjsPostToUiFor(w, WM_SEARCH_FAILED, (WPARAM)err, (LPARAM)searchFingerprint)) delete err;   /* 队满: 静默丢弃 */
-    }
+    /* 登记式投递: 子窗销毁时队列残留的载荷由 XjsPostToUiDropWindow 兜底释放 */
+    if (w && w->hWnd && errorJson)
+        XjsPostUiOwnedString(w, WM_SEARCH_FAILED, searchFingerprint, new std::string(errorJson));
     return 0;
 }
 
@@ -616,6 +613,20 @@ static const char* const K_ALIASCFG = "路径别名";             /* 顶层: 路
    启动由 XjsEngineApplySavedConfigs 再下发 (引擎运行期配置不落盘, 见 xunjieso.h 筛选器/别名 API 注) */
 static std::string g_savedFilterJson, g_savedAliasJson;
 
+/* 读 exe 目录邻接的 UTF-8 文本文件原文 (剥 BOM): 文件缺席/读失败 = 假且 *out 清空。
+   语言包 (XjsI18nLoadFile) / 用户配置 (XjsConfig::Load) / 别名内置词典 (Alias.json) 三处共用 */
+static bool XjsReadUtf8File(const std::wstring& path, std::string* out) {
+    out->clear();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[8192]; DWORD rd = 0;
+    while (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd) out->append(buf, rd);
+    CloseHandle(h);
+    if (out->size() >= 3 && (unsigned char)(*out)[0] == 0xEF && (unsigned char)(*out)[1] == 0xBB && (unsigned char)(*out)[2] == 0xBF)
+        out->erase(0, 3);   /* UTF-8 BOM */
+    return true;
+}
+
 /* ==================== 多国语言 (i18n) ====================
  * 主键 = 点分中文主键 (如 "设置.外观.界面语言", 2026-09-19 起弃用"中文句子当键"):
  * 调用点 XjsT 传主键; 中文文案在 languages\zh.json 的值里, 各语言包同键。
@@ -650,13 +661,8 @@ static void XjsI18nLoadFile(int lang, std::unordered_map<std::wstring, std::wstr
     out.clear();
     if (lang < XLANG_ZH || lang >= XLANG_N) return;   /* 未知=空表走回落 */
     std::wstring p = XjsGetExeDir() + L"\\languages\\" + XJS_LANG_FN[lang] + L".json";
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;   /* 缺文件 = 该语言整表缺席 (回落英语/简体) */
-    std::string utf8; char buf[8192]; DWORD rd = 0;
-    while (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd) utf8.append(buf, rd);
-    CloseHandle(h);
-    if (utf8.size() >= 3 && (unsigned char)utf8[0] == 0xEF && (unsigned char)utf8[1] == 0xBB && (unsigned char)utf8[2] == 0xBF)
-        utf8.erase(0, 3);   /* UTF-8 BOM */
+    std::string utf8;
+    if (!XjsReadUtf8File(p, &utf8)) return;   /* 缺文件 = 该语言整表缺席 (回落英语/简体) */
     picojson::value v;
     if (picojson::parse(v, utf8).empty() && v.is<picojson::object>()) {
         for (auto& kv : v.get<picojson::object>())
@@ -921,13 +927,8 @@ bool XjsPluginDialogOptsParse(const char* utf8Json, XjsPluginDialogOpts* out) {
 void XjsConfig::Load() {
     m_obj.clear();
     std::wstring p = XjsGetExeDir() + L"\\xjs_config.json";
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::string utf8; char buf[8192]; DWORD rd = 0;
-    while (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd) utf8.append(buf, rd);
-    CloseHandle(h);
-    if (utf8.size() >= 3 && (unsigned char)utf8[0] == 0xEF && (unsigned char)utf8[1] == 0xBB && (unsigned char)utf8[2] == 0xBF)
-        utf8.erase(0, 3);   /* UTF-8 BOM (不剥则解析失败=空配置, 尾部建档回写会用默认骨架覆盖原文件) */
+    std::string utf8;
+    if (!XjsReadUtf8File(p, &utf8)) return;
     picojson::value v;
     if (picojson::parse(v, utf8).empty() && v.is<picojson::object>())
         m_obj = v.get<picojson::object>();
@@ -1087,7 +1088,23 @@ void XjsEngineApplySavedConfigs() {
     if (!g_engine) return;
     /* sync=FALSE: 行数据要么此前已应用过别名/分类 (加载的库), 要么正随扫描入库时套用当前配置 */
     if (!g_savedFilterJson.empty()) xjs_filter_SetFilterJSON(g_engine, g_savedFilterJson.c_str(), FALSE);
-    if (!g_savedAliasJson.empty()) xjs_alias_SetAliasJSON(g_engine, g_savedAliasJson.c_str(), FALSE);
+    /* 别名默认源 (正式版同款优先链): 配置 "路径别名" 键 (设置页保存后才有) 优先;
+       键空回落 exe 目录随包发布的 Alias.json 内置词典 —— 原文透传, 引擎解析器直接吃该宽松
+       JSONC (<系统盘>/<用户名> 占位符、/ 正斜杠); 文件缺席 = 跳过 (正式版同)。程序不写回该文件 */
+    std::string alias = g_savedAliasJson;
+    bool fromFile = alias.empty();
+    if (fromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Alias.json", &alias);
+    if (alias.empty()) return;
+    if (!xjs_alias_SetAliasJSON(g_engine, alias.c_str(), FALSE)) return;   /* 引擎拒绝 = 配置不下发, 下次启动重试 */
+    if (!fromFile) return;
+    /* 首次播种追加 sync=TRUE: 一次性回填已入库且"无别名"的行 (正式版设置页保存同款; 否则旧库
+       必须重建索引才见别名)。35=忙 (扫描/保存并发) 只废回填不废配置, 下次启动重试;
+       成功即把词典原文存进 "路径别名" 键 —— 此后键非空不再走文件 (正式版以回写后的
+       Alias.json 为源, 等效), 全库遍历的一次性成本也不逐启动重付 */
+    if (xjs_alias_SetAliasJSON(g_engine, alias.c_str(), TRUE)) {
+        g_savedAliasJson = alias;
+        XjsSaveConfig();
+    }
 }
 
 /* 询问框按钮数组 [{"text":"..","style":"default|primary|danger"},..] → 样式化按钮; 无有效按钮回退单个"确定" */
@@ -2137,6 +2154,9 @@ void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJs
     static const char* const FN[7] = { "文件评分", "文件大小", "修改时间", "创建时间", "访问时间", "文件属性", "别名" };
     for (int i = 0; i < 7; i++)
         if (enableFields[i]) xjs_db_AddField(g_engine, FN[i], NULL);
+    /* 正式版口径: 重建 = 清库后、重新扫描前重放 文件分类/路径别名 —— 筛选器只对之后入库的文件
+       生效, 必须赶在扫描前就位 (别名同随入库套用) */
+    XjsEngineApplySavedConfigs();
     g_statusText = XjsT(L"状态栏.正在重建");   /* 源样式 Search.IndexRebuilding */
     std::string dj = Utf16ToUtf8(drivesJsonWide.c_str());
     xjs_db_ScanPath(g_engine, dj.empty() ? NULL : dj.c_str(), TRUE);

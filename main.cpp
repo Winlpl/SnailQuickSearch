@@ -20,6 +20,7 @@ static void XjsLogPath(const wchar_t* name, wchar_t* out, DWORD cap) {
     while (cut > exe && cut[-1] != L'\\') cut--;
     *cut = 0;
     _snwprintf(out, cap, L"%s%s", exe, name);
+    if (cap > 0) out[cap - 1] = 0;   /* _snwprintf 截断时不写终止符: 深路径+崩溃取证路径防越界读 */
 }
 
 /* 排最前的 VEH: 只记录致命类异常, 静默写 startup_stack.txt (阶段+逐帧 模块!偏移)。
@@ -960,7 +961,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s_openPendIdx = -1;
             if (g_mouseOpen == 1 && !renameWas &&
                 !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) &&
-                pt.y >= g_layout.list.top && pt.y < g_layout.list.bottom && pt.x < g_layout.list.right) {
+                pt.y >= g_layout.list.top && pt.y < g_layout.list.bottom && pt.x < g_layout.list.right &&
+                !XjsListScrollRegionHit(pt)) {   /* 滚动条点位不作打开候选 (XjsItemAtPoint 只看 y, 会误开该行文件) */
                 s_openPendIdx = XjsItemAtPoint(pt);
                 if (s_openPendIdx >= 0) s_openPendPt = pt;
             }
@@ -982,6 +984,9 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     return 0;
                 }
             }
+            /* 滚动条上双击 = 与单击同口径 (thumb 抓取/轨道连翻), 不落下方"双击打开文件" —
+               双击的第二下按下以 WM_LBUTTONDBLCLK 到达, 不经 XjsListMouseDown 的滚动条分支 (2026-09-22 实锤) */
+            if (XjsListScrollMouseDown(pt)) return 0;
             if (pt.y >= g_layout.list.top && pt.y < g_layout.list.bottom && pt.x < g_layout.list.right) {
                 int idx = XjsItemAtPoint(pt);
                 if (idx >= 0) {
@@ -1258,6 +1263,9 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else if (wParam == ID_TIMER_HOSTEDSRC) {
                 XjsHostedHoverTimer(hwnd);   /* 多来源标签悬停 180ms 到点: 弹"切换搜索来源"菜单 */
                 return 0;
+            } else if (wParam == ID_TIMER_SBTRACK) {
+                if (!XjsListTrackTick()) KillTimer(hwnd, ID_TIMER_SBTRACK);   /* 滚动条轨道按住连发翻页 */
+                return 0;
             } else if (wParam == ID_TIMER_ANIM) {
                 /* 忙旋灯只转在状态栏: 仅失效状态栏 (初始扫描的进度条在空状态区, 才全窗)。
                    30ms 全窗失效 = 每秒 33 次全窗口重写 → DWM 撕裂 (列表行错位/搜索框闪烁) */
@@ -1327,12 +1335,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_SEARCH_COMPLETE: {
             /* 结果增量变化改由 g_fileChangePending 标记 + ID_TIMER_SYNCWATCH 时钟节流刷新
-               (原 wParam==0&&lParam==1 直发路径已收编, 见 Xjs_SearchChange/Xjs_SyncFileChanged) */
-            XjsSearchCompleteData* d = (XjsSearchCompleteData*)wParam;
+               (原 wParam==0&&lParam==1 直发路径已收编, 见 Xjs_SearchChange/Xjs_SyncFileChanged)
+               结果计数按值随 wParam 直传 (曾堆分配载荷) */
             KillTimer(hwnd, ID_TIMER_SEARCHSTATUS);   /* 快速完成: "正在搜索…"从未显示, 直接切结果文字 */
-            XjsUpdateStatusTextOnComplete(d->resultCount);
-            g_syncWatchCount = d->resultCount;   /* 轮询基线对齐新结果集 (必须在 delete 前读, 曾是释放后使用) */
-            delete d;
+            XjsUpdateStatusTextOnComplete((int)wParam);
+            g_syncWatchCount = (int)wParam;   /* 轮询基线对齐新结果集 */
             /* 搜索完成回调: 清防抖快照 + 解除正在搜索; 结果集换血后行缓存作废, 下一帧按新结果画 */
             g_searching.store(false);
             w->ClearDebounceSnapshot();
@@ -1352,7 +1359,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_SEARCH_FAILED: {
-            std::string* err = (std::string*)wParam;
+            std::string* err = XjsUiOwnedStringTake((std::string*)wParam);   /* 摘登记并接管所有权 (delete 照旧) */
             KillTimer(hwnd, ID_TIMER_SEARCHSTATUS);
             if ((int)lParam == g_searchFingerprint) {
                 /* 错误串解析 (JSON "错误信息" 键 / 原文) 收口在 XjsEngineErrText */

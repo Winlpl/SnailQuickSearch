@@ -46,6 +46,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
+#include <mutex>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -75,6 +76,7 @@
 #define ID_TIMER_HOVERFADE  8   /* 列表悬停高亮渐隐拖尾驱动 (30ms, 有衰减中的行才挂) */
 #define ID_TIMER_HOSTEDSRC  9   /* 多来源标签悬停 180ms 后弹"切换搜索来源"菜单 (一次性) */
 #define ID_TIMER_SETLIVE    10  /* 设置窗 内存/性能分析页 实时数据 1s 刷新 (仅这两分类重建行模型, 其余分类空转) */
+#define ID_TIMER_SBTRACK    11  /* 滚动条轨道按住连发翻页 (首延 400ms, 之后 150ms/步; thumb 到指针即停) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
@@ -104,6 +106,9 @@ class XjsSearchWindow;   /* 前置声明: 本节声明在类定义之前 */
 bool XjsPostToUi(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);   /* 计数入队 post; 队满=返回 false (未投递) */
 void XjsPostToUiDone();                                        /* 引擎消息处理完毕递减 (每条恰好一次) */
 void XjsPostToUiDropWindow(XjsSearchWindow* w);                /* 窗口销毁: 返还该窗已投未处理消息的闸门计数 */
+bool XjsPostUiOwnedString(XjsSearchWindow* w, UINT msg, LPARAM lp, std::string* payload);  /* 堆载荷投递 (销毁兜底释放) */
+std::string* XjsUiOwnedStringTake(std::string* payload);       /* 消费点摘登记并接管所有权 (调用方 delete) */
+void XjsUiOwnedStringsDropHwnd(HWND hwnd);                     /* 窗口销毁: 释放该窗名下未消费的登记载荷 */
 
 /* 崩溃取证阶段标记 (定义在 main.cpp; VEH 落盘 startup_stack.txt 首行 phase=)。
    插件扫描/加载/回调入口也标阶段 (plugin-scan / plugin-load:<id> / plugin-call:<id>) */
@@ -735,6 +740,7 @@ bool XjsEditRouteMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);  /* WM_
 bool XjsEditRouteImeResult(HWND hwnd, LPARAM lParam);     /* WM_IME_COMPOSITION: GCS_RESULTSTR 整串上屏 */
 bool XjsEditFieldAnchorUpdate(HWND hwnd);                 /* 把 IME 组字/候选窗钉到该窗聚焦字段 (真=有聚焦字段) */
 void XjsEditFieldCleanupWindow(HWND hwnd);                /* 宿主销毁: 摘该窗全部字段登记+闪烁驱动 */
+void XjsEditFieldsDropFormats();                          /* 文本格式全量重建时作废字段缓存 fmt (悬垂防线) */
 
 /* 宿主窗口销毁时的组件统一退登记 (搜索窗/设置窗共用同一入口, 别在各自的 WM_DESTROY 里各写一串):
    输入字段登记 (路由层命中/聚焦/拖选表) + 光标闪烁驱动器 + Toast 条目/画刷。
@@ -959,6 +965,7 @@ public:
     int mouseOpen = 0;           /* 鼠标打开文件: 0=双击 1=单击 (单击模式 Ctrl/Shift+点击仍为多选) */
     int defaultSel = 0;          /* 默认选中表项: 0=不选 1=结果刷新后自动选中第一个 */
     bool selFirstPending = false; /* 选中首项待落地 (运行期瞬态, 不入档案): 搜索框回车/↓提交了新查询, 新结果集就绪时选中首项 */
+    int rowNullLast = -1;        /* 行数据空行数收敛重试的记忆值 (运行期瞬态): 空行数变化才择机重绘, 每窗私有防互抑 */
     int uiZoom = 10;             /* 页面缩放 (十分位: 5..20 = 50%..200%; 每窗私有, 文本格式随窗重建) */
     int lang = XLANG_AUTO;       /* 界面语言 (每窗私有; auto=按系统 UI 语言) */
     int createFill = 0;          /* 创建窗口填入搜索框: 0=清空 1=用户指定关键词 2=上一次输入的搜索词 */
@@ -1368,7 +1375,6 @@ INT XJS_CALLBACK Xjs_SyncFileMoved(void* userData, xjs_engine* engine, const cha
 
 struct XjsScanProgressData { wchar_t drive; int enumerated; int total; };
 struct XjsScanCompleteData { int fileCount; int elapsedMs; };
-struct XjsSearchCompleteData { int resultCount; };
 
 /* ==================== 模块接口 ==================== */
 
@@ -1513,7 +1519,7 @@ bool XjsFilterConfigApply(const std::vector<XjsFilterItem>& rows);   /* sync=FAL
 bool XjsAliasConfigApply(const std::vector<XjsAliasItem>& rows);     /* sync=TRUE: 立即应用到现有库 */
 void XjsFilterConfigLoad(std::vector<XjsFilterItem>* rows);          /* 引擎当前配置 → 行 (引擎无效=空表) */
 void XjsAliasConfigLoad(std::vector<XjsAliasItem>* rows);
-void XjsEngineApplySavedConfigs();   /* 启动: 把配置里保存的 别名/筛选器 下发引擎 (库就绪前/后调用; sync=FALSE) */
+void XjsEngineApplySavedConfigs();   /* 启动/重建索引前: 下发保存的 筛选器/别名; 别名无保存值时回落 exe 目录 Alias.json 内置词典 (首次播种含 sync=TRUE 一次性回填旧行并入键, 文件缺席跳过) */
 
 void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJsonWide);  /* 字段开关+盘符JSON(空=全盘), 设置对话框用 (确认在设置窗自绘对话框完成; 曾有无调用方的 XjsEngineRebuild 带系统 MessageBox, 已删) */
 void XjsEngineShutdown(bool warnOnSaveFail);
@@ -1631,6 +1637,9 @@ void XjsSelectAllRows();
 bool XjsMarqueeMoved();                           /* 框选拖动中 (预览跟随冻结闸; 解除时调用方补刷新) */
 void XjsListRender();
 bool XjsListMouseDown(POINT pt, WPARAM flags);
+bool XjsListScrollMouseDown(POINT pt);            /* 滚动条按下: thumb 抓取 / 轨道翻页+按住连发 (双击第二下同入口, 防落"打开文件") */
+bool XjsListScrollRegionHit(POINT pt);            /* 点在滚动条区域 (纵+横): 单击打开待定武装的排除判定 */
+bool XjsListTrackTick();                          /* WM_TIMER(ID_TIMER_SBTRACK): 轨道按住连发; 假=请 KillTimer */
 bool XjsListMouseMove(POINT pt);
 bool XjsListMouseUp(POINT pt);
 void XjsListWheel(float delta);

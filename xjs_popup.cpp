@@ -961,6 +961,13 @@ void XjsEditField::Detach() {
     blink.Detach();
 }
 
+void XjsEditFieldsDropFormats() {
+    /* 文本格式全量重建 (XjsReleaseTextFormats) 时必须调用: 字段缓存的 fmt 只在 Render 每帧回写,
+       重建后补绘前的击键/IME 经路由层拿旧指针测量 = 释放后使用 — 于此统一作废 (fmt 兼作
+       "本帧已渲染"命中门槛, 清空即自动退出鼠标命中), 各测量点对 NULL 已判空回落, 下帧回写即恢复 */
+    for (auto& r : s_editRegs) r.f->fmt = NULL;
+}
+
 void XjsEditField::SetFocused(HWND hwnd, bool on) {
     if (focused == on) return;
     focused = on;
@@ -1212,8 +1219,14 @@ void XjsLineEdit::Paste() {
     std::wstring s;
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
     if (h) {
-        const wchar_t* p = (const wchar_t*)GlobalLock(h);
-        if (p) { s = p; GlobalUnlock(h); }
+        if (const wchar_t* p = (const wchar_t*)GlobalLock(h)) {
+            /* 数据块非本进程分配, NUL 结尾契约不被系统强制 (异常/恶意提供方):
+               按 GlobalSize 定界、界内找 NUL 再构造, 防 wcslen 扫出块尾越界读 */
+            size_t n = GlobalSize(h) / sizeof(wchar_t), len = 0;
+            while (len < n && p[len]) len++;
+            s.assign(p, len);
+            GlobalUnlock(h);
+        }
     }
     CloseClipboard();
     if (s.empty()) return;
@@ -2304,7 +2317,14 @@ int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, cons
     s.open = true;
     s.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"XJS_AskDialog", L"",
         WS_POPUP, x, y, (int)s.cardW, (int)s.cardH, owner, NULL, GetModuleHandleW(NULL), NULL);
-    if (!s.hwnd) { s.open = false; return -1; }
+    if (!s.hwnd) {
+        s.open = false;
+        /* 建窗失败走不到 WM_DESTROY 收尾: 照释放段清场, 否则格式留到下次打开被覆盖再漏一层 */
+        if (s.tfTitle) { s.tfTitle->Release(); s.tfTitle = NULL; }
+        if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
+        if (s.tfBtn) { s.tfBtn->Release(); s.tfBtn = NULL; }
+        return -1;
+    }
     DWM_WINDOW_CORNER_PREFERENCE pref = DWMWCP_ROUND;
     DwmSetWindowAttribute(s.hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
     ShowWindow(s.hwnd, SW_SHOW);

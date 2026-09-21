@@ -786,17 +786,25 @@ static bool XjsSetBuildRows() {
     const float rowHPlain = SS(44), rowHDesc = SS(62), titleH = SS(40);
 
     /* 行尾控件宽度 (构建时按 value 实测; 与绘制/命中/文本右缘让位同一来源 —
-       固定预留 80px 的旧口径会被宽按钮/宽胶囊压住说明文字) */
+       固定预留 80px 的旧口径会被宽按钮/宽胶囊压住说明文字)。
+       单槽记忆 (局部量, 每次重建自然复位): 表格页整页同文案 ("删除") 逐行实测 =
+       每行一次 DWrite 排版, 别名页 ~700 行纯重复 — 同键直接复用 */
+    std::wstring memoCtrlV; XjsSetCtrl memoCtrlC = CT_INFO; int memoCtrlA = -1; float memoCtrlW = 0;
     auto rowCtrlW = [&](int act, XjsSetCtrl ctrl, const std::wstring& value) -> float {
+        if (ctrl != CT_BUTTON) act = 0;   /* act 只影响按钮的下拉加宽: 其余控件 (CT_TROW 行号 act 每行不同) 不进键 */
+        if (ctrl == memoCtrlC && act == memoCtrlA && value == memoCtrlV && memoCtrlC != CT_INFO) return memoCtrlW;
+        float w;
         switch (ctrl) {
-            case CT_SWITCH: return SS(42);
-            case CT_PILL:   return s_set.tfBtn ? xf_max(XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(24), SS(56)) : SS(90);
-            case CT_BUTTON: return s_set.tfBtn ? XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(36)
-                                                 + (XjsSetActIsDropdown(act) ? SS(12) : 0) : SS(90);
-            case CT_TROW:   return s_set.tfBtn ? XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(36) : SS(90);   /* 行尾"删除"钮, 同按钮几何 */
-            case CT_INPUT:  return SS(272);
-            default:        return 0;
+            case CT_SWITCH: w = SS(42); break;
+            case CT_PILL:   w = s_set.tfBtn ? xf_max(XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(24), SS(56)) : SS(90); break;
+            case CT_BUTTON: w = s_set.tfBtn ? XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(36)
+                                                 + (XjsSetActIsDropdown(act) ? SS(12) : 0) : SS(90); break;
+            case CT_TROW:   w = s_set.tfBtn ? XjsMeasureText(value.c_str(), s_set.tfBtn) + SS(36) : SS(90); break;   /* 行尾"删除"钮, 同按钮几何 */
+            case CT_INPUT:  w = SS(272); break;
+            default:        return 0;   /* 未知控件不进记忆 (每次 0 语义不变) */
         }
+        memoCtrlC = ctrl; memoCtrlA = act; memoCtrlV = value; memoCtrlW = w;
+        return w;
     };
 
     auto newCard = [&](const wchar_t* title) {
@@ -1891,6 +1899,9 @@ static void XjsSetPaint(HWND hwnd) {
         for (auto& r : card.rows) {
             float ry0 = r.y - s_set.scroll, ry1 = ry0 + r.h;
             if (ry1 < cy0 || ry0 > cy1) continue;
+            /* 视口外行一律不画: 卡带判界对"整页一卡"的表格页是空裁 (行必在卡带内),
+               别名页 ~700 行曾逐帧全量渲染 1400 个输入框 = 滚动/悬停绘制卡顿 (2026-09-22 实锤) */
+            if (ry1 < 0 || ry0 > vh) continue;
             /* hoverRow = 卡序×1000 + 卡内行序 (与 WM_MOUSEMOVE 编码一致) */
             bool hovered = ((&card - &s_set.cards[0]) * 1000 + (&r - &card.rows[0])) == s_set.hoverRow;
             if (hovered) {

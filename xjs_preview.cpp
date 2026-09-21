@@ -663,6 +663,9 @@ bool XjsPreviewMouseUp(POINT pt) {
 bool XjsPreviewPluginDeliverBitmap(int requestId, int w, int h, const void* bgra, int stride) {
     if (requestId != s_pvPlugReq || s_pvPlugFileId < 0) return false;   /* 过期世代 / 未接管 */
     if (!bgra || w <= 0 || h <= 0 || w > 32768 || h > 32768 || stride < w * 4) return false;
+    /* 上限同加 (同 FnPrevBitmap 口径): 异常交付不得让 assign 抛 bad_alloc 终止进程,
+       也不得按虚高 stride 越界读插件来源缓冲 (stride 只验过下限曾是大洞) */
+    if (stride > w * 4 + 4096 || (long long)stride * h > (256LL << 20)) return false;
     s_pvPlugBmp.assign((const uint8_t*)bgra, (const uint8_t*)bgra + (size_t)stride * h);
     s_pvPlugW = w; s_pvPlugH = h; s_pvPlugStride = stride;
     if (s_pvPlugCache) { s_pvPlugCache->Release(); s_pvPlugCache = NULL; }   /* 旧缓存作废, 渲染时懒重建 */

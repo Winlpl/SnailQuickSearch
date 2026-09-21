@@ -326,6 +326,13 @@ XjsSearchWindow::~XjsSearchWindow() {
     if (hwndRt) { hwndRt->Release(); hwndRt = NULL; }
     rt = NULL;
     if (result) {
+        /* 先摘回调: 阻断"新的"引擎回调再进入本上下文 (COMPLETE/CHANGE/FAILED/DRAW_ICON/ICON_ASK
+           与注册处 xjs_engine.cpp 一一对应; 已在途回调的窄竞态为 DLL 分发粒度所限, 此步收窄窗口) */
+        xjs_result_SetCallback(result, XJS_RESULT_EVENT_COMPLETE,  NULL, NULL);
+        xjs_result_SetCallback(result, XJS_RESULT_EVENT_CHANGE,    NULL, NULL);
+        xjs_result_SetCallback(result, XJS_RESULT_EVENT_FAILED,    NULL, NULL);
+        xjs_result_SetCallback(result, XJS_RESULT_EVENT_DRAW_ICON, NULL, NULL);
+        xjs_result_SetCallback(result, XJS_RESULT_EVENT_ICON_ASK,  NULL, NULL);
         /* 先摘 UserValue: 回调线程经 OfResult 取窗, 销毁竞态窗口内不再拿到本上下文 */
         xjs_result_SetUserValue(result, NULL);
         xjs_result_Destroy(result); result = NULL;
@@ -441,6 +448,44 @@ void XjsPostToUiDropWindow(XjsSearchWindow* w) {
     if (!w) return;
     int p = w->uiPostPending.exchange(0, std::memory_order_relaxed);
     if (p > 0) s_postPending.fetch_sub((long)p, std::memory_order_relaxed);
+    XjsUiOwnedStringsDropHwnd(w->hWnd);   /* 堆载荷 (登记表内) 随窗口一并释放 */
+}
+
+/* ---- 堆载荷投递登记 (WM_SEARCH_FAILED 的 std::string*; 值类型载荷一律按值直传不经此) ----
+   子窗销毁时队列里未处理的消息被 DestroyWindow 整批清除, 载荷无人 delete = 泄漏。
+   投递时登记、消费点 XjsUiOwnedStringTake 摘除后照常 delete、销毁时 DropHwnd 兜底释放。
+   登记表只存存活指针 (摘除先于 delete; Take 按指针摘、找不到也原样移交), 即使某天消费点
+   忘了 Take, 兜底释放的也仍是存活指针, 不产生二次释放面 */
+static std::mutex s_ownedMu;
+static std::vector<std::pair<HWND, std::string*>> s_ownedStrings;
+
+bool XjsPostUiOwnedString(XjsSearchWindow* w, UINT msg, LPARAM lp, std::string* payload) {
+    if (!payload) return false;
+    if (!w || !w->hWnd) { delete payload; return false; }
+    {   /* 先登记后投递: 消息一经入队即可被派发, 登记必须发生在派发可能发生之前 */
+        std::lock_guard<std::mutex> lk(s_ownedMu);
+        s_ownedStrings.push_back({ w->hWnd, payload });
+    }
+    if (!XjsPostToUi(w->hWnd, msg, (WPARAM)payload, lp)) {
+        XjsUiOwnedStringTake(payload);   /* post 失败 = 消息未进队列, 永无消费点, 就地回收 */
+        delete payload;
+        return false;
+    }
+    w->uiPostPending.fetch_add(1, std::memory_order_relaxed);   /* 每窗账与 XjsPostToUiFor 同口径 */
+    return true;
+}
+
+std::string* XjsUiOwnedStringTake(std::string* payload) {
+    std::lock_guard<std::mutex> lk(s_ownedMu);
+    for (size_t i = 0; i < s_ownedStrings.size(); i++)
+        if (s_ownedStrings[i].second == payload) { s_ownedStrings.erase(s_ownedStrings.begin() + i); break; }
+    return payload;   /* 所有权移交调用方 (调用方 delete) */
+}
+
+void XjsUiOwnedStringsDropHwnd(HWND hwnd) {
+    std::lock_guard<std::mutex> lk(s_ownedMu);
+    for (size_t i = s_ownedStrings.size(); i-- > 0;)
+        if (s_ownedStrings[i].first == hwnd) { delete s_ownedStrings[i].second; s_ownedStrings.erase(s_ownedStrings.begin() + i); }
 }
 
 const int g_modeToKeyword[4] = { XJS_KEYWORD_WILDCARD, XJS_KEYWORD_REGEX, XJS_KEYWORD_SQL, XJS_KEYWORD_LUA };

@@ -28,6 +28,7 @@ void XjsReleaseTextFormats() {
     for (auto* pf : fmts) { if (*pf) { (*pf)->Release(); *pf = NULL; } }
     for (auto& kv : g_ellSignCache) { if (kv.second) kv.second->Release(); }
     g_ellSignCache.clear();   // 签名由旧格式生成, 格式重建后须作废
+    XjsEditFieldsDropFormats();   /* 输入字段缓存的 fmt 同批悬空, 一并作废 (重建后击键 UAF 防线) */
 }
 
 static void XjsMakeFormat(XjsFormat** out, float px, DWRITE_FONT_WEIGHT w,
