@@ -212,12 +212,14 @@ void XjsSearchClear() {
 bool XjsSearchChar(wchar_t ch) {
     XjsHostedExitCaret();   /* 字符输入退出标签光标模式 (源样式 input 事件), 字符照常写入 */
     if (!s_searchEd.Char(ch)) return false;
+    if (!g_searchFocused) XjsSearchFocus(true);   /* 文字输入即聚焦 (2026-09-22 用户口径): 后续 Delete/Home/End/Ctrl 组合自然归搜索框 */
     XjsSearchAfterEdit();
     return true;
-}   /* 未聚焦也接字 (编辑不夺焦): 光标不亮, 文本/输入即搜照常 — 聚焦仍只来自点击 */
+}   /* 未聚焦也接字, 实际写入即顺手聚焦; ←→ 移光标与清空按钮等非改字路径仍不夺焦 */
 
 bool XjsSearchKey(WPARAM vk) {
-    /* 未聚焦放行 = 编辑键 (退格删字 / ←→ 移光标, 含 Shift/Ctrl 变体): 编辑不夺焦, 其余键归列表 */
+    /* 未聚焦放行 = 编辑键 (退格删字 / ←→ 移光标, 含 Shift/Ctrl 变体): 其余键归列表。
+       退格实删/打字/IME 上屏 = 文字输入/删除 → 聚焦 (2026-09-22 口径); ←→ 只移光标不夺焦 */
     if (!g_searchFocused && vk != VK_BACK && vk != VK_LEFT && vk != VK_RIGHT) return false;
     if (XjsHostedKey(vk)) return true;   /* 标签链键盘 (←→ 穿行/删除标签) 先于搜索框自身按键 */
     /* 搜索语义键先行 (组件不处理回车/Esc/Tab/下箭头) */
@@ -247,6 +249,8 @@ bool XjsSearchKey(WPARAM vk) {
             return true;
     }
     if (!s_searchEd.Key(vk)) return false;
+    /* 退格实删了文字 = 文字删除 → 聚焦 (dirty 在 AfterEdit 才清; 空框退格无删除, 不夺焦) */
+    if (vk == VK_BACK && s_searchEd.dirty && !g_searchFocused) XjsSearchFocus(true);
     XjsSearchAfterEdit();
     return true;
 }
@@ -337,11 +341,12 @@ void XjsSearchUpdateImeWindow() {
     s_imeUpdBusy = 0;
 }
 
-/* IME 上屏结果: GCS_RESULTSTR 整串插入 (组件内完成); 未聚焦也接字 (编辑不夺焦, 聚焦只来自点击) */
+/* IME 上屏结果: GCS_RESULTSTR 整串插入 (组件内完成); 未聚焦也接字, 实际上屏即聚焦 (文字输入口径) */
 bool XjsSearchImeResult(HWND hwnd, LPARAM lParam) {
     if (!(lParam & GCS_RESULTSTR)) return false;
     XjsHostedExitCaret();   /* 输入即退出标签光标模式 (源样式 input 事件) */
     if (s_searchEd.ImeResult(hwnd, lParam)) {
+        if (!g_searchFocused && s_searchEd.dirty) XjsSearchFocus(true);   /* 上屏实入了文字 → 聚焦 */
         XjsSearchAfterEdit();
         return true;
     }
@@ -691,11 +696,15 @@ void XjsChromeRenderTitlebar() {
             XjsRectF(r.left + XSF(24), r.top, r.right, r.bottom),
             g_appMenuOpen ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_DIM]);
     }
-    /* 搜索框: 始终持焦点 (失焦只熄光标, 见 XjsSearchFocus), 故不再画焦点外圈/高亮边
-       —— 恒为普通边框, 焦点态不做视觉区分 (用户口径 2026-09-16) */
+    /* 搜索框: 聚焦 = 背景在 --panel 上加深一档 (用户口径 2026-09-22, 临时刷走 XjsTempBrush
+       两后端中立); 仍不画焦点外圈/高亮边 (用户口径 2026-09-16), 边框恒普通。
+       重绘无需新增失效点 — 焦点变化路径 XjsSearchFocus/XjsSearchYieldKeys 已调 XjsSearchInvalidate */
     {
         XjsRoundedRect sb = XjsRoundedRectF(L.searchBox, XSF(8), XSF(8));
-        g_rt->FillRoundedRectangle(sb, g_br[XTH_PANEL]);
+        XjsColor sbBg = g_skin.panel;
+        if (g_searchFocused)
+            sbBg = XjsColorF(sbBg.r * 0.87f, sbBg.g * 0.87f, sbBg.b * 0.87f, sbBg.a);   /* ≈13% 加深 */
+        g_rt->FillRoundedRectangle(sb, XjsTempBrush(sbBg));
         g_rt->DrawRoundedRectangle(sb, g_br[XTH_BORDER], 1.0f);
         /* 模式按钮 (放大镜, 点击切换搜索模式) */
         {
@@ -1134,7 +1143,8 @@ void XjsShowAppMenu() {
     /* 皮肤/自启动/关于 → 独立设置窗口 (皮肤列表 18 项曾把菜单撑出屏幕); 重建索引也已移入设置 */
     items.push_back({ IDM_MENU_BASE + 50, XjsT(L"菜单.设置"), L"", false, false, false, false });
     items.push_back({ 0, L"", L"", false, true, false, false });
-    items.push_back({ IDM_MENU_BASE + 2, XjsT(L"通用词.退出"), L"", false, false, false, false });
+    /* 捐赠 = 打开设置直达捐赠页 (用户口径: ☰菜单不再放"退出", 退出仍走托盘右键菜单) */
+    items.push_back({ IDM_MENU_BASE + 51, XjsT(L"菜单.捐赠"), L"", false, false, false, false });
     XjsRect r = g_layout.menuBtn;
     POINT anchor = { (LONG)r.left, (LONG)r.bottom };
     ClientToScreen(g_hWnd, &anchor);

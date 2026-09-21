@@ -166,7 +166,7 @@ void XjsEngineEnsureResultAll() {
 /* 渲染缓存作废是引擎级事件 (重建索引/退出) → 广播到所有窗口 */
 static void XjsClearWinCaches(XjsSearchWindow* w) {
     w->rowCache.clear();
-    w->debounceIds.clear();   /* 防抖快照随渲染缓存一并作废 (重建索引/退出) */
+    w->ClearDebounceSnapshot();   /* 防抖快照随渲染缓存一并作废 (重建索引/退出) */
     w->searching = false;
     for (auto& kv : w->iconCache) { if (kv.second) kv.second->Release(); }   /* 图标位图随渲染缓存作废 (重建索引) */
     w->iconCache.clear();
@@ -248,12 +248,11 @@ void XjsHistoryNav(int dir) {
     XjsSearchWindow::Cur()->Invalidate();
 }
 
-/* 搜索防抖快照: 拷贝"已显示行"的文件ID (仅可见区, 不拷全部) 与当前结果数。
+/* 搜索防抖快照: 拷贝"已显示行"的文件ID (仅可见区, 不拷全部)、当前结果数与行选中态。
    只能在结果数组仍是上一场搜索的稳定态时采样 (提交新查询前调用);
    可见区间来自最近一帧渲染回写 (g_visFirst/g_visLast), 无有效可见区 = 空快照 (防抖不生效) */
 static void XjsDebounceSnapshot() {
-    g_debounceIds.clear();
-    g_debounceFirst = 0;
+    XjsSearchWindow::Cur()->ClearDebounceSnapshot();
     g_debounceCount = g_resultCount;
     if (!g_result || g_resultCount <= 0 || g_visFirst < 0 || g_visLast < g_visFirst) return;
     int first = g_visFirst;
@@ -261,8 +260,12 @@ static void XjsDebounceSnapshot() {
     if (first > last) return;
     g_debounceFirst = first;
     g_debounceIds.reserve((size_t)(last - first + 1));
-    for (int i = first; i <= last; i++)
+    g_debounceSel.reserve((size_t)(last - first + 1));
+    for (int i = first; i <= last; i++) {
         g_debounceIds.push_back(xjs_result_GetFileId(g_result, i));
+        /* 选中态必须此刻快照: 新查询一提交引擎就清空选中, 冻结期选中的行会全丢高亮 */
+        g_debounceSel.push_back(xjs_result_IsSelectedByIndex(g_result, i) != FALSE);
+    }
 }
 
 void XjsSearchNow(bool commitHistory) {
@@ -606,6 +609,12 @@ static const char* const K_M_TPL = "模板";
 
 static const char* const K_LANG = "语言";                    /* 窗口条目内: "auto"/"zh"/"zh-TW"/"en"/"ko"/"th"/"ms"
                                                                (每窗, 2026-09-19 每窗化; 曾为顶层键, 读作迁移种子后废弃) */
+static const char* const K_FILTERCFG = "文件分类";            /* 顶层: 引擎筛选器配置 (内嵌 JSON 数组字符串, 设置-文件分类 表格保存) */
+static const char* const K_ALIASCFG = "路径别名";             /* 顶层: 路径别名配置 (内嵌 JSON 对象字符串, 设置-别名 表格保存) */
+
+/* 设置保存的引擎下发配置 (内嵌 JSON 原文, utf8): Apply 成功即更新 + XjsSaveConfig 落盘;
+   启动由 XjsEngineApplySavedConfigs 再下发 (引擎运行期配置不落盘, 见 xunjieso.h 筛选器/别名 API 注) */
+static std::string g_savedFilterJson, g_savedAliasJson;
 
 /* ==================== 多国语言 (i18n) ====================
  * 主键 = 点分中文主键 (如 "设置.外观.界面语言", 2026-09-19 起弃用"中文句子当键"):
@@ -979,6 +988,106 @@ int XjsJsonStringArray(const char* json, std::vector<std::wstring>* out) {
     for (auto& e : v.get<picojson::array>())
         if (e.is<std::string>()) out->push_back(Utf8ToUtf16(e.get<std::string>().c_str()));
     return (int)out->size();
+}
+
+/* ==================== 文件分类 (引擎筛选器) / 路径别名 配置 ====================
+ * 设置窗表格编辑后整体下发引擎 (正式版同款交互); 数据串格式 = 引擎口径
+ * (筛选器 [{"名称":"..","类型":99,"后缀":"EXE,BAT"}], 别名 {"完整路径":"别名"})。
+ * picojson 序列化负责转义; Apply 成功才更新保存串并落盘 (引擎拒绝 = 原配置不动)。 */
+
+static std::string XjsFilterJsonMake(const std::vector<XjsFilterItem>& rows) {
+    picojson::array arr;
+    for (auto& r : rows) {
+        picojson::object o;
+        o["名称"] = picojson::value(Utf16ToUtf8(r.name.c_str()));
+        o["类型"] = picojson::value((double)r.type);
+        o["后缀"] = picojson::value(Utf16ToUtf8(r.ext.c_str()));
+        arr.push_back(picojson::value(o));
+    }
+    return picojson::value(arr).serialize();
+}
+
+static std::string XjsAliasJsonMake(const std::vector<XjsAliasItem>& rows) {
+    picojson::object o;   /* picojson::object = map, 键序经排序; 引擎不依赖行序 */
+    for (auto& r : rows)
+        o[Utf16ToUtf8(r.path.c_str())] = picojson::value(Utf16ToUtf8(r.alias.c_str()));
+    return picojson::value(o).serialize();
+}
+
+static bool XjsFilterJsonParse(const char* utf8, std::vector<XjsFilterItem>* out) {
+    out->clear();
+    if (!utf8 || strlen(utf8) < 2) return false;
+    std::string copy = utf8;
+    picojson::value v;
+    if (!picojson::parse(v, copy).empty() || !v.is<picojson::array>()) return false;
+    const std::string kN = Utf16ToUtf8(L"名称"), kT = Utf16ToUtf8(L"类型"), kE = Utf16ToUtf8(L"后缀");
+    for (auto& e : v.get<picojson::array>()) {
+        if (!e.is<picojson::object>()) continue;
+        auto& o = e.get<picojson::object>();
+        XjsFilterItem it;
+        auto n = o.find(kN);
+        if (n != o.end() && n->second.is<std::string>()) it.name = Utf8ToUtf16(n->second.get<std::string>().c_str());
+        auto t = o.find(kT);
+        if (t != o.end() && t->second.is<double>()) it.type = (int)t->second.get<double>();
+        auto x = o.find(kE);
+        if (x != o.end() && x->second.is<std::string>()) it.ext = Utf8ToUtf16(x->second.get<std::string>().c_str());
+        out->push_back(it);
+    }
+    return true;
+}
+
+static bool XjsAliasJsonParse(const char* utf8, std::vector<XjsAliasItem>* out) {
+    out->clear();
+    if (!utf8 || strlen(utf8) < 2) return false;
+    std::string copy = utf8;
+    picojson::value v;
+    if (!picojson::parse(v, copy).empty() || !v.is<picojson::object>()) return false;
+    for (auto& kv : v.get<picojson::object>())
+        if (kv.second.is<std::string>())
+            out->push_back({ Utf8ToUtf16(kv.first.c_str()), Utf8ToUtf16(kv.second.get<std::string>().c_str()) });
+    return true;
+}
+
+bool XjsFilterConfigApply(const std::vector<XjsFilterItem>& rows) {
+    if (!g_engine) return false;
+    std::string json = XjsFilterJsonMake(rows);
+    /* sync=FALSE (正式版口径): 仅对之后入库的文件生效, 已入库文件的分类需重建索引才重算 */
+    if (xjs_filter_SetFilterJSON(g_engine, json.c_str(), FALSE) == FALSE) return false;
+    g_savedFilterJson = json;
+    XjsSaveConfig();
+    return true;
+}
+
+bool XjsAliasConfigApply(const std::vector<XjsAliasItem>& rows) {
+    if (!g_engine) return false;
+    std::string json = XjsAliasJsonMake(rows);
+    /* sync=TRUE (正式版口径 "保存后立即生效"): 命中新配置且当前无别名的已入库行立即写入;
+       大库同步遍历可能耗时数百毫秒~数秒, 遍历/保存/加载期间引擎拒绝 (35) */
+    if (xjs_alias_SetAliasJSON(g_engine, json.c_str(), TRUE) == FALSE) return false;
+    g_savedAliasJson = json;
+    XjsSaveConfig();
+    return true;
+}
+
+void XjsFilterConfigLoad(std::vector<XjsFilterItem>* rows) {
+    rows->clear();
+    if (!g_engine) return;
+    std::string cur = xjs_filter_GetFilterJSON(g_engine);   /* 内部管理指针, 第一时间拷贝 */
+    XjsFilterJsonParse(cur.c_str(), rows);
+}
+
+void XjsAliasConfigLoad(std::vector<XjsAliasItem>* rows) {
+    rows->clear();
+    if (!g_engine) return;
+    std::string cur = xjs_alias_GetAliasJSON(g_engine);   /* 路径已展开为绝对路径, 回显真实生效值 */
+    XjsAliasJsonParse(cur.c_str(), rows);
+}
+
+void XjsEngineApplySavedConfigs() {
+    if (!g_engine) return;
+    /* sync=FALSE: 行数据要么此前已应用过别名/分类 (加载的库), 要么正随扫描入库时套用当前配置 */
+    if (!g_savedFilterJson.empty()) xjs_filter_SetFilterJSON(g_engine, g_savedFilterJson.c_str(), FALSE);
+    if (!g_savedAliasJson.empty()) xjs_alias_SetAliasJSON(g_engine, g_savedAliasJson.c_str(), FALSE);
 }
 
 /* 询问框按钮数组 [{"text":"..","style":"default|primary|danger"},..] → 样式化按钮; 无有效按钮回退单个"确定" */
@@ -1822,6 +1931,12 @@ void XjsLoadConfig() {
         g_cfg.Root().erase(K_WINRECT);   /* 迁移完成即清除, 写回得干净配置 */
     }
 
+    /* 文件分类 / 路径别名 (设置窗表格保存的引擎下发配置; 值 = 内嵌 JSON 原文, utf8) */
+    if (auto it = g_cfg.Root().find(K_FILTERCFG); it != g_cfg.Root().end() && it->second.is<std::string>())
+        g_savedFilterJson = it->second.get<std::string>();
+    if (auto it = g_cfg.Root().find(K_ALIASCFG); it != g_cfg.Root().end() && it->second.is<std::string>())
+        g_savedAliasJson = it->second.get<std::string>();
+
     /* 重建对话框记忆 */
     picojson::object& rb = g_cfg.Obj(K_REBUILD);
     g_rbSaved = XjsConfig::Bool(rb, "已保存", false);
@@ -1961,6 +2076,10 @@ void XjsSaveConfig() {
     g_cfg.Set(K_DOUBLECTRL, Utf16ToUtf8(g_doubleCtrlTarget.c_str()));
     g_cfg.Set(K_ENGINE, std::string(g_gfxEngine == 1 ? "gdiplus" : "d2d"));   /* std::string 包裹: 裸三元是 const char*, 会被隐式匹配到 Set(bool) 重载落盘成 true (09-24 白屏崩溃元凶之一) */
     /* 语言已每窗化 (条目 "语言"); 顶层键废弃, LoadConfig 读作迁移种子后 erase */
+
+    /* 文件分类 / 路径别名 (顶层; XjsFilterConfigApply/XjsAliasConfigApply 成功时更新, 此处随档落盘) */
+    if (!g_savedFilterJson.empty()) g_cfg.Set(K_FILTERCFG, g_savedFilterJson);
+    if (!g_savedAliasJson.empty()) g_cfg.Set(K_ALIASCFG, g_savedAliasJson);
 
     /* 插件用户状态 (顶层 "插件"): 全部已知条目原样写回 (目录已删的也保留, 重装免重新启用) */
     {

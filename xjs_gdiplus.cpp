@@ -251,11 +251,11 @@ static float GdiMixedExtent(HDC dc, GdiFormat* f, const wchar_t* s, int len) {
     return w;
 }
 
-/* 贪心换行: CJK 逐字成 token, ASCII 连续段成词 token; 超宽单 token 逐字硬拆。
-   token 宽度走混排测量 (与绘制同一字体选择, 否则行数/行宽和绘制对不上) */
-static std::vector<std::wstring> GdiWrapLines(HDC dc, GdiFormat* f, const std::wstring& s, float maxW) {
-    std::vector<std::wstring> lines;
-    if (s.empty()) { lines.push_back(L""); return lines; }
+/* 贪心换行单段 (段内无硬换行): CJK 逐字成 token, ASCII 连续段成词 token; 超宽单 token 逐字硬拆。
+   token 宽度走混排测量 (与绘制同一字体选择, 否则行数/行宽和绘制对不上)。
+   结果追加进 lines (尾部 push_back 保证空段也占一行) */
+static void GdiWrapSeg(HDC dc, GdiFormat* f, const std::wstring& s, float maxW,
+                       std::vector<std::wstring>& lines) {
     std::vector<std::wstring> toks;
     std::wstring cur;
     for (size_t i = 0; i < s.size(); i++) {
@@ -301,6 +301,23 @@ static std::vector<std::wstring> GdiWrapLines(HDC dc, GdiFormat* f, const std::w
         lineW += tw;
     }
     lines.push_back(line);
+}
+
+/* 贪心换行: 硬换行 (\n, \r\n 的 \r 丢弃) 按行拆段逐段贪心 — DWrite 把 \n 当强制分行,
+   本管线此前只按空格/CJK 分词, \n 被并进词里 = 统计文本/对话框多行说明整段并成一行
+   (度量 GetMetrics 同走本函数, 行数/行高与绘制天然同口径) */
+static std::vector<std::wstring> GdiWrapLines(HDC dc, GdiFormat* f, const std::wstring& s, float maxW) {
+    std::vector<std::wstring> lines;
+    if (s.empty()) { lines.push_back(L""); return lines; }
+    size_t segBeg = 0;
+    for (size_t i = 0; i <= s.size(); i++) {
+        if (i != s.size() && s[i] != L'\n') continue;
+        size_t segEnd = i;
+        if (segEnd > segBeg && s[segEnd - 1] == L'\r') segEnd--;
+        if (segEnd > segBeg) GdiWrapSeg(dc, f, s.substr(segBeg, segEnd - segBeg), maxW, lines);
+        else lines.push_back(L"");   /* 空段 = 一个空行 (\n\n) */
+        segBeg = i + 1;
+    }
     return lines;
 }
 

@@ -7,7 +7,7 @@
 
 /* ==================== 搜索防抖 (重绘取数) ====================
  * 提交搜索后引擎异步重建结果数组, 过渡期内 idx→ID 漂移 + 行数跳动 = 列表闪烁。
-   提交前已快照"已显示行"ID与结果数 (XjsDebounceSnapshot); 重绘时判断 g_searching,
+   提交前已快照"已显示行"ID、结果数与行选中态 (XjsDebounceSnapshot); 重绘时判断 g_searching,
    正在搜索一律用快照画 (布局与内容冻结在提交瞬间); 完成/失败回调清快照并解除标志 */
 static bool XjsDebounceOn() {
     return g_searching.load() && !g_debounceIds.empty();
@@ -19,6 +19,16 @@ static int XjsDebounceFileId(int idx) {   /* 快照区间外的行 (滚动越界
     int i = idx - g_debounceFirst;
     if (i < 0 || i >= (int)g_debounceIds.size()) return -1;
     return g_debounceIds[i];
+}
+static bool XjsDebounceSelected(int idx) {   /* 快照选中位 (与快照ID一一对应); 区间外 = 未选中 */
+    int i = idx - g_debounceFirst;
+    if (i < 0 || i >= (int)g_debounceSel.size()) return false;
+    return g_debounceSel[i] != 0;
+}
+/* 渲染取选中唯一口径: 防抖冻结期引擎选中已被新查询清空, 随快照画; 其余走引擎事实源。
+   仅绘制用 — 交互路径 (点击/键盘) 仍走 XjsSelIsSelected, 语义是操作真实结果对象 */
+static bool XjsSelForPaint(int idx) {
+    return XjsDebounceOn() ? XjsDebounceSelected(idx) : XjsSelIsSelected(idx);
 }
 
 bool XjsIsGridView() { return g_viewMode == VM_MEDIUM || g_viewMode == VM_LARGE; }
@@ -646,7 +656,7 @@ static void XjsRenderGrid() {
             float x = L.list.left + XSF(12) + col * itemW;
             float y = (float)((double)L.list.top + (double)row * rowHd - g_scrollTop);
             XjsRect item = XjsRectF(x, y, x + itemW, y + rowH);
-            bool sel = XjsSelIsSelected(idx);
+            bool sel = XjsSelForPaint(idx);
             if (sel) {
                 g_rt->FillRoundedRectangle(XjsRoundedRectF(item, XSF(10), XSF(10)), g_br[XTH_ACCENT_SOFT]);
                 g_rt->DrawRoundedRectangle(XjsRoundedRectF(item, XSF(10), XSF(10)), g_br[XTH_ACCENT], 1.0f);
@@ -887,7 +897,7 @@ void XjsListRender() {
         /* 行 y 用 double 差值: (idx×行高 − 滚动位置) 在 1.5亿px 量级下 float 会量化出周期空槽 */
         float y = (float)((double)L.list.top + (double)idx * rowHd - g_scrollTop);
         XjsRect row = XjsRectF(rowL, y, rowR, y + rowH - XSF(2));
-        bool sel = XjsSelIsSelected(idx);
+        bool sel = XjsSelForPaint(idx);
         if (sel) {
             g_brSelGrad->SetStartPoint(XjsPoint2F(row.left, y));
             g_brSelGrad->SetEndPoint(XjsPoint2F(row.right, y));

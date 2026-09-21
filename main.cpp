@@ -493,6 +493,7 @@ void XjsOnPopupResult(int id) {
                 XjsSummonActivate(g_hWnd);
                 break;
             case 2: XjsSettingsShow(); break;                          /* 设置 (owner=托盘归属窗) */
+            case 4: XjsSettingsShowDonate(); break;                    /* 捐赠 = 开设置直达捐赠页 */
             case 3: XjsAppCloseWindow(g_hWnd, XCLOSE_EXIT); break;     /* 退出 = 强制真退出 */
         }
     } else if (id >= IDM_PLUGIN_BASE && id < IDM_PLUGIN_BASE + 200) {
@@ -506,7 +507,7 @@ void XjsOnPopupResult(int id) {
                默认无焦点口径同托盘唤起); 未打开 → 按槽位档案重建窗口 (菜单点击不收起窗口, toggle=false) */
             XjsSummonSlot(id - (IDM_MENU_BASE + 80), false);
         } else switch (id - IDM_MENU_BASE) {
-            case 2: PostMessageW(g_hWnd, WM_CLOSE, 0, 0); break;
+            case 51: XjsSettingsShowDonate(); break;   /* 捐赠 = 开设置直达捐赠页 (原"退出"项已挪走, 退出在托盘菜单) */
             case 46: XjsSearchWindow::OpenNew(); break;   /* 创建新窗口 (独立搜索结果对象) */
             case 41: XjsSetViewMode(VM_LIST); break;
             case 42: XjsSetViewMode(VM_DETAILS); break;
@@ -1179,7 +1180,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             /* 行内重命名编辑态优先 */
             if (XjsRenameActive()) { XjsRenameChar((wchar_t)wParam); return 0; }
             /* 自绘输入框字符入口 (IME 结果走 WM_IME_CHAR, 不经此防重复); 控制字符 (含 \r \t
-               与 Ctrl 组合码) 组件内拒收。未聚焦也接字: 编辑不夺焦, 光标不亮、文本/搜索照常更新 */
+               与 Ctrl 组合码) 组件内拒收。未聚焦也接字, 实际写入即聚焦 (文字输入/删除口径) */
             XjsSearchChar((wchar_t)wParam);
             return 0;
         }
@@ -1188,7 +1189,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
            WM_IME_CHAR 那条路吞掉只为防双份插入 */
         case WM_IME_CHAR: {
             if (XjsRenameActive()) { XjsRenameChar((wchar_t)wParam); return 0; }
-            if (XjsSearchChar((wchar_t)wParam)) return 0;   /* 未聚焦也接字 (编辑不夺焦) */
+            if (XjsSearchChar((wchar_t)wParam)) return 0;   /* 未聚焦也接字 (写入即聚焦) */
             return 0;
         }
         case WM_IME_STARTCOMPOSITION: {
@@ -1314,6 +1315,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             /* 数据库首次就绪 (加载路径): 结果对象自此才允许创建 (早建会被 DLL 按"库未加载"定死文件名序) */
             g_dbReady = true;
             XjsEngineEnsureResultAll();
+            XjsEngineApplySavedConfigs();   /* 保存的 文件分类/路径别名 下发引擎 (加载完成, 引擎空闲; sync=FALSE 不重算旧行) */
             /* 源样式 Search.StatusReady */
             g_statusText = XjsFmt(XjsT(L"状态栏.就绪索引"),
                 XjsWanText(g_engine ? xjs_db_GetFileCount(g_engine) : 0));
@@ -1333,7 +1335,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             delete d;
             /* 搜索完成回调: 清防抖快照 + 解除正在搜索; 结果集换血后行缓存作废, 下一帧按新结果画 */
             g_searching.store(false);
-            g_debounceIds.clear();
+            w->ClearDebounceSnapshot();
             XjsClearRowCache();
             XjsClampScroll();
             /* 默认选中第一个表项 (每窗设置): 新结果集就绪即选中首项, 预览面板随之联动;
@@ -1362,7 +1364,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 else g_errText = XjsFmt(XjsT(L"错误.搜索失败前缀"), errMsg);
                 /* 错误搜索回调: 同样解除防抖 (迟到的旧搜索失败不动当前防抖窗口) */
                 g_searching.store(false);
-                g_debounceIds.clear();
+                w->ClearDebounceSnapshot();
                 XjsClearRowCache();
                 w->selFirstPending = false;   /* 本场搜索已失败: 待落地选中作废 */
             }
@@ -1421,6 +1423,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     items.push_back({ IDM_TRAY_BASE + 1, XjsT(L"托盘.恢复窗口"), L"", false, false, false, false, false, XMI_RESTORE });
                     items.push_back({ 0, L"", L"", false, true, false, false });
                     items.push_back({ IDM_TRAY_BASE + 2, XjsT(L"通用词.设置"), L"", false, false, false, false, false, XMI_GEAR });
+                    items.push_back({ IDM_TRAY_BASE + 4, XjsT(L"菜单.捐赠"), L"", false, false, false, false, false, XMI_HEART });   /* 开设置直达捐赠页 */
                     items.push_back({ 0, L"", L"", false, true, false, false });
                     items.push_back({ IDM_TRAY_BASE + 3, XjsT(L"托盘.退出程序"), L"", false, false, false, false, false, XMI_EXIT });
                     XjsShowPopupMenu(hwnd, pt, items, XSF(180));
@@ -1744,6 +1747,7 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
         xjs_db_AddField(g_engine, "修改时间", NULL);
         xjs_db_AddField(g_engine, "文件评分", NULL);
         xjs_db_AddField(g_engine, "别名", NULL);
+        XjsEngineApplySavedConfigs();   /* 保存的 文件分类/路径别名 先于扫描下发: 入库即按配置分类/置别名 */
         XjsSetPhase(L"post-create:scan-start");
         xjs_db_ScanPath(g_engine, NULL, TRUE);
         g_statusText = XjsT(L"状态栏.正在建立索引");   /* 源样式 Search.ScanningDesc */

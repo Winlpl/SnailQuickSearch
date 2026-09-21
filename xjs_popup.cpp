@@ -51,10 +51,20 @@ static LRESULT CALLBACK Xjs_PopupMouseHook(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(s_popupHook, code, wp, lp);
 }
 
-/* 释放弹窗 D2D 资源 (画刷挂在 p->rt 上随 RT 一并释放; 文本格式设备无关但一并重建简单).
+/* 释放弹窗 D2D 资源 (文本格式设备无关但一并重建简单).
    换肤热应用时调用, 下次 WM_PAINT 按新皮肤重建; WM_DESTROY 复用 */
 static void XjsPopupFreeResources(XjsPopupState* p) {
     if (p->rt) { p->rt->Release(); p->rt = NULL; }
+    /* 纯色画刷是独立 COM 对象 (不随 RT 释放), 只置空 = 每次开菜单/换肤泄漏一轮 (同设置窗画刷之坑) */
+    if (p->brBg) { p->brBg->Release(); }
+    if (p->brBorder) { p->brBorder->Release(); }
+    if (p->brHover) { p->brHover->Release(); }
+    if (p->brText) { p->brText->Release(); }
+    if (p->brDim) { p->brDim->Release(); }
+    if (p->brAccent) { p->brAccent->Release(); }
+    if (p->brIcon) { p->brIcon->Release(); }
+    if (p->brDanger) { p->brDanger->Release(); }
+    if (p->brWhite) { p->brWhite->Release(); }
     p->brBg = NULL; p->brBorder = NULL; p->brHover = NULL;
     p->brText = NULL; p->brDim = NULL; p->brAccent = NULL;
     p->brIcon = NULL; p->brDanger = NULL; p->brWhite = NULL;
@@ -160,6 +170,63 @@ static void XjsPopupTailGeom(float w, bool confirm, float* editCx, float* delCx,
 
 /* ==================== 菜单线性图标 (照源样式 ctx-ic 16×16 SVG 逐路径描边) ====================
  * 坐标系 = SVG viewBox 16 单位, 以 (cx,cy) 为中心; 描边宽: 文件右键图标 1.2 / SB 族 1.3 (同源样式) */
+
+/* 捐赠图标 (心+托手) 折点表: 用户提供的 1024 viewBox 实心 SVG 路径按 1/64 扁平化到 16 单位坐标
+ * (圆弧 24 段/贝塞尔 12 段采样 + RDP 0.015 简化, 首尾同点闭合; 圆头描边下视觉与原图标一致)。
+ * 子路径 0 = 心形轮廓, 子路径 1 = 托手轮廓 */
+static const float XjsMenuDonateHeartPts[] = {
+    8.709f, 9.763f, 7.941f, 9.227f, 7.189f, 8.638f,
+    6.356f, 7.899f, 5.948f, 7.488f, 5.568f, 7.058f,
+    5.229f, 6.614f, 4.809f, 5.921f, 4.635f, 5.451f,
+    4.585f, 5.177f, 4.568f, 4.899f, 4.590f, 4.582f,
+    4.653f, 4.278f, 4.756f, 3.989f, 4.894f, 3.719f,
+    5.066f, 3.470f, 5.268f, 3.246f, 5.498f, 3.048f,
+    5.752f, 2.880f, 6.027f, 2.744f, 6.322f, 2.644f,
+    6.633f, 2.581f, 6.956f, 2.560f, 7.406f, 2.617f,
+    7.615f, 2.683f, 8.000f, 2.870f, 8.486f, 3.229f,
+    8.944f, 3.691f, 9.273f, 3.343f, 9.557f, 3.093f,
+    9.890f, 2.862f, 10.272f, 2.680f, 10.699f, 2.574f,
+    10.930f, 2.560f, 11.254f, 2.581f, 11.564f, 2.644f,
+    11.859f, 2.744f, 12.135f, 2.880f, 12.389f, 3.048f,
+    12.618f, 3.246f, 12.820f, 3.470f, 12.992f, 3.719f,
+    13.130f, 3.989f, 13.233f, 4.278f, 13.296f, 4.582f,
+    13.318f, 4.899f, 13.293f, 5.228f, 13.219f, 5.551f,
+    13.097f, 5.864f, 12.991f, 6.065f, 12.673f, 6.572f,
+    12.366f, 6.977f, 12.021f, 7.373f, 11.267f, 8.118f,
+    10.147f, 9.051f, 9.111f, 9.788f, 8.910f, 9.831f,
+    8.709f, 9.763f, 8.709f, 9.763f,
+};
+static const float XjsMenuDonateHandPts[] = {
+    10.349f, 10.886f, 10.405f, 11.001f, 10.378f, 11.182f,
+    10.273f, 11.344f, 10.178f, 11.425f, 9.870f, 11.560f,
+    9.370f, 11.624f, 8.675f, 11.585f, 7.753f, 11.433f,
+    7.045f, 11.223f, 6.685f, 11.075f, 6.201f, 10.829f,
+    6.095f, 10.819f, 5.890f, 10.881f, 5.729f, 11.025f,
+    5.652f, 11.218f, 5.657f, 11.323f, 5.699f, 11.429f,
+    5.782f, 11.531f, 5.912f, 11.625f, 6.719f, 12.004f,
+    7.529f, 12.296f, 8.435f, 12.526f, 8.892f, 12.592f,
+    9.332f, 12.613f, 9.744f, 12.577f, 10.115f, 12.476f,
+    10.431f, 12.300f, 10.894f, 11.892f, 11.200f, 11.513f,
+    11.367f, 11.165f, 11.414f, 10.850f, 11.359f, 10.573f,
+    11.299f, 10.449f, 11.181f, 10.306f, 11.652f, 9.852f,
+    12.003f, 9.586f, 12.286f, 9.472f, 12.611f, 9.453f,
+    12.800f, 9.501f, 12.950f, 9.569f, 13.230f, 9.804f,
+    13.396f, 10.103f, 13.438f, 10.431f, 13.391f, 10.649f,
+    13.310f, 10.816f, 12.000f, 12.488f, 11.179f, 13.627f,
+    10.971f, 13.821f, 10.801f, 13.935f, 10.518f, 14.054f,
+    10.324f, 14.080f, 6.802f, 14.067f, 6.506f, 13.969f,
+    5.464f, 13.372f, 4.709f, 13.023f, 3.932f, 12.949f,
+    2.608f, 12.913f, 2.407f, 12.858f, 2.230f, 12.757f,
+    2.086f, 12.616f, 1.983f, 12.443f, 1.927f, 12.246f,
+    1.920f, 10.326f, 1.949f, 10.120f, 2.029f, 9.934f,
+    2.230f, 9.710f, 2.407f, 9.608f, 2.609f, 9.554f,
+    2.961f, 9.531f, 3.194f, 9.491f, 4.270f, 9.201f,
+    4.613f, 9.162f, 5.005f, 9.167f, 5.280f, 9.189f,
+    5.756f, 9.272f, 6.335f, 9.479f, 6.826f, 9.763f,
+    7.789f, 10.420f, 7.955f, 10.520f, 8.161f, 10.599f,
+    8.876f, 10.735f, 10.349f, 10.886f, 10.349f, 10.886f,
+};
+
 static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
                             XjsBrush* br, XjsStroke* ss) {
     if (!icon || !rt || !br) return;
@@ -298,6 +365,17 @@ static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
             seg(10.5f, 5.5f, 13, 8, wTray);
             seg(13, 8, 10.5f, 10.5f, wTray);
             break;
+        case XMI_HEART: {   /* 托盘-捐赠: 心+托手 (用户提供 SVG 逐路径描边, 密折点表见函数上方; 圆头描边平滑轮廓) */
+            auto poly = [&](const float* xy, int n) {
+                for (int i = 0; i < n; i++) {
+                    int j = (i + 1) % n;
+                    seg(xy[i * 2], xy[i * 2 + 1], xy[j * 2], xy[j * 2 + 1], wTray);
+                }
+            };
+            poly(XjsMenuDonateHeartPts, (int)(sizeof(XjsMenuDonateHeartPts) / sizeof(float) / 2));
+            poly(XjsMenuDonateHandPts, (int)(sizeof(XjsMenuDonateHandPts) / sizeof(float) / 2));
+            break;
+        }
     }
 }
 
@@ -1664,6 +1742,21 @@ struct XjsInputState {
 };
 static XjsInputState s_input;
 
+/* 纯色画刷是独立 COM 对象 (不随 RT 释放), 只置空 = 每次打开对话框泄漏一轮 (同设置窗画刷之坑);
+   WM_DESTROY 与设备丢失重建两处同用 */
+static void XjsInputFreeBrushes() {
+    if (s_input.brPanel) { s_input.brPanel->Release(); }
+    if (s_input.brSelection) { s_input.brSelection->Release(); }
+    if (s_input.brBorder) { s_input.brBorder->Release(); }
+    if (s_input.brPanel2) { s_input.brPanel2->Release(); }
+    if (s_input.brText) { s_input.brText->Release(); }
+    if (s_input.brTextDim) { s_input.brTextDim->Release(); }
+    if (s_input.brTextFaint) { s_input.brTextFaint->Release(); }
+    if (s_input.brAccent) { s_input.brAccent->Release(); }
+    s_input.brPanel = s_input.brSelection = s_input.brBorder = s_input.brPanel2 = NULL;
+    s_input.brText = s_input.brTextDim = s_input.brTextFaint = s_input.brAccent = NULL;
+}
+
 static void XjsInputFinish(bool ok) {
     XjsInputState& s = s_input;
     if (!s.hwnd) return;
@@ -1732,10 +1825,9 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             btn(s.cancelBtn, XjsT(L"通用词.取消"), 2);
             HRESULT hr = s.rt->EndDraw();
             if (hr == (HRESULT)D2DERR_RECREATE_TARGET) {
-                /* 设备丢失: 释放 RT (画刷随 RT 一并失效) 下帧重建, 避免留下坏目标画不出内容 */
+                /* 设备丢失: RT+画刷全部释放下帧重建, 避免留下坏目标画不出内容 */
                 s.rt->Release(); s.rt = NULL;
-                s.brPanel = s.brSelection = s.brBorder = NULL;
-                s.brPanel2 = s.brText = s.brTextDim = s.brTextFaint = s.brAccent = NULL;
+                XjsInputFreeBrushes();
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             EndPaint(hwnd, &ps);
@@ -1851,8 +1943,7 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             XjsCaretBlink::DetachWindow(hwnd);   /* 退登记 + 停表, 之后窗口不再收 WM_TIMER */
             if (g_sysCaretMade) { DestroyCaret(); g_sysCaretMade = false; }   /* 光标挂在本窗口上, 随窗清理 */
             if (s.rt) { s.rt->Release(); s.rt = NULL; }
-            s.brPanel = s.brSelection = s.brBorder = s.brPanel2 = NULL;
-            s.brText = s.brTextDim = s.brTextFaint = s.brAccent = NULL;
+            XjsInputFreeBrushes();
             if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
             s.pressBtn = 0;
             s.hwnd = NULL;
@@ -1971,6 +2062,22 @@ struct XjsAskState {
 };
 static XjsAskState s_ask;
 
+/* 纯色画刷是独立 COM 对象 (不随 RT 释放), 只置空 = 每次打开对话框泄漏一轮 (同设置窗画刷之坑);
+   WM_DESTROY 与设备丢失重建两处同用 */
+static void XjsAskFreeBrushes() {
+    if (s_ask.brPanel) { s_ask.brPanel->Release(); }
+    if (s_ask.brBorder) { s_ask.brBorder->Release(); }
+    if (s_ask.brPanel2) { s_ask.brPanel2->Release(); }
+    if (s_ask.brText) { s_ask.brText->Release(); }
+    if (s_ask.brTextDim) { s_ask.brTextDim->Release(); }
+    if (s_ask.brAccent) { s_ask.brAccent->Release(); }
+    if (s_ask.brWhite) { s_ask.brWhite->Release(); }
+    if (s_ask.brErr) { s_ask.brErr->Release(); }
+    if (s_ask.brErrSoft) { s_ask.brErrSoft->Release(); }
+    s_ask.brPanel = s_ask.brBorder = s_ask.brPanel2 = s_ask.brText = s_ask.brTextDim = NULL;
+    s_ask.brAccent = s_ask.brWhite = s_ask.brErr = s_ask.brErrSoft = NULL;
+}
+
 bool XjsAskDialogOpen() { return s_ask.hwnd != NULL; }
 bool XjsModalOverlayFor(HWND hwnd) {
     return (s_ask.hwnd && s_ask.owner == hwnd) || (s_input.hwnd && s_input.owner == hwnd);
@@ -2040,8 +2147,7 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 HRESULT hr = s.rt->EndDraw();
                 if (hr == (HRESULT)D2DERR_RECREATE_TARGET) {
                     s.rt->Release(); s.rt = NULL;
-                    s.brPanel = s.brBorder = s.brPanel2 = s.brText = s.brTextDim = NULL;
-                    s.brAccent = s.brWhite = s.brErr = s.brErrSoft = NULL;
+                    XjsAskFreeBrushes();
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
             }
@@ -2094,8 +2200,7 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s.trackingLeave = false;
             s.pressBtn = -1;
             if (s.rt) { s.rt->Release(); s.rt = NULL; }
-            s.brPanel = s.brBorder = s.brPanel2 = s.brText = s.brTextDim = NULL;
-            s.brAccent = s.brWhite = s.brErr = s.brErrSoft = NULL;
+            XjsAskFreeBrushes();
             if (s.tfTitle) { s.tfTitle->Release(); s.tfTitle = NULL; }
             if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
             if (s.tfBtn) { s.tfBtn->Release(); s.tfBtn = NULL; }

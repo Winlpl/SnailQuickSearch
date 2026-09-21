@@ -8,9 +8,9 @@
 // 完整 ico 文件字节原样嵌入 (标题栏 D2D 绘制: WIC 内存解码取最大帧; 与 32512 同源, 不读磁盘)
 205 RCDATA "snailsearch.ico"
 
-// 赞助二维码 (设置 - 赞助页, RCDATA 原样嵌入, 运行期 WIC 解码)
-201 RCDATA "sponsor-wechat.png"
-202 RCDATA "sponsor-alipay.jpg"
+// 捐赠二维码 (设置 - 捐赠页, RCDATA 原样嵌入, 运行期 WIC 解码)
+201 RCDATA "donate-wechat.png"
+202 RCDATA "donate-alipay.jpg"
 
 // 内置文档 (md4c 解析 + D2D 排版, 通用引擎见 xjs_md.cpp)
 203 RCDATA "搜索模式简介.md"        /* 设置 - 搜索模式 分类 */

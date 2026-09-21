@@ -74,6 +74,7 @@
 #define ID_TIMER_SYNCWATCH  7   /* 文件同步变化轮询 (源样式 线程时钟 移植): 100ms 比对结果数量, 变了才节流刷新 */
 #define ID_TIMER_HOVERFADE  8   /* 列表悬停高亮渐隐拖尾驱动 (30ms, 有衰减中的行才挂) */
 #define ID_TIMER_HOSTEDSRC  9   /* 多来源标签悬停 180ms 后弹"切换搜索来源"菜单 (一次性) */
+#define ID_TIMER_SETLIVE    10  /* 设置窗 内存/性能分析页 实时数据 1s 刷新 (仅这两分类重建行模型, 其余分类空转) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
@@ -116,10 +117,10 @@ void XjsSetPhase(const wchar_t* p);
 #define IDM_CMODE_BASE      2500   /* 用户自定义搜索模式菜单项 (+下标, 上限100) */
 #define IDM_HISTORY_BASE    3000   /* +0..998 历史项; +999 清空历史 */
 #define IDM_FILTER_BASE     4000   /* +筛选分类下标 (XjsApplyFilter) */
-#define IDM_MENU_BASE       5000   /* ☰菜单: +2 关闭 +46 新窗口 +50 设置 +80..143 窗口启动器 (档案槽) */
+#define IDM_MENU_BASE       5000   /* ☰菜单: +46 新窗口 +50 设置 +51 捐赠(开设置直达捐赠页) +80..143 窗口启动器 (档案槽) */
 #define IDM_COL_BASE        6000   /* 表头列显隐菜单: +fullIdx */
 #define IDM_HOSTED_SRC_BASE 7000   /* 托管标签"切换搜索来源"菜单: +来源下标 */
-#define IDM_TRAY_BASE       8000   /* 托盘右键菜单: +1恢复窗口 +2设置 +3退出程序 */
+#define IDM_TRAY_BASE       8000   /* 托盘右键菜单: +1恢复窗口 +2设置 +4捐赠(开设置直达捐赠页) +3退出程序 */
 #define IDM_FCTX_BASE       9000   /* 输入字段右键编辑菜单 (路由层通用): +0剪切 +1复制 +2粘贴 +3全选 +4删除 */
 #define IDM_PLUGIN_BASE     10000  /* 插件菜单/状态栏项 (票号表下标, 上限200; 回传 → XjsPluginOnMenuTicket) */
 
@@ -454,7 +455,8 @@ void XjsPopupReleaseResources();                /* 释放弹窗RT/画刷 (换肤
 /* ==================== 设置窗口 (独立顶层窗口, 皮肤列表等迁入) ==================== */
 extern int g_skinEpoch;                         /* 每次换肤 +1 (子窗口据此重建自己的画刷) */
 void XjsRegisterSettingsClass(HINSTANCE hInst);
-void XjsSettingsShow();                         /* 打开/前置设置窗口 (单例) */
+void XjsSettingsShow(int cat = -1);             /* 打开/前置设置窗口 (单例); cat>=0 = 打开后直接切到该分类页 (SC_*, xjs_settings.cpp) */
+void XjsSettingsShowDonate();                   /* ☰菜单"捐赠": 打开设置并直达捐赠页 (分类 id 收在设置模块内, 外部经此入口防下标漂移) */
 bool XjsSettingsOpenFor(HWND ownerSearchHwnd);  /* 设置窗打开中且 owner=该搜索窗 (失焦关闭豁免判定用) */
 
 /* ---- xjs_md (通用 Markdown 引擎: md4c 解析 + D2D 排版绘制; 设置"搜索模式"页与未来 .md 预览共用) ----
@@ -570,6 +572,7 @@ enum XjsMenuIcon {
     XMI_CUT, XMI_COPY, XMI_PASTE, XMI_SELECTALL, XMI_DELETE,
     XMI_COPYPATH, XMI_GEAR,
     XMI_RESTORE, XMI_EXIT,   /* 托盘菜单: 恢复窗口 / 退出程序 (照源样式 Tray.Restore/Tray.Exit SVG) */
+    XMI_HEART,               /* 托盘菜单: 捐赠 (心形; 源样式无此项, 按同族线段风格自绘) */
 };
 
 struct XjsPopupItem {
@@ -1002,6 +1005,7 @@ public:
     std::atomic<int> uiPostPending{0};      /* 已投给本窗、未处理的引擎消息数 (闸门每窗账): DestroyWindow 会整批清除队列里
                                                本窗的未处理消息, 全局闸门计数按此账返还 (XjsPostToUiFor/DropWindow) */
     std::vector<int> debounceIds;
+    std::vector<unsigned char> debounceSel;  /* 防抖快照选中位 (与 debounceIds 一一对应): 提交查询时引擎清空选中, 冻结期选中态随快照画 */
     int debounceFirst = 0;
     int debounceCount = 0;
     int visFirst = 0;      /* 最近一帧可见行区间 (图标按需闸门) */
@@ -1125,6 +1129,9 @@ public:
     void MigrateMainRole();                           /* 主窗真关闭前: 托盘/热键/isMain 迁往最老存留窗 */
     bool CloseRequest();                              /* 关闭请求: 最后窗口=藏托盘(返回true); 否则真关闭(返回false) */
     void DestroyAndFree();                            /* 窗口销毁后: 注册表摘除并释放 */
+    void ClearDebounceSnapshot() {                    /* 防抖快照清理唯一入口 (完成/失败回调/渲染缓存作废/重采样前) */
+        debounceIds.clear(); debounceSel.clear(); debounceFirst = 0; debounceCount = 0;
+    }
 };
 
 /* 作用域内把"当前窗"临时切到指定窗口 (设置窗等 owner 绑定场景); 析构自动恢复 */
@@ -1194,6 +1201,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_hostMenuTag     (XjsSearchWindow::Cur()->hostMenuTag)
 #define g_fileChangePending (XjsSearchWindow::Cur()->fileChangePending)
 #define g_debounceIds     (XjsSearchWindow::Cur()->debounceIds)
+#define g_debounceSel     (XjsSearchWindow::Cur()->debounceSel)
 #define g_debounceFirst   (XjsSearchWindow::Cur()->debounceFirst)
 #define g_debounceCount   (XjsSearchWindow::Cur()->debounceCount)
 #define g_visFirst        (XjsSearchWindow::Cur()->visFirst)
@@ -1493,6 +1501,20 @@ int XjsJsonStringArray(const char* json, std::vector<std::wstring>* out);  /* �
 void XjsLoadConfig();
 void XjsSaveConfig();
 void XjsSaveWindowRect();
+
+/* ---- 文件分类 (引擎筛选器) 与 路径别名 配置 (设置窗表格编辑, 整体下发引擎) ----
+ * 数据串 = 引擎口径: 筛选器 JSON 数组 [{"名称":"..","类型":99,"后缀":"EXE,BAT"}];
+ * 别名 JSON 对象 {"完整路径":"别名"}。解析/序列化/落盘全收在 xjs_engine.cpp (JSON 细节不过本头)。
+ * Apply = 下发引擎 + 写配置键 + 即时落盘; Load = 取引擎当前生效配置 (保存后回显经引擎规范化/占位符
+ * 展开的真实值)。Apply 返回假时用 xjs_GetLastError 取 30(参数无效)/35(数据库正忙)。 */
+struct XjsFilterItem { std::wstring name, ext; int type = 0; };
+struct XjsAliasItem  { std::wstring path, alias; };
+bool XjsFilterConfigApply(const std::vector<XjsFilterItem>& rows);   /* sync=FALSE: 已入库文件类型需重建才重算 */
+bool XjsAliasConfigApply(const std::vector<XjsAliasItem>& rows);     /* sync=TRUE: 立即应用到现有库 */
+void XjsFilterConfigLoad(std::vector<XjsFilterItem>* rows);          /* 引擎当前配置 → 行 (引擎无效=空表) */
+void XjsAliasConfigLoad(std::vector<XjsAliasItem>* rows);
+void XjsEngineApplySavedConfigs();   /* 启动: 把配置里保存的 别名/筛选器 下发引擎 (库就绪前/后调用; sync=FALSE) */
+
 void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJsonWide);  /* 字段开关+盘符JSON(空=全盘), 设置对话框用 (确认在设置窗自绘对话框完成; 曾有无调用方的 XjsEngineRebuild 带系统 MessageBox, 已删) */
 void XjsEngineShutdown(bool warnOnSaveFail);
 XjsColor XjsDriveColor(int percent);
@@ -1564,9 +1586,9 @@ void XjsSearchSetText(const std::wstring& s);     // 置入文本 (光标到末�
 void XjsSearchSetTextQuiet(const std::wstring& s); // 置入文本不触发搜索 (插件 SearchSetText execute=0)
 void XjsSearchCaretToEnd();                       // 光标移到末尾 (工具函数; 打字聚焦入口已删, 现无调用方)
 void XjsSearchClear();                            // 清空 (留一键撤销)
-bool XjsSearchKey(WPARAM vk);                     // WM_KEYDOWN (聚焦时全量吞键; 未聚焦仅 VK_BACK/←/→ 仍编辑光标(不夺焦), 其余返回 false 归列表)
-bool XjsSearchChar(wchar_t ch);                   // WM_CHAR / WM_IME_CHAR (未聚焦也接字: 编辑不夺焦; 返回 true 已消费)
-bool XjsSearchImeResult(HWND hwnd, LPARAM lParam);// WM_IME_COMPOSITION: GCS_RESULTSTR 整串上屏
+bool XjsSearchKey(WPARAM vk);                     // WM_KEYDOWN (未聚焦仅 VK_BACK/←/→ 放行; 退格实删=聚焦, ←→ 不夺焦, 其余返回 false 归列表)
+bool XjsSearchChar(wchar_t ch);                   // WM_CHAR / WM_IME_CHAR (未聚焦也接字, 实际写入即聚焦 — 文字输入/删除口径; 返回 true 已消费)
+bool XjsSearchImeResult(HWND hwnd, LPARAM lParam);// WM_IME_COMPOSITION: GCS_RESULTSTR 整串上屏 (上屏实入文字=聚焦)
 bool XjsSearchMouseDown(POINT pt);                // 按下: 聚焦+点定位光标 (Shift=扩展选区)
 void XjsSearchMouseMove(POINT pt);                // 拖拽选字
 void XjsSearchMouseUp(POINT pt);                  // 结束拖拽
