@@ -64,8 +64,19 @@ struct XjsPluginEntry {
     int  (XJS_PLUGIN_CALL *fnOnInput)(XjsPluginCtx*, XjsWindowToken, const char*) = NULL;
     int  (XJS_PLUGIN_CALL *fnOnPreview)(XjsPluginCtx*, int, XjsWindowToken, int) = NULL;
     void (XJS_PLUGIN_CALL *fnOnEvent)(XjsPluginCtx*, int, XjsWindowToken, void*) = NULL;
+    void (XJS_PLUGIN_CALL *fnOnPanelEvent)(XjsPluginCtx*, XjsWindowToken, const XjsPanelEvent*) = NULL;
     void (XJS_PLUGIN_CALL *fnOnHostGone)(XjsPluginCtx*) = NULL;
 };
+
+/* 镜像对值 (xjs_app.h XJS_HPANEL_* ↔ SDK XJS_PANEL_*): 两套枚举必须逐项同值, 单边改号此处必炸 */
+static_assert(XJS_HPANEL_OPEN == XJS_PANEL_OPEN && XJS_HPANEL_CLOSE == XJS_PANEL_CLOSE &&
+              XJS_HPANEL_RESIZE == XJS_PANEL_RESIZE && XJS_HPANEL_MOUSE_MOVE == XJS_PANEL_MOUSE_MOVE &&
+              XJS_HPANEL_LDOWN == XJS_PANEL_LDOWN && XJS_HPANEL_LUP == XJS_PANEL_LUP &&
+              XJS_HPANEL_RDOWN == XJS_PANEL_RDOWN && XJS_HPANEL_RUP == XJS_PANEL_RUP &&
+              XJS_HPANEL_DBLCLK == XJS_PANEL_DBLCLK && XJS_HPANEL_WHEEL == XJS_PANEL_WHEEL &&
+              XJS_HPANEL_KEY_DOWN == XJS_PANEL_KEY_DOWN && XJS_HPANEL_KEY_CHAR == XJS_PANEL_KEY_CHAR &&
+              XJS_HPANEL_FOCUS == XJS_PANEL_FOCUS && XJS_HPANEL_CAPTURE_LOST == XJS_PANEL_CAPTURE_LOST,
+              "XJS_HPANEL_* mirror of XJS_PANEL_* (xjs_app.h) drifted");
 
 static std::vector<XjsPluginEntry> s_plugins;      /* 按 mf.id 升序, 槽位稳定 */
 static std::vector<XjsPluginUserState> s_user;     /* 配置 "插件" 键镜像 (Load/Save 经 Xjs*UserState*) */
@@ -276,6 +287,7 @@ static void PluginScan() {
                 e.fnGetInfo = o.fnGetInfo; e.fnInit = o.fnInit; e.fnShutdown = o.fnShutdown;
                 e.fnOnCommand = o.fnOnCommand; e.fnBuildMenu = o.fnBuildMenu; e.fnOnSearchMode = o.fnOnSearchMode;
                 e.fnOnInput = o.fnOnInput; e.fnOnPreview = o.fnOnPreview; e.fnOnEvent = o.fnOnEvent;
+                e.fnOnPanelEvent = o.fnOnPanelEvent;
                 e.fnOnHostGone = o.fnOnHostGone;
                 if (o.loaded && e.mf.ok && !e.dllPath.empty()) {   /* 已加载插件: DLL 被换过 → 需重启生效 */
                     FILETIME now = PluginFileWriteTime(e.dllPath);
@@ -335,6 +347,7 @@ static bool PluginLoadOne(XjsPluginEntry& e, std::wstring* err) {
         e.fnOnInput = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, XjsWindowToken, const char*))GetProcAddress(e.mod, "XjsPlugin_OnInput");
         e.fnOnPreview = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, int, XjsWindowToken, int))GetProcAddress(e.mod, "XjsPlugin_OnPreview");
         e.fnOnEvent = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, int, XjsWindowToken, void*))GetProcAddress(e.mod, "XjsPlugin_OnEvent");
+        e.fnOnPanelEvent = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, XjsWindowToken, const XjsPanelEvent*))GetProcAddress(e.mod, "XjsPlugin_OnPanelEvent");
         e.fnOnHostGone = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*))GetProcAddress(e.mod, "XjsPlugin_OnHostGone");
     }
     if (!e.ctx) { *err = L"内部状态错误 (ctx 未初始化)"; return false; }   /* 扫描后置已保证分配 */
@@ -383,6 +396,7 @@ void XjsPluginRescan() {
         std::wstring err;
         if (!PluginLoadOne(e, &err)) e.loadErr = err;
     }
+    XjsPluginPanelValidateOwners();   /* 重扫可能移除/清空能力: owner 失效的接管会话立即结束 */
 }
 
 void XjsPluginOnWindowDestroyed(HWND hwnd) {
@@ -424,6 +438,7 @@ void XjsPluginDisable(int i) {
     XjsPluginEntry& e = s_plugins[i];
     e.enabled = false;
     PluginUserSync(e);
+    XjsPluginPanelValidateOwners();   /* 面板接管会话的 owner 失效 → 立即结束并恢复预览 */
     /* 不卸载不释放 (照源样式口径); 其搜索模式/托管来源由调用方剔除并重搜。
        evtMask 不清: 事件派发本就按 PluginActive (enabled) 闸住, 清了则再启用时
        loaded=true 短路 Init 不重跑、Subscribe 不会再调 = 插件永久收不到事件 */
@@ -923,6 +938,75 @@ static int FnPrevText(XjsPluginCtx* ctx, int requestId, const char* utf8) {
     return XjsPreviewPluginDeliverText(requestId, utf8) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 
+/* ==================== 宿主 API: 面板接管 (preview-panel 能力, v4) ==================== */
+
+static int FnPanelOpen(XjsPluginCtx* ctx, XjsWindowToken window) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if (!(p->mf.caps & XPC_PANEL) || !p->fnOnPanelEvent) return XJS_PLUGIN_ERR_PERM;   /* 未声明面板能力不得开 */
+    XjsSearchWindow* w = PluginWindowOfToken(window);
+    if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
+    XjsWindowScope scope(w);
+    return XjsPreviewPanelOpen(w, window, p->mf.id.c_str()) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
+}
+
+static int FnPanelClose(XjsPluginCtx* ctx, XjsWindowToken window) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    XjsSearchWindow* w = PluginWindowOfToken(window);
+    if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
+    if (!w->plugPanelOn || w->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;   /* 不是本插件的会话 */
+    XjsWindowScope scope(w);
+    XjsPreviewPanelClose(w, window, true);   /* 插件主动关 = 正常收尾, 按打开前状态恢复预览 */
+    return XJS_PLUGIN_OK;
+}
+
+static int FnPanelGetInfo(XjsPluginCtx* ctx, XjsWindowToken window, long long* serial, int* w, int* h, float* scale) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式渲染前取尺寸) */
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) {
+        if (serial) *serial = 0;
+        if (w) *w = 0;
+        if (h) *h = 0;
+        if (scale) *scale = 1.0f;
+        return XJS_PLUGIN_ERR_STATE;
+    }
+    XjsPreviewPanelInfo(win, serial, w, h, scale);
+    return XJS_PLUGIN_OK;
+}
+
+static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long long serial,
+                                int w, int h, const void* bgra, int stride) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式交付) */
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
+    return XjsPreviewPanelDeliver(win, serial, w, h, bgra, stride) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
+}
+
+static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
+    XjsWindowScope scope(win);
+    win->plugPanelKey = (want != 0);
+    if (win->plugPanelKey) XjsSearchYieldKeys();   /* 键盘让给面板: 搜索框先交出路由/选区 */
+    return XJS_PLUGIN_OK;
+}
+
+static int FnPanelSetCaret(XjsPluginCtx* ctx, XjsWindowToken window, int x, int y) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
+    win->plugPanelCaretX = x;
+    win->plugPanelCaretY = y;
+    { XjsWindowScope scope(win); XjsPreviewPanelUpdateIme(win->hWnd); }
+    return XJS_PLUGIN_OK;
+}
+
 /* ==================== 宿主 API: 事件 / 存储 / 日志 ==================== */
 
 static int FnSubscribe(XjsPluginCtx* ctx, unsigned mask) {
@@ -1043,6 +1127,12 @@ static const XjsPluginHost s_host = {
     FnStorageSet,
     FnStorageRemove,
     FnLog,
+    FnPanelOpen,
+    FnPanelClose,
+    FnPanelGetInfo,
+    FnPanelDeliverBitmap,
+    FnPanelSetFocus,
+    FnPanelSetCaret,
 };
 
 static const XjsPluginHost* PluginHostTable() { return &s_host; }
@@ -1320,4 +1410,56 @@ void XjsPluginBatchRename(const std::vector<int>& ids, unsigned long long window
                       ids.empty() ? NULL : ids.data(), (int)ids.size(), XJS_PLUGIN_CTX_FILE);
         return;   /* 多个接管插件取首个 (管理页顺序) */
     }
+}
+
+/* ==================== P3: 面板接管 (preview-panel) ==================== */
+
+/* 面板事件派发 (xjs_preview.cpp 转发路径的唯一出口): 按会话 owner 插件 id 找插件 (重扫换槽
+   不串), 打包 SDK 事件回调 OnPanelEvent。形参 = 纯 C 值 (SDK 头只有本文件 include, 红线不破) */
+void XjsPluginPanelDispatch(unsigned long long window, int type, long long serial,
+                            int w, int h, float scale, int x, int y, int delta,
+                            unsigned flags, unsigned ch) {
+    if (s_plugins.empty()) return;
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId.empty()) return;
+    for (auto& e : s_plugins) {
+        if (!PluginActive(e) || !(e.mf.caps & XPC_PANEL)) continue;
+        if (e.mf.id != win->plugPanelPluginId || !e.fnOnPanelEvent) continue;
+        XjsPanelEvent ev{};
+        ev.structSize = sizeof(ev);
+        ev.type = type;
+        ev.serial = serial;
+        ev.w = w;
+        ev.h = h;
+        ev.scale = scale;
+        ev.x = x;
+        ev.y = y;
+        ev.delta = delta;
+        ev.flags = flags;
+        ev.ch = ch;
+        static wchar_t ph[72];
+        swprintf(ph, 72, L"plugin-panel:%s", e.mf.id.c_str());
+        XjsSetPhase(ph);
+        e.fnOnPanelEvent(e.ctx, window, &ev);
+        XjsSetPhase(L"plugin-panel:done");
+        return;
+    }
+}
+
+std::wstring XjsPluginPanelOwnerName(const std::wstring& pluginId) {
+    for (auto& e : s_plugins)
+        if (e.mf.id == pluginId) return e.mf.ok ? e.mf.name : e.mf.id;
+    return pluginId;   /* 清单尚未重扫到 = 回退 id (标题不至于空) */
+}
+
+/* owner 失效校验 (禁用/重扫后调): 接管会话的插件已禁用/消失 → 结束会话并恢复预览。
+   ForEach 回调无捕获, 用文件级静态传参 (鼠标互斥类瞬态同口径, 单线程 UI) */
+static void XjsPluginPanelValidateOne(XjsSearchWindow* w) {
+    if (!w->plugPanelOn) return;
+    for (auto& e : s_plugins)
+        if (PluginActive(e) && (e.mf.caps & XPC_PANEL) && e.mf.id == w->plugPanelPluginId) return;   /* owner 仍在 */
+    XjsPreviewPanelClose(w, PluginTokenOf(w->hWnd), true);
+}
+void XjsPluginPanelValidateOwners() {
+    XjsSearchWindow::ForEach(&XjsPluginPanelValidateOne);   /* 空注册表时所有会话都视为 owner 失效 */
 }

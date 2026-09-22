@@ -171,6 +171,7 @@ void XjsPreviewUpdateSelection() {
         s_pvMarqueeLastLoad = now;
     }
     XjsPluginOnSelectionChanged();   /* 插件 events 订阅: 预览刷新 = 选中变化的统一汇点 */
+    if (g_plugPanelOn) return;       /* 面板接管中: 选中变化不覆盖聊天 (原版 ensurePreviewGuard 口径; 只保留上方事件派发) */
     /* 锁定 (面板头部图钉): 面板钉住当前文件, 选中变化不再跟随 — 只保留上方插件事件派发。
        无内容时 (fileId<0) 不算"钉住", 放行走正常装载, 装到内容后锁定才生效 */
     if (g_previewLocked && g_previewFileId >= 0) return;
@@ -218,6 +219,7 @@ void XjsPreviewScrollLines(int dir) {
 }
 
 void XjsPreviewToggle() {
+    if (g_previewVisible && g_plugPanelOn) XjsPreviewPanelCloseForToggle();   /* 藏面板先结束接管 (会话状态不跨隐藏) */
     g_previewVisible = !g_previewVisible;
     if (g_previewVisible) {
         /* 开启即回填当前选中: 隐藏期间 UpdateSelection 只记 ID 未读文件,
@@ -326,15 +328,17 @@ void XjsPreviewRender() {
     float px = body.left + XSF(14);
     float pw = body.right - px;
 
-    /* 头部: 小图标 + 标题 + 锁/最大/关闭 */
+    /* 头部: 小图标 + 标题 + 锁/最大/关闭 (面板接管中: 标题=接管插件显示名, 无文件图标) */
     float headH = XSF(40);
     XjsRowData* rd = NULL;
     int idx = -1;
-    if (g_previewFileId >= 0 && g_result) {
+    if (!g_plugPanelOn && g_previewFileId >= 0 && g_result) {
         int fileIdx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
         if (fileIdx >= 0) { rd = XjsEnsureRowData(fileIdx); idx = fileIdx; }
     }
-    std::wstring title = rd ? rd->name : XjsT(L"通用词.预览");
+    std::wstring title;
+    if (g_plugPanelOn) title = XjsPluginPanelOwnerName(g_plugPanelPluginId);
+    else title = rd ? rd->name : XjsT(L"通用词.预览");
     {
         float ty = p.top + XSF(8);
         if (rd) {
@@ -355,6 +359,12 @@ void XjsPreviewRender() {
     XjsPanelHeaderBtn(s_hits.maxBtn, 1, false);
     XjsPanelHeaderBtn(s_hits.closeBtn, 2, false);
     g_rt->FillRectangle(XjsRectF(body.left, p.top + headH, body.right, p.top + headH + 1), g_br[XTH_BORDER]);
+
+    /* 面板接管中: 头部以下整块交给插件位图 (绘制帧兼探测尺寸失配, 见 XjsPreviewPanelRender) */
+    if (g_plugPanelOn) {
+        XjsPreviewPanelRender();
+        return;
+    }
 
     if (!rd || g_previewFileId < 0) {
         std::wstring tip = XjsT(L"预览.单击预览");
@@ -591,18 +601,25 @@ bool XjsPreviewMouseDown(POINT pt) {
     /* 命令按钮: 按下只记待定 (松开触发口径), 松开仍命中同一按钮才执行 */
     int cmd = 0;
     if (XjsPreviewHitCmd(pt, &cmd)) s_pvPress = cmd;
+    /* 面板接管: 内容区点击转发插件 (带捕获; 头部 ✕/宽窄/锁 已被上面 cmd 消费) */
+    XjsPreviewPanelMouseDown(pt);
     return true;   /* 面板内其余点击不透传给列表 */
 }
 
 /* 按钮命令执行 (cmd 编码见 XjsPreviewHitCmd) */
 static void XjsPreviewRunCmd(int cmd) {
     if (cmd == 1) {
+        if (g_plugPanelOn) {   /* 面板接管中: ✕ 只结束聊天, 按打开前状态恢复预览 (原版口径) */
+            XjsPreviewPanelClose(XjsSearchWindow::Cur(), XjsPluginCurWindowToken(), true);
+            return;
+        }
         g_previewVisible = false;
         XjsSaveConfig();
         XjsClampScroll();
     } else if (cmd == 2) {
         g_previewWidth = (g_previewWidth >= 640) ? 400 : 640;
         XjsSaveConfig();
+        XjsPreviewPanelSyncSize(true);   /* 面板接管中: 宽窄切换即世代同步 (会话若未开是空操作) */
     } else if (cmd == 3) {
         g_previewLocked = !g_previewLocked;
     } else if (cmd == 4) {
@@ -647,7 +664,8 @@ bool XjsPreviewMouseMove(POINT pt) {
 }
 
 bool XjsPreviewMouseUp(POINT pt) {
-    if (g_previewDrag) { g_previewDrag = false; XjsSaveConfig(); return true; }
+    if (g_previewDrag) { g_previewDrag = false; XjsSaveConfig(); XjsPreviewPanelSyncSize(true); return true; }
+    if (XjsPreviewPanelMouseUp(pt)) return true;   /* 面板捕获中: 转发 LUP (拖离面板也算) */
     int cmd = s_pvPress;
     s_pvPress = 0;
     if (!cmd || !g_previewVisible || !s_hits.valid) return false;
@@ -690,4 +708,351 @@ bool XjsPreviewPluginDeliverText(int requestId, const char* utf8) {
         InvalidateRect(g_hWnd, &r, FALSE);
     }
     return true;
+}
+
+/* ==================== 插件面板接管 (preview-panel 能力, P3) ====================
+ * 插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束会话并按打开前状态恢复;
+ * 原版正式版 ai-assistant 口径: 预览没开先展开, 聊天期间选中变化不覆盖聊天, 关闭恢复原预览)。
+ * 交互 = 宿主转发 鼠标/滚轮/键盘/IME (XjsPluginOnPanelEvent), 插件交付整块位图 (世代对齐)。
+ * 会话状态住 XjsSearchWindow::plugPanel* (可维护性红线: 禁按 hwnd 平行散表); 世代同步点:
+ *   - 本节 SyncSize: PanelOpen / 宽拖松开 / 头部宽窄切换 / WM_PANEL_RESYNC (绘制帧探测到
+ *     失配后投递 — 插件回调禁在 WM_PAINT 内, 消息循环里做) — 覆盖 窗口缩放/页面缩放/DPI/
+ *     状态栏显隐 等一切几何来源;
+ *   - 交付 serial/w/h 与当前世代不符 = 静默丢弃 (同预览接管世代号口径)。
+ * 线程: 交付可来自插件工作线程 (流式回复) — 位图暂存经 s_panelCs 保护, 渲染帧在锁内快照;
+ * 位图懒转本 RT 域缓存 (跨渲染域铁律, 同 XjsPreviewPluginBitmap 口径)。 */
+
+static struct XjsPanelCs { CRITICAL_SECTION cs; XjsPanelCs() { InitializeCriticalSectionAndSpinCount(&cs, 100); } } s_panelCs;
+
+/* 世代/暂存访问锁 (交付线程 vs 渲染帧) */
+struct XjsPanelLock {
+    XjsPanelLock() { EnterCriticalSection(&s_panelCs.cs); }
+    ~XjsPanelLock() { LeaveCriticalSection(&s_panelCs.cs); }
+};
+
+/* 派发小包装: Cur 即会话所属窗 (全部调用点都在该窗 WndProc / XjsWindowScope 内), 令牌现取 */
+static void XjsPanelSend(XjsSearchWindow* w, int type, int x, int y, int delta, unsigned flags, unsigned ch) {
+    XjsPluginPanelDispatch(XjsPluginCurWindowToken(), type, w->plugPanelSerial,
+                           w->plugPanelW, w->plugPanelH, w->plugPanelScale, x, y, delta, flags, ch);
+}
+
+static void XjsPanelDropCache(XjsSearchWindow* w) {
+    if (w->plugPanelCache) { w->plugPanelCache->Release(); w->plugPanelCache = NULL; }
+    w->plugPanelCacheRt = NULL;
+    w->plugPanelCacheRev = 0;
+}
+
+XjsRect XjsPreviewPanelContentRect() {
+    XjsLayout& L = g_layout;
+    float headH = XSF(40);   /* 与 XjsPreviewRender 头部同源 (面板体从头部以下交给插件) */
+    return XjsRectF(L.preview.left + XSF(3), L.preview.top + headH, L.preview.right, L.preview.bottom);
+}
+
+bool XjsPreviewPanelWantsPt(POINT pt) {
+    if (!g_plugPanelOn || !g_previewVisible) return false;
+    return XjsPtIn(XjsPreviewPanelContentRect(), pt);
+}
+
+void XjsPreviewPanelSyncSize(bool notify) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn) return;
+    XjsRect r = XjsPreviewPanelContentRect();
+    int cw = ximax(1, (int)(r.right - r.left + 0.5f));
+    int chh = ximax(1, (int)(r.bottom - r.top + 0.5f));
+    float sc = XSF(1.0f);   /* dpi×页面缩放 (XSF 基准), 插件字号/几何按它缩放 */
+    bool changed = false;
+    long long serial;
+    {
+        XjsPanelLock lk;
+        changed = (cw != w->plugPanelW || chh != w->plugPanelH || sc != w->plugPanelScale);
+        if (changed) {
+            w->plugPanelW = cw;
+            w->plugPanelH = chh;
+            w->plugPanelScale = sc;
+            w->plugPanelSerial++;   /* 世代推进: 在途旧交付作废 */
+        }
+        serial = w->plugPanelSerial;
+    }
+    if (changed && notify)
+        XjsPluginPanelDispatch(XjsPluginCurWindowToken(), XJS_HPANEL_RESIZE, serial, cw, chh, sc, 0, 0, 0, 0, 0);
+}
+
+bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wchar_t* pluginId) {
+    if (!w || !pluginId || !*pluginId) return false;
+    bool fresh = !w->plugPanelOn || w->plugPanelPluginId != pluginId;
+    if (fresh) {
+        if (w->plugPanelOn)   /* 换插件接管: 旧会话先收尾 (不回写预览状态) */
+            XjsPreviewPanelClose(w, window, false);
+        w->plugPanelWasVisible = w->previewVisible;
+        w->plugPanelOn = true;
+        w->plugPanelPluginId = pluginId;
+        w->plugPanelKey = false;
+        w->plugPanelCapture = false;
+        w->plugPanelResyncPosted = false;
+        w->plugPanelCaretX = w->plugPanelCaretY = 0;
+        {
+            XjsPanelLock lk;
+            w->plugPanelBmp.clear();
+            w->plugPanelBmpW = w->plugPanelBmpH = w->plugPanelBmpStride = 0;
+            w->plugPanelRev++;
+        }
+        XjsPanelDropCache(w);
+        w->previewVisible = true;      /* 原版口径: 预览没开先展开 (关闭按 wasVisible 恢复) */
+        w->previewFileId = -1;         /* 内容作废标记: 关闭恢复时强制重载当前选中 */
+        XjsChromeLayout();             /* 预览刚展开: g_layout 还是上一帧的, 先对齐再记尺寸 */
+        XjsClampScroll();
+        XjsPreviewPanelSyncSize(false);
+        XjsPanelSend(w, XJS_HPANEL_OPEN, 0, 0, 0, 0, 0);
+    } else {
+        XjsPreviewPanelSyncSize(false);   /* 幂等: 已是本插件的会话, 只对齐尺寸 */
+    }
+    w->Invalidate();
+    return true;
+}
+
+void XjsPreviewPanelClose(XjsSearchWindow* w, unsigned long long window, bool restore) {
+    if (!w || !w->plugPanelOn) return;
+    XjsPanelSend(w, XJS_HPANEL_CLOSE, 0, 0, 0, 0, 0);   /* 先通知收尾 (派发按仍在的 pluginId 找插件) */
+    w->plugPanelOn = false;
+    w->plugPanelPluginId.clear();
+    w->plugPanelKey = false;
+    w->plugPanelCapture = false;
+    w->plugPanelResyncPosted = false;
+    {
+        XjsPanelLock lk;
+        w->plugPanelBmp.clear();
+        w->plugPanelBmpW = w->plugPanelBmpH = w->plugPanelBmpStride = 0;
+        w->plugPanelRev++;
+    }
+    XjsPanelDropCache(w);
+    if (restore) {
+        w->previewVisible = w->plugPanelWasVisible;   /* 原本开着 = 只关聊天; 原本关着 = 连预览一起关 */
+        XjsSaveConfig();
+        if (w->previewVisible) {
+            w->previewFileId = -1;                    /* 会话期选中变化被冻结, 破缓存重载当前选中 */
+            XjsPreviewUpdateSelection();
+        }
+    }
+    XjsClampScroll();
+    w->Invalidate();
+}
+
+/* 设置/预览开关把面板藏起来时先结束会话 (会话状态不跨隐藏; 不回写预览状态) */
+void XjsPreviewPanelCloseForToggle() {
+    if (g_plugPanelOn)
+        XjsPreviewPanelClose(XjsSearchWindow::Cur(), XjsPluginCurWindowToken(), false);
+}
+
+/* 插件工作线程交付落点 (xjs_plugin.cpp FnPanelDeliverBitmap 转): 校验世代后暂存,
+   命中只失效预览区 (同 XjsPreviewPluginDeliverBitmap 口径) */
+bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h, const void* bgra, int stride) {
+    if (!w || !w->plugPanelOn) return false;
+    if (!bgra || w2 <= 0 || h <= 0 || w2 > 16384 || h > 16384 || stride < w2 * 4) return false;
+    if (stride > w2 * 4 + 4096 || (long long)stride * h > (256LL << 20)) return false;   /* 上限同预览交付 */
+    {
+        XjsPanelLock lk;
+        if (serial != w->plugPanelSerial || w2 != w->plugPanelW || h != w->plugPanelH) return false;   /* 过期世代/尺寸 */
+        w->plugPanelBmp.assign((const uint8_t*)bgra, (const uint8_t*)bgra + (size_t)stride * h);
+        w->plugPanelBmpW = w2;
+        w->plugPanelBmpH = h;
+        w->plugPanelBmpStride = stride;
+        w->plugPanelRev++;
+    }
+    if (w->hWnd) {   /* 只失效预览区 (含头部: 标题随会话切换) */
+        XjsRect b = w == XjsSearchWindow::Cur() ? g_layout.preview : XjsRectF(0, 0, 0, 0);
+        if (b.right > b.left) {
+            RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
+            InvalidateRect(w->hWnd, &r, FALSE);
+        } else {
+            w->Invalidate();
+        }
+    }
+    return true;
+}
+
+/* 当前世代读取 (xjs_plugin.cpp FnPanelGetInfo 转; 任意线程) */
+void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h, float* scale) {
+    if (!w) { if (serial) *serial = 0; if (w2) *w2 = 0; if (h) *h = 0; if (scale) *scale = 1.0f; return; }
+    XjsPanelLock lk;
+    if (serial) *serial = w->plugPanelSerial;
+    if (w2) *w2 = w->plugPanelW;
+    if (h) *h = w->plugPanelH;
+    if (scale) *scale = w->plugPanelScale;
+}
+
+/* 渲染接管位图 (XjsPreviewRender 会话分支; 绘制帧兼探测尺寸失配 → 投 WM_PANEL_RESYNC,
+   下一拍消息循环里做世代同步 — 插件回调禁在 WM_PAINT 内) */
+void XjsPreviewPanelRender() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    XjsRect r = XjsPreviewPanelContentRect();
+    XjsBitmap* bmp = NULL;
+    {
+        XjsPanelLock lk;
+        if (!w->plugPanelBmp.empty() && w->plugPanelBmpW > 0) {
+            /* 域/世代校验: 缓存位图绑定建它那一刻的 RT; 新交付必须重转 (同预览插件位图口径) */
+            if (!w->plugPanelCache || w->plugPanelCacheRt != g_rt || w->plugPanelCacheRev != w->plugPanelRev) {
+                XjsPanelDropCache(w);
+                w->plugPanelCache = XjsBitmapFromBgra(w->plugPanelBmp.data(), w->plugPanelBmpW,
+                                                      w->plugPanelBmpH, w->plugPanelBmpStride);
+                w->plugPanelCacheRt = g_rt;
+                w->plugPanelCacheRev = w->plugPanelRev;
+            }
+            bmp = w->plugPanelCache;
+        }
+    }
+    int ew = ximax(1, (int)(r.right - r.left + 0.5f));
+    int eh = ximax(1, (int)(r.bottom - r.top + 0.5f));
+    if (!w->plugPanelResyncPosted && (ew != w->plugPanelW || eh != w->plugPanelH) && g_hWnd) {
+        w->plugPanelResyncPosted = true;
+        PostMessageW(g_hWnd, WM_PANEL_RESYNC, 0, 0);
+    }
+    if (bmp)   /* 尺寸失配窗口期拉伸旧图兜底 (插件按 RESIZE 重交付后恢复 1:1), 不留空白闪帧 */
+        g_rt->DrawBitmap(bmp, r, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+}
+
+/* ==================== 面板接管: 鼠标 / 键盘 / IME 转发 ==================== */
+
+static unsigned XjsPanelModFlags() {
+    return (unsigned)((GetKeyState(VK_CONTROL) & 0x8000 ? 1 : 0) |
+                      (GetKeyState(VK_SHIFT) & 0x8000 ? 2 : 0) |
+                      (GetKeyState(VK_MENU) & 0x8000 ? 4 : 0));
+}
+
+bool XjsPreviewPanelMouseDown(POINT pt) {
+    if (!XjsPreviewPanelWantsPt(pt)) return false;
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    XjsRect cr = XjsPreviewPanelContentRect();
+    g_plugPanelCapture = true;   /* 捕获后拖出面板也持续转发 move/up (滚动条/自绘拖拽用) */
+    SetCapture(g_hWnd);
+    XjsPanelSend(w, XJS_HPANEL_LDOWN, (int)(pt.x - cr.left), (int)(pt.y - cr.top), 0, XjsPanelModFlags(), 0);
+    return true;
+}
+
+bool XjsPreviewPanelMouseMove(POINT pt) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn) return false;
+    XjsRect cr = XjsPreviewPanelContentRect();
+    bool inContent = XjsPtIn(cr, pt);
+    if (!g_plugPanelCapture && !inContent) return false;
+    int x = inContent ? (int)(pt.x - cr.left) : -1;   /* x=y=-1 = 指针已离开面板 (SDK 约定) */
+    int y = inContent ? (int)(pt.y - cr.top) : -1;
+    XjsPanelSend(w, XJS_HPANEL_MOUSE_MOVE, x, y, 0, XjsPanelModFlags(), 0);
+    return true;
+}
+
+bool XjsPreviewPanelMouseUp(POINT pt) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelCapture) return false;
+    g_plugPanelCapture = false;
+    if (w->plugPanelOn) {
+        XjsRect cr = XjsPreviewPanelContentRect();
+        bool inContent = XjsPtIn(cr, pt);
+        XjsPanelSend(w, XJS_HPANEL_LUP, inContent ? (int)(pt.x - cr.left) : -1,
+                     inContent ? (int)(pt.y - cr.top) : -1, 0, XjsPanelModFlags(), 0);
+    }
+    return true;
+}
+
+bool XjsPreviewPanelWheel(POINT pt, int delta, unsigned flags) {
+    if (!g_plugPanelOn || !g_previewVisible) return false;
+    XjsRect cr = XjsPreviewPanelContentRect();
+    if (!XjsPtIn(cr, pt)) return false;
+    XjsPanelSend(XjsSearchWindow::Cur(), XJS_HPANEL_WHEEL, (int)(pt.x - cr.left), (int)(pt.y - cr.top),
+                 delta, flags, 0);
+    return true;
+}
+
+/* DBLCLK / RDOWN / RUP 小转发 (主窗分支调; type = XJS_HPANEL_*) */
+void XjsPreviewPanelMouse(int type, POINT pt) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn) return;
+    XjsRect cr = XjsPreviewPanelContentRect();
+    bool inContent = XjsPtIn(cr, pt);
+    if (!inContent && type != XJS_HPANEL_RUP) return;   /* RUP 收尾也转发 (拖离取消口径) */
+    XjsPanelSend(w, type, inContent ? (int)(pt.x - cr.left) : -1,
+                 inContent ? (int)(pt.y - cr.top) : -1, 0, XjsPanelModFlags(), 0);
+}
+
+void XjsPreviewPanelMouseLeave() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn || w->plugPanelCapture) return;
+    XjsPanelSend(w, XJS_HPANEL_MOUSE_MOVE, -1, -1, 0, 0, 0);
+}
+
+void XjsPreviewPanelKey(unsigned vk) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn) return;
+    XjsPanelSend(w, XJS_HPANEL_KEY_DOWN, 0, 0, (int)vk, XjsPanelModFlags(), 0);
+}
+
+void XjsPreviewPanelChar(unsigned int ch) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn) return;
+    XjsPanelSend(w, XJS_HPANEL_KEY_CHAR, 0, 0, 0, 0, ch);
+}
+
+/* IME 上屏: GCS_RESULTSTR 整串取回 → 逐 UTF-16 单元转发 (代理对拆两发, 插件侧拼回码点) */
+bool XjsPreviewPanelImeResult(HWND hwnd, LPARAM lParam) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn || !(lParam & GCS_RESULTSTR)) return false;
+    HIMC himc = ImmGetContext(hwnd);
+    if (!himc) return false;
+    bool consumed = false;
+    LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, NULL, 0);
+    if (bytes > 0) {
+        std::wstring res((size_t)bytes / sizeof(wchar_t), L'\0');
+        if (ImmGetCompositionStringW(himc, GCS_RESULTSTR, &res[0], bytes) >= 0) {
+            for (wchar_t c : res) XjsPreviewPanelChar((unsigned int)c);
+            consumed = true;
+        }
+    }
+    ImmReleaseContext(hwnd, himc);
+    return consumed;
+}
+
+/* 组字/候选窗锚定: PanelSetCaret 记的面板内点位 → 窗口客户区坐标 (同 XjsLineEdit::UpdateImeAnchor 三路) */
+void XjsPreviewPanelUpdateIme(HWND hwnd) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn || !hwnd || !IsWindowVisible(hwnd)) return;
+    /* 重入守卫 (同搜索框 s_imeUpdBusy 口径, 违者必炸): IMM/TSF 调用会同步 SendMessage 重入
+       窗口过程 — SetCaretPos/ImmSet* → TSF 回发 WM_IME_NOTIFY/SETCONTEXT → main 分支再次进入
+       本函数 → 无限递归, 实测 MSCTF/msvcrt 栈溢出 0xC00000FD 崩溃 (2026-09-22 实锤) */
+    static bool s_busy = false;
+    if (s_busy) return;
+    s_busy = true;
+    XjsRect cr = XjsPreviewPanelContentRect();
+    POINT p = { (LONG)(cr.left + w->plugPanelCaretX), (LONG)(cr.top + w->plugPanelCaretY) };
+    if (!w->sysCaretMade && CreateCaret(hwnd, (HBITMAP)NULL, 1, 1)) w->sysCaretMade = true;
+    if (w->sysCaretMade) SetCaretPos(p.x, p.y);
+    HIMC himc = ImmGetContext(hwnd);
+    if (himc) {
+        COMPOSITIONFORM cf = {};
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos = p;
+        ImmSetCompositionWindow(himc, &cf);
+        CANDIDATEFORM cdf = {};
+        cdf.dwIndex = 0;
+        cdf.dwStyle = CFS_CANDIDATEPOS;
+        cdf.ptCurrentPos = p;
+        ImmSetCandidateWindow(himc, &cdf);
+        if (w->hFontEdit) {
+            LOGFONTW lf = {};
+            if (GetObjectW(w->hFontEdit, sizeof(lf), &lf)) ImmSetCompositionFontW(himc, &lf);
+        }
+        ImmReleaseContext(hwnd, himc);
+    }
+    s_busy = false;
+}
+
+void XjsPreviewPanelFocus(HWND hwnd, bool active) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn || w->hWnd != hwnd) return;
+    XjsPanelSend(w, XJS_HPANEL_FOCUS, 0, 0, active ? 1 : 0, 0, 0);
+}
+
+/* WM_DESTROY: 令牌代递增前派发 CLOSE (此刻窗口令牌仍有效, 插件可安全收尾) */
+void XjsPreviewPanelOnWindowClosing(HWND hwnd) {
+    XjsSearchWindow* w = XjsSearchWindow::OfHwnd(hwnd);
+    if (!w || !w->plugPanelOn) return;
+    XjsPreviewPanelClose(w, XjsPluginCurWindowToken(), false);
 }

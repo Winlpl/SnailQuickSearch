@@ -169,6 +169,9 @@ static void XjsClearWinCaches(XjsSearchWindow* w) {
     w->iconCache.clear();
     if (w->previewImage) { w->previewImage->Release(); w->previewImage = NULL; }
     w->previewImageFileId = -1;
+    if (w->plugPanelCache) { w->plugPanelCache->Release(); w->plugPanelCache = NULL; }   /* 面板接管位图绑 RT, 随缓存作废 */
+    w->plugPanelCacheRt = NULL;
+    w->plugPanelCacheRev = 0;
 }
 void XjsClearRenderCaches() {
     XjsSearchWindow::ForEach(&XjsClearWinCaches);
@@ -782,6 +785,7 @@ static unsigned XjsPmCaps(const picojson::value& v) {
         else if (s == "statusBar") m |= XPC_STATUSBAR;
         else if (s == "events") m |= XPC_EVENTS;
         else if (s == "preview") m |= XPC_PREVIEW;
+        else if (s == "preview-panel") m |= XPC_PANEL;
         else if (s == "batchRename") m |= XPC_BATCHRENAME;
         /* 未识别能力忽略 (向前兼容) */
     }
@@ -926,9 +930,17 @@ bool XjsPluginDialogOptsParse(const char* utf8Json, XjsPluginDialogOpts* out) {
 
 void XjsConfig::Load() {
     m_obj.clear();
-    std::wstring p = XjsGetExeDir() + L"\\xjs_config.json";
+    std::wstring dir = XjsGetExeDir() + L"\\Config";
+    CreateDirectoryW(dir.c_str(), NULL);   /* 已存在 = ERROR_ALREADY_EXISTS, 忽略 */
+    std::wstring p = dir + L"\\xjs_config.json";
+    /* 2026-09-22 配置收进 Config\ 子目录: 旧版根目录文件一次性搬入 (新路径缺席才搬, 纯改名不转格式) */
+    std::wstring legacy = XjsGetExeDir() + L"\\xjs_config.json";
+    if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES)
+        MoveFileExW(legacy.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING);
     std::string utf8;
-    if (!XjsReadUtf8File(p, &utf8)) return;
+    if (!XjsReadUtf8File(p, &utf8))
+        XjsReadUtf8File(legacy, &utf8);   /* 搬不动 (旧文件被占用) 回落直读旧路径, 首次落盘自然迁入 */
     picojson::value v;
     if (picojson::parse(v, utf8).empty() && v.is<picojson::object>())
         m_obj = v.get<picojson::object>();
@@ -936,7 +948,9 @@ void XjsConfig::Load() {
 
 void XjsConfig::WriteBack() {
     std::string utf8 = picojson::value(m_obj).serialize(true);   /* true = 格式化 (缩进) 输出 */
-    std::wstring p = XjsGetExeDir() + L"\\xjs_config.json";
+    std::wstring dir = XjsGetExeDir() + L"\\Config";
+    CreateDirectoryW(dir.c_str(), NULL);   /* 目录被人为删除时自愈 (已存在 = 忽略) */
+    std::wstring p = dir + L"\\xjs_config.json";
     /* 原子落盘 (同索引库 XjsEngineShutdown 口径): CREATE_ALWAYS 直写会在 CreateFile 成功瞬间
        截断旧文件, 写一半崩溃/断电 = 全部配置丢失且被启动期的默认骨架覆盖 —
        先写 .tmp, 成功后原子改名顶上; 中途崩溃最多残留 .tmp (启动加载前不清理配置 tmp,
@@ -1087,13 +1101,28 @@ void XjsAliasConfigLoad(std::vector<XjsAliasItem>* rows) {
 void XjsEngineApplySavedConfigs() {
     if (!g_engine) return;
     /* sync=FALSE: 行数据要么此前已应用过别名/分类 (加载的库), 要么正随扫描入库时套用当前配置 */
-    if (!g_savedFilterJson.empty()) xjs_filter_SetFilterJSON(g_engine, g_savedFilterJson.c_str(), FALSE);
+
+    /* 筛选器默认源 (别名同款优先链): 配置 "文件分类" 键 (设置页保存/首次播种后才有) 优先;
+       键空回落 exe 目录 Config\ 子目录随包发布的 Filter.json 内置词典 —— 原文透传, 引擎解析器
+       自理该宽松 JSONC; 文件缺席 = 跳过 (引擎自动用内置默认表)。程序不写回该文件 */
+    std::string filterJson = g_savedFilterJson;
+    bool filterFromFile = filterJson.empty();
+    if (filterFromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Config\\Filter.json", &filterJson);
+    if (!filterJson.empty() && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), FALSE)) {
+        /* 首次播种追加 sync=TRUE (别名同款): 一次性回填已入库行的分类; 35=忙 只废播种不废
+           配置, 下次启动重试。成功即把词典原文存进 "文件分类" 键 —— 此后键非空不再走文件,
+           一次全库回填的成本不逐启动重付 */
+        if (filterFromFile && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), TRUE)) {
+            g_savedFilterJson = filterJson;
+            XjsSaveConfig();
+        }
+    }
     /* 别名默认源 (正式版同款优先链): 配置 "路径别名" 键 (设置页保存后才有) 优先;
-       键空回落 exe 目录随包发布的 Alias.json 内置词典 —— 原文透传, 引擎解析器直接吃该宽松
-       JSONC (<系统盘>/<用户名> 占位符、/ 正斜杠); 文件缺席 = 跳过 (正式版同)。程序不写回该文件 */
+       键空回落 exe 目录 Config\ 子目录随包发布的 Alias.json 内置词典 —— 原文透传, 引擎解析器直接
+       吃该宽松 JSONC (<系统盘>/<用户名> 占位符、/ 正斜杠); 文件缺席 = 跳过 (正式版同)。程序不写回该文件 */
     std::string alias = g_savedAliasJson;
     bool fromFile = alias.empty();
-    if (fromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Alias.json", &alias);
+    if (fromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Config\\Alias.json", &alias);
     if (alias.empty()) return;
     if (!xjs_alias_SetAliasJSON(g_engine, alias.c_str(), FALSE)) return;   /* 引擎拒绝 = 配置不下发, 下次启动重试 */
     if (!fromFile) return;

@@ -428,6 +428,7 @@
  "设置.插件.能力.状态栏": "Status bar buttons",
  "设置.插件.能力.事件": "Event subscription",
  "设置.插件.能力.预览": "Preview takeover",
+ "设置.插件.能力.面板接管": "Panel takeover",
  "设置.插件.能力.批量重命名": "Batch rename",
  "设置.插件.能力.无": "None",
  "设置.插件.确认.无DLL": "(declarative only, no code)",

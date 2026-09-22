@@ -10,6 +10,10 @@
  * v3 变更: 命令/动态菜单/预览接管/搜索模式/输入拦截回调全部 C 化, 文件上下文传
  *   引擎 FileId 数组 (不再传 paths JSON), 预览只传 fileId (路径/名称/扩展名经
  *   xjs_db_GetPath/GetName 自取); 宿主表 OpenPath → OpenFile (按 fileId 打开)。
+ * v4 变更: 新增"面板接管"能力 (清单 能力:"preview-panel") — 插件整体接管预览面板内容区,
+ *   宿主转发 鼠标/滚轮/键盘/IME (XjsPlugin_OnPanelEvent), 插件交付整块位图 (PanelDeliver
+ *   Bitmap)。原 preview 能力只交付静态位图/文本, 撑不起可交互 UI (AI 助手等聊天面板)。
+ *   宿主表按"只追加"纪律扩了 6 个 Panel* 指针, 插件取用前先校验 host->size。
  *
  * 形态 = 清单 + DLL 双件:
  *   plugins\<插件id>\manifest.json   声明 (权限/能力/菜单/搜索模式…)
@@ -39,7 +43,7 @@
  *   权限闸只作用于本表宿主 API; 引擎直连物理上不经权限闸 (原生插件非沙箱, 诚实口径)。
  * ============================================================================ */
 
-#define XJS_PLUGIN_ABI_VERSION 3
+#define XJS_PLUGIN_ABI_VERSION 4
 
 /* x64 下调用约定为空 (与 xunjieso.h 的 XJS_CALL 同口径) */
 #define XJS_PLUGIN_CALL
@@ -72,6 +76,34 @@ enum {
 
 /* Toast 类型 */
 enum { XJS_PLUGIN_TOAST_INFO = 0, XJS_PLUGIN_TOAST_SUCCESS = 1, XJS_PLUGIN_TOAST_WARN = 2, XJS_PLUGIN_TOAST_ERROR = 3 };
+
+/* 面板接管事件类型 (OnPanelEvent 的 ev->type; 全部 UI 线程) */
+enum {
+    XJS_PANEL_OPEN = 1,         /* 会话开启 (serial/w/h/scale 有效; 渲染首帧并交付) */
+    XJS_PANEL_CLOSE = 2,        /* 会话结束 (预览头 ✕ / 窗口销毁 / 宿主强制; 收尾自绘状态与线程) */
+    XJS_PANEL_RESIZE = 3,       /* 面板像素尺寸变化 (serial 已递增; 按新 w/h/scale 重排重交付) */
+    XJS_PANEL_MOUSE_MOVE = 4,   /* x/y = 面板内容区内像素坐标 (按下拖拽中面板外也持续转发; x=y=-1 = 指针已离开面板, 悬停态应复位) */
+    XJS_PANEL_LDOWN = 5,  XJS_PANEL_LUP = 6,  XJS_PANEL_RDOWN = 7, XJS_PANEL_RUP = 8,
+    XJS_PANEL_DBLCLK = 9,
+    XJS_PANEL_WHEEL = 10,       /* delta = 滚轮增量 (正值向上, WHEEL_DELTA 整数倍) */
+    XJS_PANEL_KEY_DOWN = 11,    /* delta = 虚拟键码 (仅插件 PanelSetFocus(1) 期间投递) */
+    XJS_PANEL_KEY_CHAR = 12,    /* ch = UTF-32 码点 (键盘字符与 IME 上屏均拆码点投递) */
+    XJS_PANEL_FOCUS = 13,       /* delta = 1 宿主窗口激活 / 0 失活 (熄自绘光标用) */
+    XJS_PANEL_CAPTURE_LOST = 14 /* 鼠标捕获被系统夺走 (拖拽态应复位) */
+};
+
+/* 面板事件载荷 (纯 C 值; x/y 坐标 = 面板内容区左上为原点的物理像素) */
+typedef struct XjsPanelEvent {
+    unsigned int structSize;   /* = sizeof(XjsPanelEvent) */
+    int          type;         /* XJS_PANEL_* */
+    long long    serial;       /* 面板世代 (OPEN/RESIZE 递增; 交付按它对齐) */
+    int          w, h;         /* OPEN/RESIZE: 内容区像素尺寸 */
+    float        scale;        /* OPEN/RESIZE: dpi×页面缩放 (96dpi=1.0); 字号/几何按它缩放 */
+    int          x, y;         /* 鼠标: 面板内容区内像素坐标 */
+    int          delta;        /* WHEEL: 滚轮增量; KEY_DOWN: 虚拟键码; FOCUS: 1/0 */
+    unsigned int flags;        /* 修饰键: 1=Ctrl 2=Shift 4=Alt */
+    unsigned int ch;           /* KEY_CHAR: UTF-32 码点 */
+} XjsPanelEvent;
 
 /* 命令/动态菜单的文件上下文类别 (OnCommand/BuildMenu 的 kind 参数) */
 enum {
@@ -158,6 +190,29 @@ struct XjsPluginHost {
 
     /* ---- 调试 (任意线程; 只进调试器 OutputDebugString, 不落盘) ---- */
     void (XJS_PLUGIN_CALL *Log)(XjsPluginCtx*, int level /*0 debug 1 info 2 warn 3 error*/, const char* utf8);
+
+    /* ---- 面板接管 (v4 追加; 声明 能力:"preview-panel" 且实现 OnPanelEvent 才有效) ----
+       插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束接管并恢复接管前预览)。
+       交互模型: 宿主转发鼠标/滚轮/键盘/IME (OnPanelEvent), 插件渲染整块位图交付; 渲染前先
+       PanelGetInfo 取当前 serial/尺寸 (任意线程), 交付 serial 不符即被静默丢弃 — 尺寸变化
+       (窗口缩放/预览宽拖/页面缩放/DPI) 后按 RESIZE 事件的尺寸重排重交付即可。 */
+    /* 打开/激活本插件对该窗口的接管 (仅 UI 线程)。预览面板未开时先展开 (关闭时按打开前状态
+       恢复 — 预览本来就关着, 关聊天时连预览一起关); 已激活时幂等。OPEN 事件随后送达 */
+    int (XJS_PLUGIN_CALL *PanelOpen)(XjsPluginCtx*, XjsWindowToken window);
+    /* 结束接管 (仅 UI 线程; 恢复接管前预览状态)。预览头 ✕ 与窗口销毁宿主也会代发 CLOSE */
+    int (XJS_PLUGIN_CALL *PanelClose)(XjsPluginCtx*, XjsWindowToken window);
+    /* 当前世代/像素尺寸/缩放 (任意线程; 渲染前取用) */
+    int (XJS_PLUGIN_CALL *PanelGetInfo)(XjsPluginCtx*, XjsWindowToken window,
+                                        long long* serial, int* w, int* h, float* scale);
+    /* 交付整块面板位图 (任意线程; 32bpp BGRA 预乘 alpha 自上而下, stride=字节行距;
+       serial/w/h 与当前世代不符 = 静默丢弃; 宿主 CPU 拷贝进本域 — 跨渲染域铁律) */
+    int (XJS_PLUGIN_CALL *PanelDeliverBitmap)(XjsPluginCtx*, XjsWindowToken window, long long serial,
+                                              int w, int h, const void* bgra, int stride);
+    /* 键盘路由开关 (仅 UI 线程): want=1 插件输入框聚焦, 宿主把键盘/IME 让给面板;
+       want=0 归还列表/搜索框 (点击面板输入框外时插件应主动归还) */
+    int (XJS_PLUGIN_CALL *PanelSetFocus)(XjsPluginCtx*, XjsWindowToken window, int want);
+    /* IME 组字/候选窗锚点 (仅 UI 线程; x/y = 面板内容区内像素坐标, 光标移动时调用) */
+    int (XJS_PLUGIN_CALL *PanelSetCaret)(XjsPluginCtx*, XjsWindowToken window, int x, int y);
 };
 
 /* ==================== 插件导出面 ==================== */
@@ -200,6 +255,11 @@ extern "C" __declspec(dllexport) int  XJS_PLUGIN_CALL XjsPlugin_OnPreview(XjsPlu
    进程级事件 (SYNC/DBSTATE) 为 NULL。宿主不打包任何数据载荷) */
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnEvent(XjsPluginCtx*, int eventType,
                                                                         XjsWindowToken window, void* result);
+/* 面板接管事件 (preview-panel 能力; 仅 UI 线程, 绝不在 WM_PAINT 内 — 事件里只更新状态并
+   交付位图, 渲染慢可回自己线程, 但交付字节必须是稳定快照) */
+extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnPanelEvent(XjsPluginCtx*,
+                                                                             XjsWindowToken window,
+                                                                             const XjsPanelEvent* ev);
 /* 宿主即将退出 (引擎尚未销毁的最后通知; 之后 DLL 不卸载, 线程必须已在此前收尾) */
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnHostGone(XjsPluginCtx*);
 

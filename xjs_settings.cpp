@@ -503,6 +503,7 @@ static std::wstring XjsSetPluginCapsText(unsigned m) {
     add(m & XPC_STATUSBAR, L"设置.插件.能力.状态栏");
     add(m & XPC_EVENTS, L"设置.插件.能力.事件");
     add(m & XPC_PREVIEW, L"设置.插件.能力.预览");
+    add(m & XPC_PANEL, L"设置.插件.能力.面板接管");
     add(m & XPC_BATCHRENAME, L"设置.插件.能力.批量重命名");
     return s.empty() ? XjsT(L"设置.插件.能力.无") : s;
 }
@@ -2486,7 +2487,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         }
         case ACT_GITHUB:    ShellExecuteW(NULL, L"open", L"https://github.com/Winlpl/xunjieso", NULL, NULL, SW_SHOWNORMAL); break;
         case ACT_SITE:      ShellExecuteW(NULL, L"open", L"https://www.xunjieso.com/", NULL, NULL, SW_SHOWNORMAL); break;
-        case ACT_DONORS:    ShellExecuteW(NULL, L"open", L"https://www.xunjieso.com/", NULL, NULL, SW_SHOWNORMAL); break;   /* 捐赠名单页 (后续可指到专页) */
+        case ACT_DONORS:    ShellExecuteW(NULL, L"open", L"https://www.xunjieso.com/donate", NULL, NULL, SW_SHOWNORMAL); break;   /* 捐赠名单页 (后续可指到专页) */
         case ACT_GLM:       ShellExecuteW(NULL, L"open", L"https://open.bigmodel.cn/", NULL, NULL, SW_SHOWNORMAL); break;  /* GLM 官网 (智谱开放平台 BigModel) */
         default:
             if (act >= ACT_PLUGINS_TOGGLE && act < ACT_PLUGINS_TOGGLE + 200) {

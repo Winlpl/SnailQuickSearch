@@ -310,6 +310,8 @@ XjsSearchWindow::~XjsSearchWindow() {
     for (auto& kv : brushCache) { if (kv.second) kv.second->Release(); }
     brushCache.clear();
     if (previewImage) { previewImage->Release(); previewImage = NULL; }
+    if (plugPanelCache) { plugPanelCache->Release(); plugPanelCache = NULL; }   /* 面板接管位图持 RT 引用, 随窗释放 */
+    plugPanelCacheRt = NULL;
     if (appIcon) { appIcon->Release(); appIcon = NULL; }
     for (auto& b : br) { if (b) { b->Release(); b = NULL; } }
     if (brWhite) { brWhite->Release(); brWhite = NULL; }

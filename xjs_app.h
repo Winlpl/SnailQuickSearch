@@ -96,6 +96,14 @@
 #define WM_POPUP_RESULT     (WM_APP + 1)
 #define WM_HOTKEY_WARN      (WM_APP + 3)      /* 全局热键注册失败提醒 (WM_CREATE 时窗未显示, 延后弹 toast) */
 #define WM_WAKEUP           (WM_APP + 4)      /* 第二实例唤起本窗恢复显示 (跨完整性级别唯一放行通道, 见 wWinMain 单实例守卫) */
+#define WM_PANEL_RESYNC     (WM_APP + 5)      /* 插件面板接管: 绘制帧发现尺寸失配, 投到消息循环做世代同步 (回调禁在 WM_PAINT 内) */
+
+/* 面板接管事件类型 (镜像 xjs_plugin_sdk.h 的 XJS_PANEL_*; SDK 头只有 xjs_plugin.cpp include,
+   宿主路由走这套同名值 — xjs_plugin.cpp 内 static_assert 逐项对值, 禁止单边改号) */
+enum { XJS_HPANEL_OPEN = 1, XJS_HPANEL_CLOSE = 2, XJS_HPANEL_RESIZE = 3, XJS_HPANEL_MOUSE_MOVE = 4,
+       XJS_HPANEL_LDOWN = 5, XJS_HPANEL_LUP = 6, XJS_HPANEL_RDOWN = 7, XJS_HPANEL_RUP = 8,
+       XJS_HPANEL_DBLCLK = 9, XJS_HPANEL_WHEEL = 10, XJS_HPANEL_KEY_DOWN = 11, XJS_HPANEL_KEY_CHAR = 12,
+       XJS_HPANEL_FOCUS = 13, XJS_HPANEL_CAPTURE_LOST = 14 };
 
 /* ===== 跨线程 PostMessage 闸门 =====
  * 主线程被长操作卡住时 (D2D 慢帧/模态同步泵/磁盘迟滞), 引擎回调线程的 UI 通知会无限堆积,
@@ -1101,6 +1109,26 @@ public:
     int previewTextFileId = -1;
     double previewTextScroll = 0;
 
+    /* 插件面板接管 (preview-panel 能力, AI 助手等; 实现收口 xjs_preview.cpp "面板接管"节。
+       会话状态必须住窗口类 (可维护性红线: 禁按 hwnd 平行散表); 位图暂存经 s_panelCs 保护 —
+       插件工作线程可随时交付, 渲染帧快照拷贝) */
+    bool plugPanelOn = false;               /* 接管会话激活 (预览面板内容区由插件交付) */
+    std::wstring plugPanelPluginId;         /* 接管插件 id (派发按 id 找插件, 重扫换槽不串窗) */
+    bool plugPanelWasVisible = false;       /* 打开时预览面板原状态 (关闭恢复: 原本关着就连预览一起关) */
+    long long plugPanelSerial = 0;          /* 面板世代 (尺寸/缩放变化递增; 插件交付按它对齐, 过期静默丢弃) */
+    int plugPanelW = 0, plugPanelH = 0;     /* 当前世代期望像素尺寸 (内容区, 物理像素) */
+    float plugPanelScale = 1.0f;            /* 当前世代 dpi×页面缩放 (96dpi=1.0) */
+    bool plugPanelKey = false;              /* 插件持有键盘 (面板输入框聚焦; 键盘/IME 路由让给面板) */
+    bool plugPanelCapture = false;          /* 面板鼠标捕获中 (拖拽出面板也持续转发 move/up) */
+    bool plugPanelResyncPosted = false;     /* 尺寸失配重同步已投递 (WM_PANEL_RESYNC 防重复投) */
+    int plugPanelCaretX = 0, plugPanelCaretY = 0;  /* IME 锚点 (面板内坐标, PanelSetCaret 写) */
+    std::vector<uint8_t> plugPanelBmp;      /* 交付字节暂存 (BGRA, s_panelCs 内换血) */
+    int plugPanelBmpW = 0, plugPanelBmpH = 0, plugPanelBmpStride = 0;
+    unsigned long long plugPanelRev = 0;    /* 交付序号 (每成功交付 ++, 渲染缓存重建判定) */
+    XjsBitmap* plugPanelCache = NULL;       /* 交付字节 → 本域位图缓存 (懒建; 绑建它那一刻的 RT) */
+    XjsRt* plugPanelCacheRt = NULL;
+    unsigned long long plugPanelCacheRev = 0;
+
     ~XjsSearchWindow();
     XjsSearchWindow();           /* 列布局等数组字段从内置默认表拷贝 */
 
@@ -1268,6 +1296,14 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_previewImage    (XjsSearchWindow::Cur()->previewImage)
 #define g_previewImageFileId (XjsSearchWindow::Cur()->previewImageFileId)
 #define g_previewDrag     (XjsSearchWindow::Cur()->previewDrag)
+/* 插件面板接管会话 (xjs_preview.cpp "面板接管"节) */
+#define g_plugPanelOn       (XjsSearchWindow::Cur()->plugPanelOn)
+#define g_plugPanelPluginId (XjsSearchWindow::Cur()->plugPanelPluginId)
+#define g_plugPanelKey      (XjsSearchWindow::Cur()->plugPanelKey)
+#define g_plugPanelCapture  (XjsSearchWindow::Cur()->plugPanelCapture)
+#define g_plugPanelResyncPosted (XjsSearchWindow::Cur()->plugPanelResyncPosted)
+#define g_plugPanelCaretX   (XjsSearchWindow::Cur()->plugPanelCaretX)
+#define g_plugPanelCaretY   (XjsSearchWindow::Cur()->plugPanelCaretY)
 #define g_colsDetails     (XjsSearchWindow::Cur()->colsDetails)
 #define g_colsList        (XjsSearchWindow::Cur()->colsList)
 
@@ -1519,7 +1555,7 @@ bool XjsFilterConfigApply(const std::vector<XjsFilterItem>& rows);   /* sync=FAL
 bool XjsAliasConfigApply(const std::vector<XjsAliasItem>& rows);     /* sync=TRUE: 立即应用到现有库 */
 void XjsFilterConfigLoad(std::vector<XjsFilterItem>* rows);          /* 引擎当前配置 → 行 (引擎无效=空表) */
 void XjsAliasConfigLoad(std::vector<XjsAliasItem>* rows);
-void XjsEngineApplySavedConfigs();   /* 启动/重建索引前: 下发保存的 筛选器/别名; 别名无保存值时回落 exe 目录 Alias.json 内置词典 (首次播种含 sync=TRUE 一次性回填旧行并入键, 文件缺席跳过) */
+void XjsEngineApplySavedConfigs();   /* 启动/重建索引前: 下发保存的 筛选器/别名; 两者键空时各自回落 exe 目录 Config\ 下 Filter.json / Alias.json 内置词典 (原文透传; 首次播种含 sync=TRUE 一次性回填旧行并入键, 文件缺席跳过) */
 
 void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJsonWide);  /* 字段开关+盘符JSON(空=全盘), 设置对话框用 (确认在设置窗自绘对话框完成; 曾有无调用方的 XjsEngineRebuild 带系统 MessageBox, 已删) */
 void XjsEngineShutdown(bool warnOnSaveFail);
@@ -1677,7 +1713,8 @@ void XjsSummonActivate(HWND hwnd);                // 唤起到前台 (借前台�
 /* manifest capabilities / permissions → 位掩码 (解析在 xjs_engine.cpp, 消费在各挂接点) */
 enum { XPC_FILECTX = 1 << 0, XPC_SEARCHBOXMENU = 1 << 1, XPC_SEARCHMODES = 1 << 2,
        XPC_HOSTED = 1 << 3, XPC_INPUTINTERCEPT = 1 << 4, XPC_STATUSBAR = 1 << 5,
-       XPC_EVENTS = 1 << 6, XPC_PREVIEW = 1 << 7, XPC_BATCHRENAME = 1 << 8 };
+       XPC_EVENTS = 1 << 6, XPC_PREVIEW = 1 << 7, XPC_BATCHRENAME = 1 << 8,
+       XPC_PANEL = 1 << 9 };
 enum { XPP_READ = 1 << 0, XPP_WRITE = 1 << 1, XPP_EXEC = 1 << 2, XPP_UI = 1 << 3 };
 
 /* 清单解析产物 (宿主内部用, 不跨界; 插件菜单 when: 0=any 1=file 2=dir 3=drive) */
@@ -1782,3 +1819,36 @@ bool XjsPreviewPluginDeliverBitmap(int requestId, int w, int h, const void* bgra
 bool XjsPreviewPluginDeliverText(int requestId, const char* utf8);
 bool XjsPluginBatchRenameAvailable();
 void XjsPluginBatchRename(const std::vector<int>& ids, unsigned long long window);
+
+/* ===== P3 面板接管 (preview-panel 能力; 实现收口 xjs_preview.cpp "面板接管"节) =====
+   插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束接管并按打开前状态恢复)。
+   交互 = 宿主转发鼠标/滚轮/键盘/IME + 插件交付整块位图 (世代对齐, 过期静默丢弃)。
+   会话状态住 XjsSearchWindow (plugPanel* 字段); 这组入口即窗口级操作 (一律作用 Cur 或显式窗) */
+bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wchar_t* pluginId);   /* 开/激活 (幂等; 预览没开先展开) */
+void XjsPreviewPanelClose(XjsSearchWindow* w, unsigned long long window, bool restore);   /* restore=false=窗口销毁路径不回写配置 */
+XjsRect XjsPreviewPanelContentRect();             /* 内容区矩形 (头部以下; 渲染/命中/坐标换算同源) */
+void XjsPreviewPanelSyncSize(bool notify);        /* 尺寸世代同步 (变化则 serial++ 并派发 RESIZE; notify=false 只记账) */
+void XjsPreviewPanelRender();                     /* 绘制接管位图 (XjsPreviewRender 接管分支; 绘制帧兼探测尺寸失配投 WM_PANEL_RESYNC) */
+bool XjsPreviewPanelMouseDown(POINT pt);          /* 内容区命中 → 转发 LDOWN (带捕获; 假=未接管或不在内容区) */
+bool XjsPreviewPanelMouseMove(POINT pt);          /* 捕获中/悬停内容区 → 转发 MOVE */
+bool XjsPreviewPanelMouseUp(POINT pt);            /* 转发 LUP (收捕获) */
+bool XjsPreviewPanelWheel(POINT pt, int delta, unsigned flags);   /* 转发滚轮 (Ctrl/普通都转, 插件自决) */
+bool XjsPreviewPanelWantsPt(POINT pt);            /* 接管中且 pt 落内容区 (dblclk/rb 分支前置判定) */
+void XjsPreviewPanelMouse(int type, POINT pt);    /* DBLCLK/RDOWN/RUP 转发 (type = XJS_PANEL_*, 主窗内联小转发用) */
+void XjsPreviewPanelMouseLeave();                 /* WM_MOUSELEAVE: 转发 x=y=-1 (指针离面板, 悬停态复位) */
+/* 宿主表落点包装 (xjs_plugin.cpp FnPanel* 调; 交付任意线程/读取任意线程, 状态由 s_panelCs 保护) */
+bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h, const void* bgra, int stride);
+void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h, float* scale);
+void XjsPreviewPanelKey(unsigned vk);             /* KEY_DOWN (插件持键盘期间主窗路由) */
+void XjsPreviewPanelChar(unsigned int ch);        /* KEY_CHAR (键盘字符/IME 上屏统一码点入口) */
+bool XjsPreviewPanelImeResult(HWND hwnd, LPARAM lParam);   /* GCS_RESULTSTR 整串取回 → 拆码点转发 (消费=真) */
+void XjsPreviewPanelUpdateIme(HWND hwnd);         /* 组字/候选窗锚定到面板光标 (PanelSetCaret 记的点位) */
+void XjsPreviewPanelFocus(HWND hwnd, bool active);/* 宿主 WM_ACTIVATE → FOCUS 事件 (熄插件自绘光标) */
+void XjsPreviewPanelOnWindowClosing(HWND hwnd);   /* WM_DESTROY: 令牌代递增前派发 CLOSE (窗口令牌仍有效) */
+void XjsPreviewPanelCloseForToggle();             /* 设置/预览开关把面板藏起来时先结束会话 (restore=false) */
+/* 宿主表落点与派发 (xjs_plugin.cpp 实现; 注册表/能力位是插件模块实现细节) */
+void XjsPluginPanelDispatch(unsigned long long window, int type, long long serial,
+                            int w, int h, float scale, int x, int y, int delta,
+                            unsigned flags, unsigned ch);   /* 按会话 owner 插件派发 OnPanelEvent (纯 C 形参打包 SDK 事件) */
+std::wstring XjsPluginPanelOwnerName(const std::wstring& pluginId);   /* 接管插件显示名 (清单 名称; 未找到=回退 id) */
+void XjsPluginPanelValidateOwners();              /* 插件禁用/重扫后校验: owner 失效的会话一律结束 (restore=true) */

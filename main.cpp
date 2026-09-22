@@ -887,6 +887,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (XjsRenameDragging()) { XjsRenameMouseMove(pt); return 0; }   /* 重命名编辑框拖拽选字 */
             if (XjsToastMouseMove(hwnd, XSF(1), g_layout.w, g_layout.h, pt)) { SetCursor(LoadCursorW(NULL, IDC_ARROW)); return 0; }   /* Toast 卡片浮于一切之上 */
             XjsHostedMouseMove(pt);   /* 托管标签悬停计时 (多来源标签 180ms 弹来源切换菜单) */
+            if (XjsPreviewPanelMouseMove(pt)) return 0;   /* 面板接管: 捕获中/悬停内容区 → 转发 (先于列表) */
             if (XjsListMouseMove(pt) || XjsPreviewMouseMove(pt)) return 0;
             XjsUpdateHoverState(pt);
             bool colHover = (pt.y >= g_layout.listHead.top && pt.y < g_layout.listHead.bottom && XjsHitTestColHandle(pt) >= 0);
@@ -917,6 +918,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_MOUSELEAVE: {
             g_mouseTracking = false;
+            XjsPreviewPanelMouseLeave();   /* 面板接管: 指针离窗 = 离开面板 (悬停态复位, SDK x=y=-1 约定) */
             XjsListHoverChanged(g_hoverRow, g_listHover);   /* 移出列表: 末次悬停行也走渐隐拖尾 */
             g_listHover = false;
             g_hoverRow = -1;
@@ -973,6 +975,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_LBUTTONDBLCLK: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             if (pt.y < XSF(40) && XjsPtIn(g_layout.searchBox, pt)) { XjsSearchDoubleClick(pt); return 0; }
+            /* 面板接管: 内容区双击归插件 (不能落到列表的"双击打开文件") */
+            if (XjsPreviewPanelWantsPt(pt)) { XjsPreviewPanelMouse(XJS_HPANEL_DBLCLK, pt); return 0; }
             /* 重命名编辑框内双击 = 选整词 (不能落到"双击打开文件") */
             if (XjsRenameDoubleClick(pt)) return 0;
             /* 双击列宽手柄 = 自适应列宽 (源样式 03-columns dblclick, 50~800) */
@@ -1001,6 +1005,12 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            /* 面板接管: 内容区右键归插件 (自绘上下文交互), 不落列表/搜索框分支 */
+            if (XjsPreviewPanelWantsPt(pt)) {
+                XjsPreviewPanelMouse(XJS_HPANEL_RDOWN, pt);
+                XjsPreviewPanelMouse(XJS_HPANEL_RUP, pt);
+                return 0;
+            }
             /* 重命名编辑框右键: 编辑菜单 (不能落到列表的"文件"右键菜单) */
             if (XjsRenameActive() && XjsPtIn(XjsRenameEditRect(), pt)) {
                 POINT sp = pt;
@@ -1056,12 +1066,23 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             delete s;
             return 0;
         }
+        case WM_PANEL_RESYNC: {
+            /* 面板接管世代同步: 绘制帧探测到尺寸失配后投递到这里 (插件回调禁在 WM_PAINT 内)。
+               覆盖窗口缩放/预览宽拖/页面缩放/DPI/状态栏显隐等一切几何来源 */
+            g_plugPanelResyncPosted = false;
+            if (g_plugPanelOn) {
+                XjsChromeLayout();
+                XjsPreviewPanelSyncSize(true);
+            }
+            return 0;
+        }
         case WM_ACTIVATE: {
             /* 默认无焦点口径: 激活不再自动聚焦搜索框 (聚焦是窗内持久状态, 靠鼠标点击取得);
                广播给所有输入光标驱动器: 窗口失活(切到别的程序) 一律熄光标并停表 —
                否则搜索框/行内重命名的光标会在后台继续闪 */
             bool active = LOWORD(wParam) != WA_INACTIVE;
             XjsCaretBlink::SetWindowActive(hwnd, active);
+            XjsPreviewPanelFocus(hwnd, active);   /* 面板接管: 激活/失活转插件 (熄自绘光标) */
             /* 每窗"窗口失去焦点: 关闭窗口" (launcher 口径): 经统一消失策略 (主窗藏托盘/子窗销毁)。
                豁免 = 本窗自有模态层/菜单开着 (它们抢前台会让本窗收到 WA_INACTIVE, 不豁免则
                弹个菜单就把窗口关了) + 设置窗正作用在本窗 */
@@ -1121,6 +1142,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            unsigned wflags = (unsigned)((GetKeyState(VK_CONTROL) & 0x8000 ? 1 : 0) |
+                                         (GetKeyState(VK_SHIFT) & 0x8000 ? 2 : 0) |
+                                         (GetKeyState(VK_MENU) & 0x8000 ? 4 : 0));
+            /* 面板接管: 预览面板上滚轮整体转发插件 (Ctrl/普通都转, 插件自决语义) */
+            if (XjsPreviewPanelWheel(pt, delta, wflags)) return 0;
             if (GetKeyState(VK_CONTROL) & 0x8000) {
                 int dir = delta > 0 ? 1 : -1;
                 /* 正式版口径: 预览面板上缩放预览内容, 列表上切换视图模式 (向上滚=放大) */
@@ -1169,6 +1195,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (XjsHandleZoomKey(wParam)) return 0;
             /* Ctrl+N = 创建新搜索窗口 (与 ☰菜单 同入口) */
             if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'N') { XjsSearchWindow::OpenNew(); return 0; }
+            /* 面板接管: 插件输入框聚焦 (PanelSetFocus) 期间全量吞键归面板 (同重命名编辑态口径) */
+            if (g_plugPanelKey) { XjsPreviewPanelKey((unsigned)wParam); return 0; }
             if (g_searchFocused) {
                 XjsSearchKey(wParam);
                 return 0;   /* 聚焦搜索框时全量吞键 (原 EDIT 子窗口同款), 不漏给列表 */
@@ -1184,6 +1212,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_CHAR: {
             /* 行内重命名编辑态优先 */
             if (XjsRenameActive()) { XjsRenameChar((wchar_t)wParam); return 0; }
+            /* 面板接管: 插件输入框聚焦期间字符归面板 (IME 上屏走 WM_IME_CHAR, 不经此防重复) */
+            if (g_plugPanelKey) { XjsPreviewPanelChar((unsigned)wParam); return 0; }
             /* 自绘输入框字符入口 (IME 结果走 WM_IME_CHAR, 不经此防重复); 控制字符 (含 \r \t
                与 Ctrl 组合码) 组件内拒收。未聚焦也接字, 实际写入即聚焦 (文字输入/删除口径) */
             XjsSearchChar((wchar_t)wParam);
@@ -1194,15 +1224,23 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
            WM_IME_CHAR 那条路吞掉只为防双份插入 */
         case WM_IME_CHAR: {
             if (XjsRenameActive()) { XjsRenameChar((wchar_t)wParam); return 0; }
+            if (g_plugPanelKey) { XjsPreviewPanelChar((unsigned)wParam); return 0; }   /* 面板输入框聚焦: 字符归面板 */
             if (XjsSearchChar((wchar_t)wParam)) return 0;   /* 未聚焦也接字 (写入即聚焦) */
             return 0;
         }
         case WM_IME_STARTCOMPOSITION: {
-            XjsSearchUpdateImeWindow();
+            if (g_plugPanelKey) XjsPreviewPanelUpdateIme(hwnd);
+            else XjsSearchUpdateImeWindow();
             return 0;
         }
         case WM_IME_COMPOSITION: {
             if (XjsRenameActive() && XjsRenameImeResult(hwnd, lParam)) return 0;
+            /* 面板接管: GCS_RESULTSTR 整串拆码点转发; 组字过程锚定面板光标 */
+            if (g_plugPanelKey) {
+                if (XjsPreviewPanelImeResult(hwnd, lParam)) return 0;
+                XjsPreviewPanelUpdateIme(hwnd);
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
             if (XjsSearchImeResult(hwnd, lParam)) return 0;
             XjsSearchUpdateImeWindow();
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1211,7 +1249,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             /* 候选窗打开/换页时再钉一次位置 (部分输入法只认候选窗点位);
                对话框字段聚焦时钉到字段, 不再钉搜索框 (否则候选词列表出现在搜索框位置) */
             if (wParam == IMN_OPENCANDIDATE || wParam == IMN_SETCANDIDATEPOS) {
-                if (XjsModeDlgActive()) XjsEditFieldAnchorUpdate(hwnd);
+                if (g_plugPanelKey) XjsPreviewPanelUpdateIme(hwnd);
+                else if (XjsModeDlgActive()) XjsEditFieldAnchorUpdate(hwnd);
                 else XjsSearchUpdateImeWindow();
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1219,7 +1258,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_IME_SETCONTEXT: {
             LRESULT r = DefWindowProcW(hwnd, msg, wParam, lParam);
             if (wParam) {
-                if (XjsModeDlgActive()) XjsEditFieldAnchorUpdate(hwnd);
+                if (g_plugPanelKey) XjsPreviewPanelUpdateIme(hwnd);
+                else if (XjsModeDlgActive()) XjsEditFieldAnchorUpdate(hwnd);
                 else XjsSearchUpdateImeWindow();
             }
             return r;
@@ -1460,6 +1500,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             XjsWindowScope scope(w);
             XjsPostToUiDropWindow(w);   /* 本窗已投未处理的引擎消息将随 DestroyWindow 被系统清除,
                                            其闸门计数一并返还 (否则 s_postPending 永久泄漏) */
+            XjsPreviewPanelOnWindowClosing(hwnd);   /* 面板接管: 令牌代递增前派发 CLOSE (此刻令牌仍有效) */
             XjsPluginOnWindowDestroyed(hwnd);   /* 窗口令牌代递增 (插件持旧令牌失效, 防槽位复用串窗) */
             KillTimer(hwnd, ID_TIMER_STATUS);
             KillTimer(hwnd, ID_TIMER_ANIM);
