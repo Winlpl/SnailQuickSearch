@@ -222,19 +222,20 @@ void CfgLoad();
 
 /* ==================== 多对话历史 (存储键 "历史"; 定义 ai_core.cpp) ==================== */
 
-struct AiToolStep {             /* 一次工具调用 (live 态, 只在当前会话消息流; 不落历史) */
+struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 */
     std::wstring mode, query;   /* run_search 参数 */
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
+    std::wstring emit;          /* lua 两模式 ai.print 过程/统计输出 (并入工具结果 output 回喂模型; 不渲染不落库) */
     std::wstring err;           /* 失败原因 */
     std::vector<std::wstring> top;   /* 结果样本路径 (≤20; 展开显示) */
     bool open = false;          /* 样本列表展开态 (UI 态; 泵同步镜像时保留) */
 };
 struct AiMsg {
-    int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (role==2 不落历史/不重发) */
+    int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 不重发给模型) */
     std::wstring text;
     std::wstring reason;        /* 推理过程 (只在折叠块显示, 从不发送/入库发送体) */
     bool reasonOpen = false;    /* 折叠块展开态 (流式中自动展开, 完成后收起) */
@@ -249,7 +250,7 @@ struct AiConv {
 extern std::vector<AiConv> g_hist;
 extern unsigned long long g_nextConvId;
 static const size_t AI_CONV_MAX = 30, AI_MSG_MAX = 200, AI_TEXT_MAX = 60000;
-static const int AI_AGENT_MAX_TURNS = 8;   /* agent 工具循环上限 (最后一轮省略 tools 强制收尾) */
+static const int AI_AGENT_MAX_TURNS = 12;  /* agent 工具循环上限 (最后一轮省略 tools 强制收尾); 12 轮给统计任务留够粗筛/纠错余量 */
 
 void HistSave();
 void HistLoad();
@@ -295,6 +296,8 @@ struct AiLine {
     bool leadSpace = false; /* 软折行时被丢的行首空格 (复制拼接处补回, "ORDER BY" 不粘成 "ORDERBY") */
     struct Run { float x = 0, w = 0; std::wstring text; bool bold = false, code = false, accent = false, cjk = false; };
     std::vector<Run> runs;
+    std::vector<float> tblCols;   /* 表格行: 列 x 边界 (气泡内容坐标系, 绘制列竖线; 空 = 普通行) */
+    bool tblRuleAfter = false;    /* 表头末行: 本行底画横向分隔线 */
 };
 
 /* 最小断行单元 (排版/输入框布局共用) */
@@ -339,6 +342,8 @@ struct AiSess {
     bool sending = false;
     AiJob* job = NULL;
     int lastStepsVer = -1;            /* 泵已同步到卡片的 stepsVersion (变化才重排) */
+    int stepBase = 0;                 /* 本作业工具卡片起始下标 (SendCurrent 时定格; 历史恢复的
+                                         role==2 卡片在其之前, 泉的步骤同步不碰它们) */
     int netStatus = 0;                /* 0=未配置/未知(灰) 1=正常(绿) 2=失败(红) */
     /* 输入框 */
     std::wstring input;
@@ -396,6 +401,9 @@ struct AiSess {
         /* role==2 工具卡片组 */
         std::vector<float> stepHs;                       /* 每 step 卡片总高 */
         std::vector<std::vector<AiLine>> stepErrLines;   /* 失败信息折行 */
+        std::vector<std::wstring> stepQueryCut;          /* 截断好的查询行 (排版期算定, 绘制期零测量) */
+        std::vector<std::wstring> stepStat;              /* 右侧状态文字 (同上) */
+        std::vector<float> stepStatW;
     };
     std::vector<MsgLayout> lay;
     std::vector<float> layOffsets;    /* 每条消息 y 起点 (排版产物) */

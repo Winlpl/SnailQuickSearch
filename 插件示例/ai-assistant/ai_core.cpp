@@ -189,6 +189,43 @@ void HistSave() {
         for (size_t k = 0; k < c.msgs.size(); k++) {
             const AiMsg& m = c.msgs[k];
             if (k) j += L",";
+            if (m.role == 2) {
+                /* 工具卡片组: query/err 截到 512 字符 (绘制端同款上限, 存整段脚本无展示出口) */
+                j += L"{\"r\":2,\"steps\":[";
+                for (size_t si = 0; si < m.steps.size(); si++) {
+                    const AiToolStep& t = m.steps[si];
+                    if (si) j += L",";
+                    wchar_t sh[80];
+                    swprintf(sh, 80, L"{\"k\":%d,\"st\":%d,\"n\":%d,\"ms\":%lld",
+                             t.kind, t.state, t.count, t.elapsedMs);
+                    j += sh;
+                    j += L",\"name\":";
+                    j += W8(JsonEscapeUtf8(t.name).c_str());
+                    if (!t.mode.empty()) {
+                        j += L",\"mode\":";
+                        j += W8(JsonEscapeUtf8(t.mode).c_str());
+                    }
+                    if (!t.query.empty()) {
+                        j += L",\"query\":";
+                        j += W8(JsonEscapeUtf8(t.query.substr(0, 512)).c_str());
+                    }
+                    if (!t.err.empty()) {
+                        j += L",\"err\":";
+                        j += W8(JsonEscapeUtf8(t.err.substr(0, 512)).c_str());
+                    }
+                    if (!t.top.empty()) {
+                        j += L",\"top\":[";
+                        for (size_t pi = 0; pi < t.top.size(); pi++) {
+                            if (pi) j += L",";
+                            j += W8(JsonEscapeUtf8(t.top[pi]).c_str());
+                        }
+                        j += L"]";
+                    }
+                    j += L"}";
+                }
+                j += L"]}";
+                continue;
+            }
             j += m.role ? L"{\"r\":1,\"text\":" : L"{\"r\":0,\"text\":";
             j += W8(JsonEscapeUtf8(m.text).c_str());
             if (!m.reason.empty()) {
@@ -206,9 +243,9 @@ void HistSave() {
 void HistLoad() {
     g_hist.clear();
     if (!g_host) return;
-    /* 上限裁剪在装载侧做: 存储值无硬上限, 读入 4MB 足够 30 会话满载 */
+    /* 上限裁剪在装载侧做: 存储值无硬上限, 读入 16MB 足够 30 会话满载 (含工具卡片样本路径) */
     std::string buf;
-    buf.resize(4 * 1024 * 1024);
+    buf.resize(16 * 1024 * 1024);
     int n = g_host->StorageGet(g_ctx, "历史", &buf[0], (int)buf.size() - 1);
     if (n <= 0) return;
     buf.resize((size_t)n);
@@ -229,10 +266,43 @@ void HistLoad() {
                 if (jmsg.t != 5) continue;
                 AiMsg m;
                 const Jv* jr = jmsg.Get(L"r");
-                m.role = (jr && jr->num == 1) ? 1 : 0;
-                m.text = jmsg.S(L"text");
-                m.reason = jmsg.S(L"reason");
-                if (m.text.empty() && m.reason.empty()) continue;
+                if (jr && jr->num == 2) {
+                    m.role = 2;
+                    const Jv* js = jmsg.Get(L"steps");
+                    if (js && js->t == 4) {
+                        for (auto& jst : js->arr) {
+                            if (jst.t != 5) continue;
+                            AiToolStep t;
+                            auto num = [&jst](const wchar_t* k, int def) {
+                                const Jv* v2 = jst.Get(k);
+                                return (v2 && v2->t == 2) ? (int)v2->num : def;
+                            };
+                            t.kind = num(L"k", 0);
+                            t.state = num(L"st", 2);
+                            t.count = num(L"n", -1);
+                            const Jv* vm = jst.Get(L"ms");
+                            t.elapsedMs = (vm && vm->t == 2) ? (long long)vm->num : -1;
+                            t.name = jst.S(L"name");
+                            t.mode = jst.S(L"mode");
+                            t.query = jst.S(L"query");
+                            t.err = jst.S(L"err");
+                            const Jv* jtp = jst.Get(L"top");
+                            if (jtp && jtp->t == 4)
+                                for (auto& jp : jtp->arr) if (jp.t == 3) t.top.push_back(jp.str);
+                            if (t.state < 2) {   /* 存档时的在途步骤 = 进程已结束, 折算为已中止 */
+                                t.state = 3;
+                                if (t.err.empty()) t.err = L"已中止";
+                            }
+                            m.steps.push_back(t);
+                        }
+                    }
+                    if (m.steps.empty()) continue;
+                } else {
+                    m.role = (jr && jr->num == 1) ? 1 : 0;
+                    m.text = jmsg.S(L"text");
+                    m.reason = jmsg.S(L"reason");
+                    if (m.text.empty() && m.reason.empty()) continue;
+                }
                 if (c.msgs.size() < AI_MSG_MAX) c.msgs.push_back(m);
             }
         }
@@ -243,7 +313,7 @@ void HistLoad() {
     }
     while (g_hist.size() > AI_CONV_MAX) g_hist.erase(g_hist.begin());   /* 最旧丢弃 */
 }
-/* 当前会话落库 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具步骤组 (role==2) 是 live 态不落库 */
+/* 当前会话落库 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具卡片组 (role==2) 一并落库 */
 unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>& msgs) {
     std::wstring firstUser;
     for (auto& m : msgs)
@@ -253,8 +323,10 @@ unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>
     c.id = curId ? curId : g_nextConvId++;
     c.t = (long long)time(NULL);
     c.title = ConvTitleOf(firstUser);
-    for (auto& m : msgs)
-        if (m.role != 2) c.msgs.push_back(m);
+    for (auto& m : msgs) {
+        if (m.role == 2 && m.steps.empty()) continue;   /* 空工具组不落库 */
+        c.msgs.push_back(m);
+    }
     while (c.msgs.size() > AI_MSG_MAX) c.msgs.erase(c.msgs.begin());
     for (size_t i = 0; i < g_hist.size(); i++) {
         if (g_hist[i].id == c.id) { g_hist[i] = c; HistSave(); return c.id; }

@@ -1,124 +1,234 @@
 /*
- * ai_render.cpp — 渲染层: markdown-lite / 排版断行 / 绘制小件 / 消息与工具卡片
- * 渲染 / 输入框布局 / 整帧渲染 / 交付。布局排版随内容与宽度现算。
+ * ai_render.cpp — 渲染层: markdown 解析 (md4c, 与主程序 xjs_md 同一解析器) / 排版断行 /
+ * 绘制小件 / 消息与工具卡片渲染 / 输入框布局 / 整帧渲染 / 交付。布局排版随内容与宽度现算。
  */
 #include "ai_assistant.h"
+#include "../../md4c/md4c.h"
 
-struct AiBlock {          /* markdown-lite 块 */
-    int type = 0;         /* 0=段落 1=无序表 2=有序表 3=代码块 */
+struct AiBlock {          /* markdown 块模型 (md4c 回调填充) */
+    int type = 0;         /* 0=段落 1=无序表 2=有序表 3=代码块 4=表格 */
     std::wstring num;     /* 有序表序号 */
     struct Seg { std::wstring text; bool bold = false, code = false, accent = false; };
     std::vector<Seg> segs;
-    std::vector<std::wstring> codeLines;   /* type=3 */
+    std::vector<std::wstring> codeLines;              /* type=3 */
+    std::vector<std::vector<std::vector<Seg>>> tbl;   /* type=4: 行×列×segs (首行=表头) */
 };
-static void MdInline(const std::wstring& text, std::vector<AiBlock::Seg>* out) {
-    /* 行内: `code` / **bold** / 裸 URL → accent; 其余普通 */
-    std::wstring cur;
-    auto flush = [&](bool bold = false, bool code = false, bool accent = false) {
-        if (!cur.empty()) { AiBlock::Seg s; s.text = cur; s.bold = bold; s.code = code; s.accent = accent; out->push_back(s); }
-        cur.clear();
-    };
-    for (size_t i = 0; i < text.size();) {
-        if (text[i] == L'`') {
-            size_t e = text.find(L'`', i + 1);
-            if (e != std::wstring::npos) {
-                flush();
-                AiBlock::Seg s; s.text = text.substr(i + 1, e - i - 1); s.code = true; out->push_back(s);
-                i = e + 1;
-                continue;
-            }
-        }
-        if (text[i] == L'*' && i + 1 < text.size() && text[i + 1] == L'*') {
-            size_t e = text.find(L"**", i + 2);
-            if (e != std::wstring::npos) {
-                flush();
-                AiBlock::Seg s; s.text = text.substr(i + 2, e - i - 2); s.bold = true; out->push_back(s);
-                i = e + 2;
-                continue;
-            }
-        }
-        if ((text.compare(i, 8, L"https://") == 0) || (text.compare(i, 7, L"http://") == 0)) {
-            size_t n = text.compare(i, 8, L"https://") == 0 ? 8 : 7;
-            size_t e = i + n;
-            while (e < text.size() && !iswspace((wint_t)text[e]) && text[e] != L')' && text[e] != L']') e++;
-            flush();
-            AiBlock::Seg s; s.text = text.substr(i, e - i); s.accent = true; out->push_back(s);
-            i = e;
-            continue;
-        }
-        cur += text[i++];
-    }
-    flush();
+
+/* ---- md4c 回调 → AiBlock (与主程序 xjs_md 同款架构: 落点栈存下标防扩容悬垂) ---- */
+
+static std::wstring MdUtf8(const char* s, MD_SIZE n) {
+    if (!s || n == 0) return L"";
+    int wl = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, NULL, 0);
+    std::wstring w(wl > 0 ? (size_t)wl : 0, L'\0');
+    if (wl > 0) MultiByteToWideChar(CP_UTF8, 0, s, (int)n, &w[0], wl);
+    return w;
 }
+
+/* 实体还原: md4c 把实体以原文经 MD_TEXT_ENTITY 送来, 还原高频几个, 其余原样透出 */
+static std::wstring MdEntityText(const std::wstring& e) {
+    if (e == L"&amp;")  return L"&";
+    if (e == L"&lt;")   return L"<";
+    if (e == L"&gt;")   return L">";
+    if (e == L"&quot;") return L"\"";
+    if (e == L"&apos;" || e == L"&#39;") return L"'";
+    if (e == L"&nbsp;") return L" ";
+    return e;
+}
+
+struct MdCtx {
+    std::vector<AiBlock>* out;
+    /* 行内文本落点栈: 存下标而非 &blocks 元素 — blocks/tbl 扩容搬移会让指针悬垂,
+       之后再写入 = 堆损坏 (主程序 xjs_md 同款教训) */
+    struct Sink { int block = -1; int cellRow = -1, cellCol = -1; };   /* cellRow<0 = 块顶层 segs */
+    std::vector<Sink> sinks;
+    std::vector<int> listNext;      /* 每层列表: -1 = 无序, 否则 = 下一序号 */
+    int strong = 0, link = 0, codeSpan = 0;   /* 行内样式嵌套深度 */
+    bool inCodeBlock = false;
+    std::string codeRaw;            /* 代码块原文 (回调分片到达, leave 时按 \n 切行) */
+};
+
+static std::vector<AiBlock::Seg>* MdSinkSegs(MdCtx* c) {
+    const MdCtx::Sink& sk = c->sinks.back();
+    AiBlock& b = (*c->out)[sk.block];
+    return (sk.cellRow < 0) ? &b.segs : &b.tbl[sk.cellRow][sk.cellCol];
+}
+
+static void MdAppendText(MdCtx* c, const std::wstring& t) {
+    if (t.empty() || c->sinks.empty()) return;
+    auto* segs = MdSinkSegs(c);
+    AiBlock::Seg nr;
+    nr.bold = c->strong > 0;
+    nr.code = c->codeSpan > 0;
+    nr.accent = c->link > 0;
+    if (!segs->empty() && segs->back().bold == nr.bold && segs->back().code == nr.code &&
+        segs->back().accent == nr.accent)
+        segs->back().text += t;
+    else { nr.text = t; segs->push_back(nr); }
+}
+
+static int MdEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
+    auto* c = (MdCtx*)ud;
+    switch (type) {
+        case MD_BLOCK_H: {   /* 标题降级为加粗段 (轻量口径) */
+            c->out->push_back({});
+            c->out->back().type = 0;
+            c->sinks.push_back({ (int)c->out->size() - 1, -1, -1 });
+            c->strong++;
+            break;
+        }
+        case MD_BLOCK_P: {
+            /* 松列表的 LI 内会再发 P: 顶层落点就是刚开的列表项块且尚无内容 → 复用它 */
+            if (!c->sinks.empty() && c->sinks.back().cellRow < 0) {
+                AiBlock& b = (*c->out)[c->sinks.back().block];
+                if ((b.type == 1 || b.type == 2) && b.segs.empty()) {
+                    c->sinks.push_back(c->sinks.back());
+                    break;
+                }
+            }
+            c->out->push_back({});
+            c->out->back().type = 0;
+            c->sinks.push_back({ (int)c->out->size() - 1, -1, -1 });
+            break;
+        }
+        case MD_BLOCK_UL: c->listNext.push_back(-1); break;
+        case MD_BLOCK_OL: c->listNext.push_back((int)((MD_BLOCK_OL_DETAIL*)detail)->start); break;
+        case MD_BLOCK_LI: {
+            bool ord = !c->listNext.empty() && c->listNext.back() >= 0;
+            c->out->push_back({});
+            c->out->back().type = ord ? 2 : 1;
+            if (ord) {
+                wchar_t nb[16];
+                swprintf(nb, 16, L"%d.", c->listNext.back()++);
+                c->out->back().num = nb;
+            }
+            c->sinks.push_back({ (int)c->out->size() - 1, -1, -1 });
+            break;
+        }
+        case MD_BLOCK_CODE:
+            c->out->push_back({});
+            c->out->back().type = 3;
+            c->inCodeBlock = true;
+            c->codeRaw.clear();
+            break;
+        case MD_BLOCK_TABLE:
+            c->out->push_back({});
+            c->out->back().type = 4;
+            break;
+        case MD_BLOCK_TR:
+            c->out->back().tbl.emplace_back();
+            break;
+        case MD_BLOCK_TH: case MD_BLOCK_TD: {
+            AiBlock& b = c->out->back();
+            b.tbl.back().emplace_back();
+            c->sinks.push_back({ (int)c->out->size() - 1,
+                                 (int)b.tbl.size() - 1, (int)b.tbl.back().size() - 1 });
+            break;
+        }
+        case MD_BLOCK_HR: {   /* 分隔线降级为一行破折 */
+            AiBlock b; b.type = 0;
+            AiBlock::Seg sg; sg.text = L"──────────"; b.segs.push_back(sg);
+            c->out->push_back(b);
+            break;
+        }
+        default: break;   /* DOC/THEAD/TBODY/BLOCK_QUOTE 容器不建模 (引用内段落按普通段落绘制) */
+    }
+    return 0;
+}
+
+static int MdLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
+    auto* c = (MdCtx*)ud;
+    switch (type) {
+        case MD_BLOCK_H:
+            c->strong--;
+            if (!c->sinks.empty()) c->sinks.pop_back();
+            break;
+        case MD_BLOCK_P: case MD_BLOCK_LI: case MD_BLOCK_TH: case MD_BLOCK_TD:
+            if (!c->sinks.empty()) c->sinks.pop_back();
+            break;
+        case MD_BLOCK_UL: case MD_BLOCK_OL:
+            if (!c->listNext.empty()) c->listNext.pop_back();
+            break;
+        case MD_BLOCK_CODE: {
+            c->inCodeBlock = false;
+            AiBlock& b = c->out->back();   /* 原文按 \n 切行 (400 行封顶, 沿旧口径) */
+            size_t i = 0;
+            while (i < c->codeRaw.size() && b.codeLines.size() < 400) {
+                size_t e = c->codeRaw.find('\n', i);
+                if (e == std::string::npos) e = c->codeRaw.size();
+                std::string piece = c->codeRaw.substr(i, e - i);
+                if (!piece.empty() && piece.back() == '\r') piece.pop_back();
+                b.codeLines.push_back(MdUtf8(piece.data(), piece.size()));
+                i = e + 1;
+            }
+            break;
+        }
+        default: break;
+    }
+    return 0;
+}
+
+static int MdEnterSpan(MD_SPANTYPE type, void* /*detail*/, void* ud) {
+    auto* c = (MdCtx*)ud;
+    if (type == MD_SPAN_STRONG) c->strong++;
+    else if (type == MD_SPAN_A) c->link++;
+    else if (type == MD_SPAN_CODE) c->codeSpan++;
+    return 0;
+}
+static int MdLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* ud) {
+    auto* c = (MdCtx*)ud;
+    if (type == MD_SPAN_STRONG) c->strong--;
+    else if (type == MD_SPAN_A) c->link--;
+    else if (type == MD_SPAN_CODE) c->codeSpan--;
+    return 0;
+}
+
+static int MdText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) {
+    auto* c = (MdCtx*)ud;
+    switch (type) {
+        case MD_TEXT_CODE:
+            if (c->inCodeBlock) { c->codeRaw.append(text, size); break; }   /* 代码块正文 */
+            MdAppendText(c, MdUtf8(text, size));                            /* 行内代码 (SPAN_CODE 内) */
+            break;
+        case MD_TEXT_ENTITY:
+            MdAppendText(c, MdEntityText(MdUtf8(text, size)));
+            break;
+        case MD_TEXT_SOFTBR: case MD_TEXT_BR:
+            /* 行模型无段内换行: 软/硬换行折成空格 (旧 markdown-lite 合段同口径) */
+            if (!c->inCodeBlock) MdAppendText(c, L" ");
+            break;
+        case MD_TEXT_NORMAL:
+            MdAppendText(c, MdUtf8(text, size));
+            break;
+        default: break;   /* HTML/NULLCHAR 丢弃 */
+    }
+    return 0;
+}
+
+/* md4c 解析入口 (失败兜底: 原文整段按代码块呈现, 内容不丢) */
 static void MdParse(const std::wstring& text, std::vector<AiBlock>* out) {
     out->clear();
-    std::vector<std::wstring> lines;
-    {
-        std::wstring cur;
-        for (wchar_t c : text) {
-            if (c == L'\n') { lines.push_back(cur); cur.clear(); }
-            else cur += c;
-        }
-        lines.push_back(cur);
+    MdCtx ctx;
+    ctx.out = out;
+    MD_PARSER p = {};
+    p.abi_version = 0;
+    p.flags = MD_FLAG_TABLES | MD_FLAG_COLLAPSEWHITESPACE | MD_FLAG_PERMISSIVEURLAUTOLINKS;
+    p.enter_block = MdEnterBlock;
+    p.leave_block = MdLeaveBlock;
+    p.enter_span = MdEnterSpan;
+    p.leave_span = MdLeaveSpan;
+    p.text = MdText;
+    std::string u8 = U8(text);
+    if (md_parse(u8.c_str(), (MD_SIZE)u8.size(), &p, &ctx) == 0) return;
+    AiBlock b; b.type = 3;
+    size_t i = 0;
+    while (i <= u8.size() && b.codeLines.size() < 400) {
+        size_t e = u8.find('\n', i);
+        if (e == std::string::npos) e = u8.size();
+        b.codeLines.push_back(MdUtf8(u8.data() + i, e - i));
+        if (e == u8.size()) break;
+        i = e + 1;
     }
-    bool inCode = false;
-    std::vector<AiBlock> blocks;
-    for (auto& raw : lines) {
-        std::wstring line = raw;
-        if (line.rfind(L"```", 0) == 0) {   /* 围栏切换 */
-            if (inCode || !TrimW(line).empty()) inCode = !inCode;
-            continue;
-        }
-        if (inCode) {
-            if (blocks.empty() || blocks.back().type != 3) {
-                AiBlock b; b.type = 3; blocks.push_back(b);
-            }
-            if (blocks.back().codeLines.size() < 400) blocks.back().codeLines.push_back(raw);
-            continue;
-        }
-        std::wstring t = TrimW(line);
-        if (t.empty()) continue;   /* 空行 = 段落分隔 */
-        if (t.size() >= 2 && (t[0] == L'-' || t[0] == L'*' || t[0] == L'•') && t[1] == L' ') {
-            AiBlock b; b.type = 1;
-            MdInline(TrimW(t.substr(2)), &b.segs);
-            blocks.push_back(b);
-            continue;
-        }
-        size_t d = t.find(L". ");
-        if (d != std::wstring::npos && d <= 3 && d > 0) {
-            bool allDigit = true;
-            for (size_t k = 0; k < d; k++) if (!iswdigit((wint_t)t[k])) allDigit = false;
-            if (allDigit) {
-                AiBlock b; b.type = 2; b.num = t.substr(0, d + 1);
-                MdInline(TrimW(t.substr(d + 2)), &b.segs);
-                blocks.push_back(b);
-                continue;
-            }
-        }
-        if (t[0] == L'#') {   /* 标题降级为加粗段 (轻量口径) */
-            size_t k = 0;
-            while (k < t.size() && t[k] == L'#') k++;
-            std::wstring head = L"**" + TrimW(t.substr(k)) + L"**";
-            AiBlock b;
-            MdInline(head, &b.segs);
-            blocks.push_back(b);
-            continue;
-        }
-        /* 普通行: 并入上一段 (若上一段是普通段落), 否则开新段 */
-        if (!blocks.empty() && blocks.back().type == 0) {
-            std::vector<AiBlock::Seg> more;
-            MdInline(t, &more);
-            if (!more.empty()) {
-                more[0].text = (blocks.back().segs.empty() ? L"" : L" ") + more[0].text;
-                for (auto& s : more) blocks.back().segs.push_back(s);
-            }
-        } else {
-            AiBlock b;
-            MdInline(t, &b.segs);
-            blocks.push_back(b);
-        }
-    }
-    *out = blocks;
+    out->push_back(b);
 }
 
 /* ==================== 排版 (块 → 行; 量宽贪心换行, CJK 逐字/拉丁按词) ==================== */
@@ -197,6 +307,122 @@ static void AiSegsToAtoms(Gdiplus::Graphics& g, AiSess* s, const std::vector<AiB
     }
 }
 
+/* type=4 表格排版: 列宽 = 自然宽等比压缩到可用宽 (每列下限, 仍超则精确归一), 单元格内
+ * 贪心折行, 行高 = 各列可视行数最大值。每条可视行记 tblCols 列边界 (绘制列竖线), 表头
+ * 末行记 tblRuleAfter (横线); 相邻列同可视行都有内容时在列间隙垫一个空格 run — 拖选复制可读。 */
+static void AiPackTable(AiSess* s, Gdiplus::Graphics& g, const AiBlock& b, float maxW, float k,
+                        std::vector<AiLine>* lines, float* contentH) {
+    const float pad = 5.0f * k, minCol = 34.0f * k;
+    size_t rows = b.tbl.size();
+    if (rows == 0) return;
+    size_t ncol = 0;
+    for (auto& r : b.tbl) if (r.size() > ncol) ncol = r.size();
+    if (ncol == 0) return;
+
+    lines->push_back(AiLine()); lines->back().h = 4.0f * k;
+    lines->back().hard = false;   /* 纯视觉垫行 */
+    *contentH += 4.0f * k;
+
+    /* 各单元格 atoms; 表头强制加粗; 自然列宽 = 各行该列内容最大宽 + 左右内边距 */
+    std::vector<std::vector<std::vector<AiAtom>>> atoms(rows);
+    std::vector<float> colW(ncol, 2.0f * pad);
+    for (size_t r = 0; r < rows; r++) {
+        atoms[r].resize(b.tbl[r].size());
+        for (size_t c = 0; c < b.tbl[r].size(); c++) {
+            AiSegsToAtoms(g, s, b.tbl[r][c], &atoms[r][c]);
+            float w = 0;
+            for (auto& a : atoms[r][c]) {
+                if (r == 0) a.bold = true;
+                w += a.w;
+            }
+            if (w + 2.0f * pad > colW[c]) colW[c] = w + 2.0f * pad;
+        }
+    }
+    /* 列宽收敛: 总和超限 → 等比压缩带下限 → 仍超 (下限顶起) → 从最宽列逐个再扣 → 终极归一 */
+    float total = 0;
+    for (float w : colW) total += w;
+    if (total > maxW && total > 0) {
+        float f = maxW / total;
+        for (auto& w : colW) w = w * f > minCol ? w * f : minCol;
+        float over = 0;
+        for (float w : colW) over += w;
+        over -= maxW;
+        while (over > 0.5f) {
+            int big = -1;
+            for (size_t c = 0; c < ncol; c++)
+                if (big < 0 || colW[c] > colW[big]) big = (int)c;
+            float can = colW[big] - minCol;
+            if (can <= 0.5f) break;
+            float take = can < over ? can : over;
+            colW[big] -= take;
+            over -= take;
+        }
+        float t2 = 0;
+        for (float w : colW) t2 += w;
+        if (t2 > maxW) {
+            float f2 = maxW / t2;
+            for (auto& w : colW) w *= f2;
+        }
+    }
+    std::vector<float> colX(ncol + 1, 0);
+    for (size_t c = 0; c < ncol; c++) colX[c + 1] = colX[c] + colW[c];
+    float sepW = AiMeasure(g, s->fBody, L" ");
+
+    for (size_t r = 0; r < rows; r++) {
+        /* 各列单元格独立贪心折行 (超宽单词逐段硬拆兜底, 与正文同口径) */
+        std::vector<std::vector<std::vector<AiAtom>>> cellLines(ncol);
+        size_t visN = 1;
+        for (size_t c = 0; c < ncol; c++) {
+            float inner = colW[c] - 2.0f * pad;
+            std::vector<AiAtom> cur;
+            float x = 0;
+            if (c < atoms[r].size()) {
+                for (auto& a : atoms[r][c]) {
+                    if (x + a.w > inner && !cur.empty()) { cellLines[c].push_back(cur); cur.clear(); x = 0; }
+                    cur.push_back(a);
+                    x += a.w;
+                    if (x > inner && !cur.empty()) { cellLines[c].push_back(cur); cur.clear(); x = 0; }
+                }
+            }
+            cellLines[c].push_back(cur);
+            if (cellLines[c].size() > visN) visN = cellLines[c].size();
+        }
+        for (size_t v = 0; v < visN; v++) {
+            AiLine ln;
+            ln.h = AI_LINE_H * k;
+            ln.tblCols = colX;
+            ln.hard = (v == visN - 1);   /* 行末可视行 = 逻辑行界 (复制插 \n) */
+            bool prevContent = false;
+            float lastEnd = 0;
+            for (size_t c = 0; c < ncol; c++) {
+                bool has = c < cellLines.size() && v < cellLines[c].size() && !cellLines[c][v].empty();
+                if (!has) continue;
+                if (prevContent) {   /* 列间隙垫一个空格 run (选区/复制连续) */
+                    AiLine::Run sr;
+                    sr.x = lastEnd + 1.0f; sr.w = sepW; sr.text = L" ";
+                    ln.runs.push_back(sr);
+                }
+                float x = colX[c] + pad;
+                for (auto& a : cellLines[c][v]) {
+                    AiLine::Run rr;
+                    rr.x = x; rr.w = a.w; rr.text = a.t;
+                    rr.bold = a.bold || r == 0; rr.code = a.code; rr.accent = a.accent; rr.cjk = a.cjk;
+                    ln.runs.push_back(rr);
+                    x += a.w;
+                }
+                lastEnd = x;
+                prevContent = true;
+            }
+            lines->push_back(ln);
+            *contentH += ln.h;
+        }
+        if (r == 0 && !lines->empty()) lines->back().tblRuleAfter = true;   /* 表头底线 */
+    }
+    lines->push_back(AiLine()); lines->back().h = 5.0f * k;
+    lines->back().hard = false;   /* 纯视觉垫行 */
+    *contentH += 5.0f * k;
+}
+
 /* 行内容宽 = 最宽 run 行 (排版产物即行宽来源; bubble 宽按最宽行 + 内边距) */
 static void AiPackLines(AiSess* s, Gdiplus::Graphics& g, const std::vector<AiBlock>& blocks,
                         float maxW, float k, std::vector<AiLine>* lines, float* contentH) {
@@ -204,6 +430,11 @@ static void AiPackLines(AiSess* s, Gdiplus::Graphics& g, const std::vector<AiBlo
     size_t i = 0;
     while (i < blocks.size()) {
         const AiBlock& b = blocks[i];
+        if (b.type == 4) {   /* 表格: md4c 表模型 → 网格行 */
+            AiPackTable(s, g, b, maxW, k, lines, contentH);
+            i++;
+            continue;
+        }
         if (b.type == 3) {   /* 代码块: 整块等宽排版 */
             lines->push_back(AiLine()); lines->back().h = codePad;
             lines->back().hard = false;   /* 纯视觉垫行: 复制不贡献换行 */
@@ -302,6 +533,7 @@ static std::vector<AiLine> WrapPlain(AiSess* s, Gdiplus::Graphics& g, const std:
     };
     std::wstring cur;
     for (size_t i = 0; i <= text.size(); i++) {
+        if (text[i] == L'\r') continue;   /* CRLF: \n 已断行, 裸 \r 交给 DrawString 又会折行 */
         if (i == text.size() || text[i] == L'\n') {
             emitLine(cur);
             cur.clear();
@@ -310,6 +542,39 @@ static std::vector<AiLine> WrapPlain(AiSess* s, Gdiplus::Graphics& g, const std:
         cur += text[i];
     }
     return lines;
+}
+
+/* 工具卡片右侧状态文字 (排版期缓存, 绘制期只取 — 文案两处同源禁止再抄一份) */
+static std::wstring AiStepStatText(const AiToolStep& st) {
+    if (st.state <= 1) return st.state == 0 ? L"排队中…" : L"执行中…";
+    if (st.state == 2) {
+        if (st.kind == 0 && st.count >= 0) {
+            wchar_t nb[64];
+            swprintf(nb, 64, L"✓ %d 条 · %lld ms", st.count, st.elapsedMs);
+            return nb;
+        }
+        return L"✓ 完成";
+    }
+    return L"✕ 失败";
+}
+
+/* 单行显示文本: 压平控制符 (\n/\r/\t → 空格; DrawString 会把 \n 画成真换行, 而布局按
+ * 一行计高 = 整段溢出叠画) + 超宽二分截断加省略号。线性逐字回退是 O(n²) 测量, lua 脚本类
+ * 查询滚动时每帧一画必卡; 排版期算定缓存的路径也走这里。 */
+static std::wstring AiCutToWidth(Gdiplus::Graphics& g, Gdiplus::Font* f, const std::wstring& src, float maxW) {
+    std::wstring t = src;
+    for (auto& c : t)
+        if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
+    if (t.size() > 512) t.resize(512);   /* 二分前粗剪: 512 字符 (~3.5k px) 已远超任何面板宽 */
+    if (AiMeasure(g, f, t) <= maxW) return t;
+    if (t.size() < 2) return t + L"…";
+    size_t lo = 1, hi = t.size() - 1;
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        if (AiMeasure(g, f, t.substr(0, mid) + L"…") <= maxW) lo = mid;
+        else hi = mid - 1;
+    }
+    return t.substr(0, lo) + L"…";
 }
 
 static void LayoutMsg(AiSess* s, int mi, Gdiplus::Graphics& mg) {
@@ -322,18 +587,31 @@ static void LayoutMsg(AiSess* s, int mi, Gdiplus::Graphics& mg) {
     if (maxTextW < 40.0f * k) maxTextW = 40.0f * k;
 
     if (m.role == 2) {
-        /* 工具卡片组: 全宽气泡, 每 step = 头行 + (查询行) + (展开样本/错误折行) */
+        /* 工具卡片组: 全宽气泡, 每 step = 头行 + (查询行) + (展开样本/错误折行)。
+         * 查询截断与状态文字在排版期算定缓存 — 绘制期零 MeasureString (滚动每帧全量
+         * 重画, 逐帧测量长脚本曾把滚动拖到肉眼可见的卡)。 */
         L.lines.clear();
         L.reasonLines.clear();
         L.bodyH = 0;
         L.reasonH = 0;
+        L.bubbleW = avail - 24.0f * k - 8.0f * k * 2;
+        if (L.bubbleW < 60.0f * k) L.bubbleW = 60.0f * k;
+        float innerW = L.bubbleW - 10.0f * k * 2;
         L.stepHs.assign(m.steps.size(), 0.0f);
         L.stepErrLines.assign(m.steps.size(), {});
+        L.stepQueryCut.assign(m.steps.size(), {});
+        L.stepStat.assign(m.steps.size(), {});
+        L.stepStatW.assign(m.steps.size(), 0.0f);
         float h = 0;
         for (size_t si = 0; si < m.steps.size(); si++) {
             const AiToolStep& st = m.steps[si];
             float sh = 22.0f * k;                                   /* 头行 */
-            if (st.kind == 0 && !st.query.empty()) sh += 15.0f * k; /* 查询行 (mono 截断) */
+            if (st.kind == 0 && !st.query.empty()) {
+                sh += 15.0f * k;                                    /* 查询行 (mono 截断) */
+                L.stepQueryCut[si] = AiCutToWidth(mg, s->fMono, st.query, innerW - 16.0f * k);
+            }
+            L.stepStat[si] = AiStepStatText(st);
+            L.stepStatW[si] = AiMeasure(mg, s->fTiny, L.stepStat[si]);
             if (st.state == 3 && !st.err.empty()) {                 /* 错误折行 */
                 float eh = 0;
                 L.stepErrLines[si] = WrapPlain(s, mg, st.err, maxTextW - 24.0f * k, k, &eh);
@@ -344,8 +622,6 @@ static void LayoutMsg(AiSess* s, int mi, Gdiplus::Graphics& mg) {
             L.stepHs[si] = sh;
             h += sh + (si + 1 < m.steps.size() ? 6.0f * k : 0.0f);
         }
-        L.bubbleW = avail - 24.0f * k - 8.0f * k * 2;
-        if (L.bubbleW < 60.0f * k) L.bubbleW = 60.0f * k;
         L.totalH = 10.0f * k * 2 + h;
         return;
     }
@@ -452,9 +728,7 @@ static void AiText(Gdiplus::Graphics& g, const std::wstring& t, Gdiplus::Font* f
 }
 static void AiTextTrunc(Gdiplus::Graphics& g, std::wstring t, Gdiplus::Font* f, Gdiplus::Brush* br,
                         float x, float y, float maxW) {
-    if (AiMeasure(g, f, t) <= maxW) { AiText(g, t, f, br, x, y); return; }
-    while (t.size() > 1 && AiMeasure(g, f, t + L"…") > maxW) t.erase(t.size() - 1);
-    AiText(g, t + L"…", f, br, x, y);
+    AiText(g, AiCutToWidth(g, f, t, maxW), f, br, x, y);
 }
 /* 垂直居中绘制 (按实测排版高度) — 对话框字段值/占位共用; 行高常量近似曾让两者基线不齐、● 点偏上 */
 static void AiTextMid(Gdiplus::Graphics& g, const std::wstring& t, Gdiplus::Font* f, Gdiplus::Brush* br,
@@ -680,26 +954,16 @@ static void DrawMsg(AiSess* s, Gdiplus::Graphics& g, int mi, float yTop) {
             std::wstring label = st.name.empty() ? L"工具" : st.name;
             if (st.kind == 0 && !st.mode.empty()) label += L" · " + st.mode;
             AiText(g, label, s->fTiny, &tb, icx + 10.0f * k, yCur + 3.0f * k);
-            /* 右侧状态文字 */
-            Gdiplus::SolidBrush sb(st.state == 3 ? Gdiplus::Color(255, 229, 72, 77) : s->cDim);
-            std::wstring stat;
-            if (st.state <= 1) stat = st.state == 0 ? L"排队中…" : L"执行中…";
-            else if (st.state == 2) {
-                if (st.kind == 0 && st.count >= 0) {
-                    wchar_t nb[64];
-                    swprintf(nb, 64, L"✓ %d 条 · %lld ms", st.count, st.elapsedMs);
-                    stat = nb;
-                } else stat = L"✓ 完成";
-            } else stat = L"✕ 失败";
+            /* 右侧状态文字 + 查询行: 文本排版期已截断/缓存, 绘制期零测量 */
             {
-                float tw = AiMeasure(g, s->fTiny, stat);
-                AiText(g, stat, s->fTiny, &sb, bubbleX + bp + innerW - 8.0f * k - tw, yCur + 3.0f * k);
+                Gdiplus::SolidBrush sb(st.state == 3 ? Gdiplus::Color(255, 229, 72, 77) : s->cDim);
+                AiText(g, L.stepStat[si], s->fTiny, &sb,
+                       bubbleX + bp + innerW - 8.0f * k - L.stepStatW[si], yCur + 3.0f * k);
             }
             float yRow = yCur + 22.0f * k;
-            /* 查询行 (mono 截断; 完成态可点卡片头展开/收起) */
             if (st.kind == 0 && !st.query.empty()) {
                 Gdiplus::SolidBrush qb(MixCol(s->cDim, s->cPanel, 0.25f));
-                AiTextTrunc(g, st.query, s->fMono, &qb, bubbleX + bp + 8.0f * k, yRow, innerW - 16.0f * k);
+                AiText(g, L.stepQueryCut[si], s->fMono, &qb, bubbleX + bp + 8.0f * k, yRow);
                 yRow += 15.0f * k;
             }
             /* 错误折行 */
@@ -783,6 +1047,15 @@ static void DrawMsg(AiSess* s, Gdiplus::Graphics& g, int mi, float yTop) {
                     AiFillRect(g, Gdiplus::SolidBrush(Gdiplus::Color(60, s->cAccent.GetR(), s->cAccent.GetG(), s->cAccent.GetB())),
                                     Gdiplus::RectF(bubbleX + bp + x1, yCur - 1.0f * k, x2 - x1, ln.h));
             }
+        }
+        if (ln.tblCols.size() >= 2) {   /* 表格网格: 列竖线 + 表头底线 (线在行高与列间隙内, 不压字) */
+            Gdiplus::Pen vp(WithA(s->cLine, 220), 1.0f);
+            float y0 = yCur + 1.0f * k, y1 = yCur + ln.h - 1.0f * k;
+            for (float cx : ln.tblCols)
+                g.DrawLine(&vp, bubbleX + bp + cx, y0, bubbleX + bp + cx, y1);
+            if (ln.tblRuleAfter)
+                g.DrawLine(&vp, bubbleX + bp + ln.tblCols.front(), y1,
+                           bubbleX + bp + ln.tblCols.back(), y1);
         }
         if (!ln.prefix.empty()) AiText(g, ln.prefix, s->fBody, Gdiplus::SolidBrush(s->cDim), bubbleX + bp, yCur);
         for (auto& r : ln.runs) {

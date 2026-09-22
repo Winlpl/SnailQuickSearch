@@ -282,8 +282,8 @@ void XjsSearchNow(bool commitHistory) {
     /* 防抖: 提交前快照已显示行ID; 上一场搜索未结束时不重采样 (此刻数组是过渡态, 保留旧快照) */
     if (!g_searching.load()) XjsDebounceSnapshot();
     int fingerprint = -1;
-    if (g_mode == XMODE_LUA)
-        fingerprint = xjs_result_ExecuteLua(g_result, kw.c_str(), FALSE);
+    if (g_mode == XMODE_LUA)   /* -4 执行模式经 Query 提交 (引擎已移除专用入口) */
+        fingerprint = xjs_result_Query(g_result, kw.c_str(), XJS_KEYWORD_LUA_EXEC, FALSE);
     else
         fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], FALSE);
     if (fingerprint != -1) {

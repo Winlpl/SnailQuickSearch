@@ -177,6 +177,7 @@ void SendCurrent(AiSess* s) {
     while (!j->hist.empty() && j->hist.front().role != 0) j->hist.erase(j->hist.begin());
     s->job = j;
     s->sending = true;
+    s->stepBase = (int)s->msgs.size();   /* 本作业工具卡片起点 (历史恢复的 role==2 卡片在其之前) */
     s->netStatus = g_cfg.apiKey.empty() ? 0 : s->netStatus;
     j->th = new std::thread([j]() { WorkerMain(j); });
     RenderDeliver(s);
@@ -202,10 +203,19 @@ static void PumpStreams() {
         if (stepsVer != s.lastStepsVer) steps = j->steps;   /* 有变化才拷 (少一次全量复制) */
         LeaveCriticalSection(&j->cs);
         if (state == 0) {
-            /* 工具卡片同步: steps 镜像 → msgs 的 role==2 消息 (追加只增; 内容按版本对齐; 保留 open) */
+            /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
+             * 内容按版本对齐; 保留 open)。历史恢复的 role==2 卡片在 stepBase 之前,
+             * 不得被新作业的步骤误配覆盖。 */
             if (!steps.empty()) {
                 int have = 0;
-                for (auto& m : s.msgs) if (m.role == 2) have++;
+                for (int i = s.stepBase; i < (int)s.msgs.size(); i++)
+                    if (s.msgs[i].role == 2) have++;
+                /* 挂新卡片前摘掉尾部空文本气泡 (模型无文字直出工具的轮次留下的占位泡) */
+                if (!s.msgs.empty() && s.msgs.back().role == 1 &&
+                    s.msgs.back().text.empty() && s.msgs.back().reason.empty()) {
+                    s.msgs.pop_back();
+                    s.layDirty = true;
+                }
                 while (have < (int)steps.size()) {
                     AiMsg cm;
                     cm.role = 2;
@@ -214,7 +224,8 @@ static void PumpStreams() {
                     s.layDirty = true;
                 }
                 int seen = 0;
-                for (auto& m : s.msgs) {
+                for (int i = s.stepBase; i < (int)s.msgs.size(); i++) {
+                    AiMsg& m = s.msgs[i];
                     if (m.role != 2 || seen >= (int)steps.size()) continue;
                     bool changed = (int)m.steps.size() != 1 ||
                                    m.steps[0].state != steps[seen].state ||
@@ -228,7 +239,7 @@ static void PumpStreams() {
                         bool wasOpen = !m.steps.empty() && m.steps[0].open;
                         steps[seen].open = wasOpen;
                         m.steps.assign(1, steps[seen]);
-                        RelayoutOne(&s, (int)(&m - &s.msgs[0]));
+                        RelayoutOne(&s, i);
                     }
                     seen++;
                 }
@@ -260,7 +271,7 @@ static void PumpStreams() {
                 if (back.reason.empty() && back.reasonOpen) back.reasonOpen = false;
             }
         } else {
-            /* 收尾: 状态落消息 + 中止的执行中卡片落败 + 落库 (role==2 不入库) + join + 清作业 */
+            /* 收尾: 状态落消息 + 中止的执行中卡片落败 + 落库 (role==2 工具卡片一并入库) + join + 清作业 */
             for (auto& m : s.msgs)
                 for (auto& st : m.steps)
                     if (st.state == 0 || st.state == 1) { st.state = 3; st.err = L"已中止"; }

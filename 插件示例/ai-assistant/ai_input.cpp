@@ -253,6 +253,7 @@ static void LoadConv(AiSess* s, int i) {
     AbortSend(s);
     SessSaveConv(s);   /* 当前未存对话先存 */
     s->msgs = g_hist[i].msgs;
+    s->stepBase = (int)s->msgs.size();   /* 恢复的历史卡片不参与任何在途作业的步骤同步 */
     MsgSelClear(s);   /* 会话切换, 选区失效 (含键盘归还) */
     s->curId = g_hist[i].id;
     s->layDirty = true;
@@ -280,6 +281,7 @@ static void NewConv(AiSess* s) {
     AbortSend(s);
     SessSaveConv(s);
     s->msgs.clear();
+    s->stepBase = 0;
     s->curId = 0;
     s->layDirty = true;
     s->sticky = true;
