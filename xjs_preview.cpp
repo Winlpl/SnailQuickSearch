@@ -325,20 +325,25 @@ void XjsPreviewRender() {
        否则上一帧 (驱动器卡/文件卡) 的按钮矩形残留仍可命中, 点出错误命令 */
     s_hits.copySerial = s_hits.bigDirs = s_hits.bigFiles = {};
     s_hits.locate = s_hits.open = {};
+    /* 面板接管中: 整块面板体 (含原头部带) 交给插件位图, 宿主头部 (标题/锁/宽窄/✕) 不画 —
+       关闭入口 = 插件头部自绘 ✕ (SDK PanelClose, 按打开前状态恢复预览); 头部按钮命中矩形按帧清零 */
+    if (g_plugPanelOn) {
+        s_hits.lockBtn = s_hits.maxBtn = s_hits.closeBtn = {};
+        XjsPreviewPanelRender();
+        return;
+    }
     float px = body.left + XSF(14);
     float pw = body.right - px;
 
-    /* 头部: 小图标 + 标题 + 锁/最大/关闭 (面板接管中: 标题=接管插件显示名, 无文件图标) */
+    /* 头部: 小图标 + 标题 + 锁/最大/关闭 */
     float headH = XSF(40);
     XjsRowData* rd = NULL;
     int idx = -1;
-    if (!g_plugPanelOn && g_previewFileId >= 0 && g_result) {
+    if (g_previewFileId >= 0 && g_result) {
         int fileIdx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
         if (fileIdx >= 0) { rd = XjsEnsureRowData(fileIdx); idx = fileIdx; }
     }
-    std::wstring title;
-    if (g_plugPanelOn) title = XjsPluginPanelOwnerName(g_plugPanelPluginId);
-    else title = rd ? rd->name : XjsT(L"通用词.预览");
+    std::wstring title = rd ? rd->name : XjsT(L"通用词.预览");
     {
         float ty = p.top + XSF(8);
         if (rd) {
@@ -359,12 +364,6 @@ void XjsPreviewRender() {
     XjsPanelHeaderBtn(s_hits.maxBtn, 1, false);
     XjsPanelHeaderBtn(s_hits.closeBtn, 2, false);
     g_rt->FillRectangle(XjsRectF(body.left, p.top + headH, body.right, p.top + headH + 1), g_br[XTH_BORDER]);
-
-    /* 面板接管中: 头部以下整块交给插件位图 (绘制帧兼探测尺寸失配, 见 XjsPreviewPanelRender) */
-    if (g_plugPanelOn) {
-        XjsPreviewPanelRender();
-        return;
-    }
 
     if (!rd || g_previewFileId < 0) {
         std::wstring tip = XjsT(L"预览.单击预览");
@@ -711,8 +710,9 @@ bool XjsPreviewPluginDeliverText(int requestId, const char* utf8) {
 }
 
 /* ==================== 插件面板接管 (preview-panel 能力, P3) ====================
- * 插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束会话并按打开前状态恢复;
- * 原版正式版 ai-assistant 口径: 预览没开先展开, 聊天期间选中变化不覆盖聊天, 关闭恢复原预览)。
+ * 插件整块接管预览面板体 (含原头部带, 宿主头部不画; 关闭 = 插件自绘 ✕ → SDK PanelClose,
+ * 结束会话并按打开前状态恢复预览 — 正式版 ai-assistant 口径: 预览没开先展开,
+ * 聊天期间选中变化不覆盖聊天)。
  * 交互 = 宿主转发 鼠标/滚轮/键盘/IME (XjsPluginOnPanelEvent), 插件交付整块位图 (世代对齐)。
  * 会话状态住 XjsSearchWindow::plugPanel* (可维护性红线: 禁按 hwnd 平行散表); 世代同步点:
  *   - 本节 SyncSize: PanelOpen / 宽拖松开 / 头部宽窄切换 / WM_PANEL_RESYNC (绘制帧探测到
@@ -744,8 +744,8 @@ static void XjsPanelDropCache(XjsSearchWindow* w) {
 
 XjsRect XjsPreviewPanelContentRect() {
     XjsLayout& L = g_layout;
-    float headH = XSF(40);   /* 与 XjsPreviewRender 头部同源 (面板体从头部以下交给插件) */
-    return XjsRectF(L.preview.left + XSF(3), L.preview.top + headH, L.preview.right, L.preview.bottom);
+    /* 面板体 (resizer 右缘起) 整块交给插件 — 含原 40px 头部带, 宿主头部不画 (2026-09-23 口径) */
+    return XjsRectF(L.preview.left + XSF(3), L.preview.top, L.preview.right, L.preview.bottom);
 }
 
 bool XjsPreviewPanelWantsPt(POINT pt) {
@@ -858,7 +858,7 @@ bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h,
         w->plugPanelBmpStride = stride;
         w->plugPanelRev++;
     }
-    if (w->hWnd) {   /* 只失效预览区 (含头部: 标题随会话切换) */
+    if (w->hWnd) {   /* 只失效预览区 (插件整块交付含头部带) */
         XjsRect b = w == XjsSearchWindow::Cur() ? g_layout.preview : XjsRectF(0, 0, 0, 0);
         if (b.right > b.left) {
             RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
@@ -931,6 +931,8 @@ bool XjsPreviewPanelMouseDown(POINT pt) {
 bool XjsPreviewPanelMouseMove(POINT pt) {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
     if (!w || !w->plugPanelOn) return false;
+    if (g_previewDrag) return false;   /* 分隔条拖动中让路 — 拖窄方向指针一进内容区就,
+                                          会被此函数拦截短路 XjsPreviewMouseMove = 宽度卡死 (只能拖宽不能拖小) */
     XjsRect cr = XjsPreviewPanelContentRect();
     bool inContent = XjsPtIn(cr, pt);
     if (!g_plugPanelCapture && !inContent) return false;
@@ -977,6 +979,17 @@ void XjsPreviewPanelMouseLeave() {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
     if (!w || !w->plugPanelOn || w->plugPanelCapture) return;
     XjsPanelSend(w, XJS_HPANEL_MOUSE_MOVE, -1, -1, 0, 0, 0);
+}
+
+/* 面板外宿主点击 (搜索框/列表/标题栏/预览头/右键): 键盘让渡即时收回并通知插件失焦 —
+   否则 plugPanelKey 闸仍开着, 按键继续吞给面板 (表象: 焦点已在搜索框, 打字却进 AI 输入框)。
+   面板内容区内的点击不收 (插件自管聚焦); 插件自愿归还仍走 PanelSetFocus(0), 不经此处 */
+void XjsPreviewPanelKeyBlur(POINT pt) {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->plugPanelOn || !w->plugPanelKey) return;
+    if (XjsPreviewPanelWantsPt(pt)) return;
+    w->plugPanelKey = false;
+    XjsPanelSend(w, XJS_HPANEL_KEY_BLUR, 0, 0, 0, 0, 0);
 }
 
 void XjsPreviewPanelKey(unsigned vk) {

@@ -220,6 +220,7 @@ struct XjsSettingsState {
     float sideScroll = 0;        /* 左侧分类栏滚动 (分类数多且窗口矮时内容超高; 滚动条按需显示) */
     bool sbSideDrag = false;     /* 分类栏滚动条拖拽中 (几何与渲染同源 XjsSetSideSbGeom) */
     float sbSideGrabOff = 0;     /* 分类栏 thumb 按下点相对顶缘偏移 */
+    int sbHover = 0;             /* 悬停的滚动条 (0=无 1=右缘内容条 2=分类栏条; thumb 提亮一档) */
     int cat = 0;                 /* 当前分类 (SC_* 常量) */
     std::wstring liveSig;        /* 内存/性能分析页 1s 采样签名 (变了才置脏重建, 见 XjsSetLiveSignature) */
     bool winTreeOpen = true;     /* 左侧"窗口设置"分组展开态 */
@@ -1732,6 +1733,21 @@ static bool XjsSetSideSbGeom(float vh, float& thumbY, float& thumbH, float& maxS
     return true;
 }
 
+/* 滚动条悬停命中 (0=无 1=右缘内容条 2=分类栏条): thumb 矩形精确判定, 几何与渲染同源 */
+static int XjsSetSbHoverAt(HWND hwnd, POINT pt) {
+    RECT crc; GetClientRect(hwnd, &crc);
+    float w = (float)crc.right, vh = (float)crc.bottom;
+    float tY, tH, maxS;
+    if (pt.x >= w - SS(6) && pt.x <= w - SS(3) && XjsSetSbGeom(w, vh, tY, tH, maxS) &&
+        pt.y >= tY && pt.y <= tY + tH)
+        return 1;
+    float sideW = XjsSetSideW();
+    if (pt.x >= sideW - SS(6) && pt.x <= sideW - SS(3) && XjsSetSideSbGeom(vh, tY, tH, maxS) &&
+        pt.y >= tY && pt.y <= tY + tH)
+        return 2;
+    return 0;
+}
+
 /* CT_TROW 表格行第 col 格输入框矩形 (渲染 / 禁用格点选否决 两处同源)。
    cx0/cx1 = 内容区左右缘 (与绘制侧 sideW+SS(24) / w-SS(28) 同公式); 框区右缘让位行尾"删除"钮。
    3 列 (文件分类): 名称 26% / 类型 16% / 后缀 58%; 2 列 (别名): 路径 54% / 别名 46%; 格间距 SS(8) */
@@ -1878,7 +1894,7 @@ static void XjsSetPaint(HWND hwnd) {
         if (XjsSetSideSbGeom(vh, sbSY, sbSH, sbSMax))
             s_set.rt->FillRoundedRectangle(
                 XjsRoundedRectF(XjsRectF(sideW - SS(6), sbSY, sideW - SS(3), sbSY + sbSH), SS(1.5f), SS(1.5f)),
-                s_set.brBorderStrong);
+                s_set.sbHover == 2 ? s_set.brFaint : s_set.brBorderStrong);
     }
 
     /* ---- 内容卡片 ---- */
@@ -2013,7 +2029,7 @@ static void XjsSetPaint(HWND hwnd) {
     if (XjsSetSbGeom(w, vh, sbY, sbH, sbMax))
         s_set.rt->FillRoundedRectangle(
             XjsRoundedRectF(XjsRectF(w - SS(6), sbY, w - SS(3), sbY + sbH), SS(1.5f), SS(1.5f)),
-            s_set.brBorderStrong);
+            s_set.sbHover == 1 ? s_set.brFaint : s_set.brBorderStrong);
     /* ---- 重建确认对话框 (遮罩层置顶) ---- */
     if (s_set.dlgOpen) XjsSetDrawRebuildDialog(w, vh);
     XjsToastRender(hwnd, s_set.rt, w, vh, SS(1));   /* Toast 组件 (宿主=设置窗, 浮于一切) */
@@ -2599,6 +2615,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                     XjsSkinLoad(g_skinName.c_str());
                     XjsSkinApply();   /* 纪元+1 → 本窗口画刷随绘制重建 */
                     XjsSaveConfig();  /* 每窗档案落盘 xjs_config.json (uiWindows) */
+                    XjsPluginOnSkinChanged(XjsPluginCurWindowToken());   /* 已订阅插件 (自建窗口) 取新皮肤重绘 */
                 }
             }
             break;
@@ -2754,9 +2771,11 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                         if (y >= r.y && y < r.y + r.h) { hr = ci * 1000 + ri; break; }
                     }
             }
-            if (hc != p->hoverSide || hr != p->hoverRow) {
+            int sbh = XjsSetSbHoverAt(hwnd, pt);   /* 滚动条悬停增亮 (thumb 上提亮一档, 变化才失效) */
+            if (hc != p->hoverSide || hr != p->hoverRow || sbh != p->sbHover) {
                 p->hoverSide = hc;
                 p->hoverRow = hr;
+                p->sbHover = sbh;
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             if (!p->trackingLeave) {
@@ -2771,7 +2790,9 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_MOUSELEAVE:
             p->trackingLeave = false;
             XjsToastHoverReset(hwnd);
-            if (p->hoverSide != -1 || p->hoverRow != -1) { p->hoverSide = -1; p->hoverRow = -1; InvalidateRect(hwnd, NULL, FALSE); }
+            if (p->hoverSide != -1 || p->hoverRow != -1 || p->sbHover) {
+                p->hoverSide = -1; p->hoverRow = -1; p->sbHover = 0; InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
         case WM_MOUSEWHEEL: {
             RECT rc;

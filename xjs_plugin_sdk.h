@@ -71,7 +71,8 @@ enum {
     XJS_PLUGIN_EVT_SEARCH_COMPLETE = 1 << 0,   /* 搜索完成 (window/result = 所属窗口; count 自取 xjs_result_GetCount) */
     XJS_PLUGIN_EVT_SELECTION       = 1 << 1,   /* 选中变化 (window/result = 所属窗口; 选中自取 GetSelectedCount/CopySelectedFileId) */
     XJS_PLUGIN_EVT_SYNC            = 1 << 2,   /* 文件同步变化 (进程级: window=0, result=NULL) */
-    XJS_PLUGIN_EVT_DBSTATE         = 1 << 3    /* 库状态 (预留; 进程级: window=0, result=NULL) */
+    XJS_PLUGIN_EVT_DBSTATE         = 1 << 3,   /* 库状态 (预留; 进程级: window=0, result=NULL) */
+    XJS_PLUGIN_EVT_SKIN            = 1 << 4    /* 皮肤变化 (window = 换肤窗口令牌; 自建窗口取新皮肤重绘, 配合 GetSkinJsonOf) */
 };
 
 /* Toast 类型 */
@@ -89,7 +90,9 @@ enum {
     XJS_PANEL_KEY_DOWN = 11,    /* delta = 虚拟键码 (仅插件 PanelSetFocus(1) 期间投递) */
     XJS_PANEL_KEY_CHAR = 12,    /* ch = UTF-32 码点 (键盘字符与 IME 上屏均拆码点投递) */
     XJS_PANEL_FOCUS = 13,       /* delta = 1 宿主窗口激活 / 0 失活 (熄自绘光标用) */
-    XJS_PANEL_CAPTURE_LOST = 14 /* 鼠标捕获被系统夺走 (拖拽态应复位) */
+    XJS_PANEL_CAPTURE_LOST = 14,/* 鼠标捕获被系统夺走 (拖拽态应复位) */
+    XJS_PANEL_KEY_BLUR = 15     /* 宿主收回键盘让渡 (用户点击了面板内容区以外的宿主 UI):
+                                   输入框/对话框字段应失焦熄光标; 键盘此后不再投递 KEY_* */
 };
 
 /* 面板事件载荷 (纯 C 值; x/y 坐标 = 面板内容区左上为原点的物理像素) */
@@ -192,14 +195,15 @@ struct XjsPluginHost {
     void (XJS_PLUGIN_CALL *Log)(XjsPluginCtx*, int level /*0 debug 1 info 2 warn 3 error*/, const char* utf8);
 
     /* ---- 面板接管 (v4 追加; 声明 能力:"preview-panel" 且实现 OnPanelEvent 才有效) ----
-       插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束接管并恢复接管前预览)。
+       插件整块接管预览面板体 (含头部带, 宿主不画头部; 关闭按钮 = 插件自绘 ✕, 点击调
+       PanelClose 结束接管并恢复接管前预览)。
        交互模型: 宿主转发鼠标/滚轮/键盘/IME (OnPanelEvent), 插件渲染整块位图交付; 渲染前先
        PanelGetInfo 取当前 serial/尺寸 (任意线程), 交付 serial 不符即被静默丢弃 — 尺寸变化
        (窗口缩放/预览宽拖/页面缩放/DPI) 后按 RESIZE 事件的尺寸重排重交付即可。 */
     /* 打开/激活本插件对该窗口的接管 (仅 UI 线程)。预览面板未开时先展开 (关闭时按打开前状态
        恢复 — 预览本来就关着, 关聊天时连预览一起关); 已激活时幂等。OPEN 事件随后送达 */
     int (XJS_PLUGIN_CALL *PanelOpen)(XjsPluginCtx*, XjsWindowToken window);
-    /* 结束接管 (仅 UI 线程; 恢复接管前预览状态)。预览头 ✕ 与窗口销毁宿主也会代发 CLOSE */
+    /* 结束接管 (仅 UI 线程; 恢复接管前预览状态)。插件自绘 ✕ 与窗口销毁宿主也会代发 CLOSE */
     int (XJS_PLUGIN_CALL *PanelClose)(XjsPluginCtx*, XjsWindowToken window);
     /* 当前世代/像素尺寸/缩放 (任意线程; 渲染前取用) */
     int (XJS_PLUGIN_CALL *PanelGetInfo)(XjsPluginCtx*, XjsWindowToken window,
@@ -213,6 +217,11 @@ struct XjsPluginHost {
     int (XJS_PLUGIN_CALL *PanelSetFocus)(XjsPluginCtx*, XjsWindowToken window, int want);
     /* IME 组字/候选窗锚点 (仅 UI 线程; x/y = 面板内容区内像素坐标, 光标移动时调用) */
     int (XJS_PLUGIN_CALL *PanelSetCaret)(XjsPluginCtx*, XjsWindowToken window, int x, int y);
+
+    /* 指定窗口的皮肤 (v4 追加, 与 Panel* 同口径: 取用前先校验 host->size; 免权限, 仅 UI 线程):
+       window=0 = 默认窗口, 其余 = 窗口令牌; JSON 同 GetSkinJson。
+       自建窗口要"跟随某窗口皮肤"用它取色, 再订阅 EVT_SKIN 在皮肤变化后重取重绘 */
+    int (XJS_PLUGIN_CALL *GetSkinJsonOf)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
 };
 
 /* ==================== 插件导出面 ==================== */

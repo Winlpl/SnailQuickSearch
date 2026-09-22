@@ -572,7 +572,7 @@ static void XjsRenderListTail() {
         /* thumb 右缘贴 track 右缘 (距列表右缘 3px): 与横向滚动条右端对齐, 原先右缩 6 间距过大 */
         XjsRect th = XjsRectF(L.vtrack.right - XSF(8), thumbY, L.vtrack.right, thumbY + thumbH);
         g_rt->FillRoundedRectangle(XjsRoundedRectF(th, XSF(4), XSF(4)),
-            g_dragScroll ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
+            (g_dragScroll || g_sbHover == 1) ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
     }
     /* 横向滚动条 (列总宽超出视口时, 同源样式 htrack; 详情视图 XjsClampHScroll 恒归零不滚动, 不渲染死条) */
     if (g_viewMode == VM_LIST) {
@@ -582,7 +582,7 @@ static void XjsRenderListTail() {
         if (XjsHThumbGeom(&thumbX, &thumbW, &smax, &track)) {
             XjsRect th = XjsRectF(thumbX, track.top, (float)(thumbX + thumbW), track.bottom);
             g_rt->FillRoundedRectangle(XjsRoundedRectF(th, XSF(4), XSF(4)),
-                g_dragHScroll ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
+                (g_dragHScroll || g_sbHover == 2) ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
         }
     }
     if (g_marquee && g_marqueeMoved) {
@@ -1411,6 +1411,27 @@ bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样�
     {
         int h = (pt.y >= g_layout.listHead.top && pt.y <= g_layout.listHead.bottom) ? XjsHitTestColHandle(pt) : -1;
         if (h != g_hoverHandle) { g_hoverHandle = h; XjsSearchWindow::Cur()->Invalidate(); }
+    }
+    /* 滚动条悬停增亮 (thumb 上提亮一档, 源样式 scrollbar-thumb:hover; 变化才失效):
+       纵向各视图共用一条, 横向仅列表视图渲染 (与渲染口径一致, 详情视图不亮死条) */
+    {
+        int hb = 0;
+        float thY = 0, thH = 0;
+        double maxScroll = 0;
+        if (XjsVThumbGeom(&thY, &thH, &maxScroll) &&
+            pt.x >= g_layout.vtrack.right - XSF(8) && pt.x <= g_layout.vtrack.right &&
+            pt.y >= thY && pt.y <= thY + thH)
+            hb = 1;
+        if (!hb && g_viewMode == VM_LIST) {
+            float thumbX = 0;
+            double thumbW = 0, smax = 0;
+            XjsRect track;
+            if (XjsHThumbGeom(&thumbX, &thumbW, &smax, &track) &&
+                pt.x >= thumbX && (double)pt.x <= thumbX + thumbW &&
+                pt.y >= track.top && pt.y <= track.bottom)
+                hb = 2;
+        }
+        if (hb != g_sbHover) { g_sbHover = hb; XjsSearchWindow::Cur()->Invalidate(); }
     }
     /* 横向滚动条拖动 (轨道手势期不拖拽: 移动鼠标不换算, 只等连发/松开) */
     if (g_dragHScroll) {

@@ -925,6 +925,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hoverBtn = 0;
             g_hoverWndBtn = WBTN_NONE;
             g_hoverStatus = -1;
+            g_sbHover = 0;   /* 滚动条悬停增亮随指针离窗熄灭 */
             XjsToastHoverReset(hwnd);   /* Toast 组件悬停态随组件走 */
             XjsHostedHoverReset(hwnd);  /* 托管标签悬停态+来源菜单计时随组件走 */
             w->Invalidate();
@@ -933,6 +934,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             XjsSyncViewport(hwnd);   /* 命中判定前先对齐视口几何 */
+            if (g_plugPanelKey) XjsPreviewPanelKeyBlur(pt);   /* 点面板外宿主 UI = 键盘归还宿主 (通知插件失焦) */
             bool renameWas = XjsRenameActive();
             /* 行内重命名编辑态: 点编辑框以外任意处 = 取消重命名 (含标题栏/搜索框,
                原先只有点列表区才收尾, 点搜索框时编辑框残留且继续吃键盘) */
@@ -1005,6 +1007,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (g_plugPanelKey) XjsPreviewPanelKeyBlur(pt);   /* 面板外右键将弹宿主菜单: 键盘先归还宿主 */
             /* 面板接管: 内容区右键归插件 (自绘上下文交互), 不落列表/搜索框分支 */
             if (XjsPreviewPanelWantsPt(pt)) {
                 XjsPreviewPanelMouse(XJS_HPANEL_RDOWN, pt);

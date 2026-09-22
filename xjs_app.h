@@ -103,7 +103,7 @@
 enum { XJS_HPANEL_OPEN = 1, XJS_HPANEL_CLOSE = 2, XJS_HPANEL_RESIZE = 3, XJS_HPANEL_MOUSE_MOVE = 4,
        XJS_HPANEL_LDOWN = 5, XJS_HPANEL_LUP = 6, XJS_HPANEL_RDOWN = 7, XJS_HPANEL_RUP = 8,
        XJS_HPANEL_DBLCLK = 9, XJS_HPANEL_WHEEL = 10, XJS_HPANEL_KEY_DOWN = 11, XJS_HPANEL_KEY_CHAR = 12,
-       XJS_HPANEL_FOCUS = 13, XJS_HPANEL_CAPTURE_LOST = 14 };
+       XJS_HPANEL_FOCUS = 13, XJS_HPANEL_CAPTURE_LOST = 14, XJS_HPANEL_KEY_BLUR = 15 };
 
 /* ===== 跨线程 PostMessage 闸门 =====
  * 主线程被长操作卡住时 (D2D 慢帧/模态同步泵/磁盘迟滞), 引擎回调线程的 UI 通知会无限堆积,
@@ -620,6 +620,7 @@ struct XjsLineEdit {
     float vx = -1;          /* 多行模式: ↑↓ 连续移动的期望列 x (<0 无; 其它移动复位) */
     bool dragV = false;     /* 多行模式: 正在拖纵向滚动条 */
     bool dragH = false;     /* 多行模式: 正在拖横向滚动条 */
+    int sbHover = 0;        /* 多行模式: 悬停的滚动条 (0=无 1=纵向 2=横向; thumb 提亮一档) */
     float dragGrab = 0;     /* 拖拽抓点相对 thumb 端的偏移 */
     bool dragging = false;  /* 鼠标拖拽选字中 (宿主据此把 WM_MOUSEMOVE 转交 MouseMove) */
     bool dirty = false;     /* 文本被修改 (宿主读后清零; 纯光标移动不置位) */
@@ -647,6 +648,7 @@ struct XjsLineEdit {
     int  IndexAtPoint(POINT pt, const XjsRect& area, XjsFormat* fmt);
     void MouseDown(POINT pt, const XjsRect& area, XjsFormat* fmt);   /* 点定位+起拖 */
     void MouseMove(POINT pt, const XjsRect& area, XjsFormat* fmt);   /* 拖拽扩展选区 */
+    bool UpdateSbHover(POINT pt, const XjsRect& area, XjsFormat* fmt);   /* 多行滚动条悬停命中 (更新 sbHover, 变化返回真) */
     void MouseUp();                                  /* 结束拖拽 (单击零长选区收拢) */
     bool MouseDoubleClick(POINT pt, const XjsRect& area, XjsFormat* fmt);  /* 双击选词 */
 
@@ -658,7 +660,8 @@ struct XjsLineEdit {
     void Render(XjsRt* target, const XjsRect& area, XjsFormat* fmt,
                 XjsBrush* textBr, XjsBrush* selectionBr, XjsBrush* caretBr,
                 const wchar_t* placeholder, XjsBrush* placeholderBr, bool caretOn,
-                XjsBrush* scrollbarBr = NULL);   /* 多行滚动条画刷 (NULL=不画) */
+                XjsBrush* scrollbarBr = NULL,   /* 多行滚动条画刷 (NULL=不画) */
+                XjsBrush* scrollbarHoverBr = NULL);   /* 悬停/拖拽中提亮画刷 (NULL=不提亮) */
 
 private:
     std::wstring m_undoText;                         /* 单档撤销 */
@@ -729,10 +732,12 @@ struct XjsEditField {
     void SetFocused(HWND hwnd, bool on); /* 聚焦/失焦 (同窗其余字段自动失焦) */
     void Render(XjsRt* rt, const XjsRect& r, XjsFormat* f,
                 XjsBrush* textBr, XjsBrush* selBr, XjsBrush* caretBr,
-                const wchar_t* placeholder, XjsBrush* phBr, XjsBrush* sbBr = NULL) {
+                const wchar_t* placeholder, XjsBrush* phBr, XjsBrush* sbBr = NULL,
+                XjsBrush* sbHoverBr = NULL) {
         area = r; fmt = f;
-        ed.Render(rt, r, f, textBr, selBr, caretBr, placeholder, phBr, focused && blink.On(), sbBr);
+        ed.Render(rt, r, f, textBr, selBr, caretBr, placeholder, phBr, focused && blink.On(), sbBr, sbHoverBr);
     }
+    bool UpdateSbHover(POINT pt) { return ed.UpdateSbHover(pt, area, fmt); }   /* 多行滚动条悬停命中 (矩形/格式取最近帧渲染回写, 变化返回真) */
     ~XjsEditField() { Detach(); }
 };
 XjsEditField* XjsEditFocused(HWND hwnd);                  /* 该窗当前聚焦字段 (无=NULL) */
@@ -1079,6 +1084,7 @@ public:
     bool listHover = false;
     int hoverRow = -1;
     int hoverHandle = -1;                   /* 悬停的列宽调整边界下标 (-1=无) */
+    int sbHover = 0;                        /* 悬停的滚动条 (0=无 1=纵向 2=横向; thumb 提亮一档; 纯悬停无捕获, 必须每窗) */
     bool modeMenuOpen = false;
     bool appMenuOpen = false;
     bool dragScroll = false;
@@ -1273,6 +1279,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_dragColIdx      (XjsSearchWindow::Cur()->dragColIdx)
 #define g_dragColX        (XjsSearchWindow::Cur()->dragColX)
 #define g_hoverHandle     (XjsSearchWindow::Cur()->hoverHandle)   /* 悬停的列宽调整边界 (纯悬停无捕获, 必须每窗) */
+#define g_sbHover         (XjsSearchWindow::Cur()->sbHover)       /* 悬停的滚动条 0无/1纵/2横 (纯悬停无捕获, 必须每窗) */
 #define g_filterSel       (XjsSearchWindow::Cur()->filterSel)     /* 筛选分类选中项: DLL SetSelectedFilter 按结果对象, 必须每窗 */
 #define g_marquee         (XjsSearchWindow::Cur()->marquee)
 #define g_marqueeMoved    (XjsSearchWindow::Cur()->marqueeMoved)
@@ -1811,6 +1818,7 @@ void XjsPluginStatusBarCommand(int i, unsigned long long window);   /* 状态栏
 void XjsPluginOnSearchComplete();                  /* WM_SEARCH_COMPLETE 尾部分发 */
 void XjsPluginOnSelectionChanged();                /* 选中变化汇点分发 (预览刷新统一入口) */
 void XjsPluginOnSyncAfter();                       /* 文件同步节流刷新点分发 (聚合语义, 无单文件载荷) */
+void XjsPluginOnSkinChanged(unsigned long long windowToken);   /* 皮肤变化分发 (设置窗换肤后; window=换肤窗口令牌) */
 
 /* ===== P2 内容接管 ===== */
 bool XjsPluginPreviewTake(int fileId, int requestId, unsigned long long window);   /* true = 插件已接管 (将异步交付) */
@@ -1821,12 +1829,13 @@ bool XjsPluginBatchRenameAvailable();
 void XjsPluginBatchRename(const std::vector<int>& ids, unsigned long long window);
 
 /* ===== P3 面板接管 (preview-panel 能力; 实现收口 xjs_preview.cpp "面板接管"节) =====
-   插件整体接管预览面板内容区 (头部 40px 归宿主: 标题=插件名, ✕=结束接管并按打开前状态恢复)。
+   插件整块接管预览面板体 (含原头部带, 宿主头部不画; 关闭 = 插件自绘 ✕ → SDK PanelClose,
+   结束接管并按打开前状态恢复)。
    交互 = 宿主转发鼠标/滚轮/键盘/IME + 插件交付整块位图 (世代对齐, 过期静默丢弃)。
    会话状态住 XjsSearchWindow (plugPanel* 字段); 这组入口即窗口级操作 (一律作用 Cur 或显式窗) */
 bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wchar_t* pluginId);   /* 开/激活 (幂等; 预览没开先展开) */
 void XjsPreviewPanelClose(XjsSearchWindow* w, unsigned long long window, bool restore);   /* restore=false=窗口销毁路径不回写配置 */
-XjsRect XjsPreviewPanelContentRect();             /* 内容区矩形 (头部以下; 渲染/命中/坐标换算同源) */
+XjsRect XjsPreviewPanelContentRect();             /* 面板体矩形 (整块含头部带; 渲染/命中/坐标换算同源) */
 void XjsPreviewPanelSyncSize(bool notify);        /* 尺寸世代同步 (变化则 serial++ 并派发 RESIZE; notify=false 只记账) */
 void XjsPreviewPanelRender();                     /* 绘制接管位图 (XjsPreviewRender 接管分支; 绘制帧兼探测尺寸失配投 WM_PANEL_RESYNC) */
 bool XjsPreviewPanelMouseDown(POINT pt);          /* 内容区命中 → 转发 LDOWN (带捕获; 假=未接管或不在内容区) */
@@ -1836,6 +1845,7 @@ bool XjsPreviewPanelWheel(POINT pt, int delta, unsigned flags);   /* 转发滚�
 bool XjsPreviewPanelWantsPt(POINT pt);            /* 接管中且 pt 落内容区 (dblclk/rb 分支前置判定) */
 void XjsPreviewPanelMouse(int type, POINT pt);    /* DBLCLK/RDOWN/RUP 转发 (type = XJS_PANEL_*, 主窗内联小转发用) */
 void XjsPreviewPanelMouseLeave();                 /* WM_MOUSELEAVE: 转发 x=y=-1 (指针离面板, 悬停态复位) */
+void XjsPreviewPanelKeyBlur(POINT pt);            /* 面板外宿主点击: 收回键盘让渡 + KEY_BLUR 事件 (插件字段失焦) */
 /* 宿主表落点包装 (xjs_plugin.cpp FnPanel* 调; 交付任意线程/读取任意线程, 状态由 s_panelCs 保护) */
 bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h, const void* bgra, int stride);
 void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h, float* scale);
@@ -1850,5 +1860,4 @@ void XjsPreviewPanelCloseForToggle();             /* 设置/预览开关把面�
 void XjsPluginPanelDispatch(unsigned long long window, int type, long long serial,
                             int w, int h, float scale, int x, int y, int delta,
                             unsigned flags, unsigned ch);   /* 按会话 owner 插件派发 OnPanelEvent (纯 C 形参打包 SDK 事件) */
-std::wstring XjsPluginPanelOwnerName(const std::wstring& pluginId);   /* 接管插件显示名 (清单 名称; 未找到=回退 id) */
 void XjsPluginPanelValidateOwners();              /* 插件禁用/重扫后校验: owner 失效的会话一律结束 (restore=true) */

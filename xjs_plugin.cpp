@@ -75,7 +75,8 @@ static_assert(XJS_HPANEL_OPEN == XJS_PANEL_OPEN && XJS_HPANEL_CLOSE == XJS_PANEL
               XJS_HPANEL_RDOWN == XJS_PANEL_RDOWN && XJS_HPANEL_RUP == XJS_PANEL_RUP &&
               XJS_HPANEL_DBLCLK == XJS_PANEL_DBLCLK && XJS_HPANEL_WHEEL == XJS_PANEL_WHEEL &&
               XJS_HPANEL_KEY_DOWN == XJS_PANEL_KEY_DOWN && XJS_HPANEL_KEY_CHAR == XJS_PANEL_KEY_CHAR &&
-              XJS_HPANEL_FOCUS == XJS_PANEL_FOCUS && XJS_HPANEL_CAPTURE_LOST == XJS_PANEL_CAPTURE_LOST,
+              XJS_HPANEL_FOCUS == XJS_PANEL_FOCUS && XJS_HPANEL_CAPTURE_LOST == XJS_PANEL_CAPTURE_LOST &&
+              XJS_HPANEL_KEY_BLUR == XJS_PANEL_KEY_BLUR,
               "XJS_HPANEL_* mirror of XJS_PANEL_* (xjs_app.h) drifted");
 
 static std::vector<XjsPluginEntry> s_plugins;      /* 按 mf.id 升序, 槽位稳定 */
@@ -900,12 +901,8 @@ static void PluginHex(const XjsColor& c, char out[8]) {
               (int)(c.r * 255.f + 0.5f), (int)(c.g * 255.f + 0.5f), (int)(c.b * 255.f + 0.5f));
 }
 
-static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
-    XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;   /* 免权限: 只读色板 */
-    XjsSearchWindow* cur = XjsSearchWindow::Alive(XjsSearchWindow::Cur()) ? XjsSearchWindow::Cur()
-                                                                          : XjsSearchWindow::Main();
-    if (!cur) return XJS_PLUGIN_ERR_STATE;
+static int SkinJsonOfWindow(XjsSearchWindow* cur, char* buf, int cap) {
+    if (!cur) return XJS_PLUGIN_ERR_NOTFOUND;
     XjsWindowScope scope(cur);   /* g_skin 是"当前窗皮肤"镜像: 先认回所属窗再取 */
     cur->SyncSkin();
     char b1[8], b2[8], panel[8], text[8], dim[8], accent[8], line[8];
@@ -919,6 +916,20 @@ static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
               XjsWindowDpi(cur->hWnd), cur->uiZoom / 10.0,
               b1, b2, panel, text, dim, accent, line);
     return PluginBufOut(buf, cap, j);
+}
+
+static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;   /* 免权限: 只读色板 */
+    XjsSearchWindow* cur = XjsSearchWindow::Alive(XjsSearchWindow::Cur()) ? XjsSearchWindow::Cur()
+                                                                          : XjsSearchWindow::Main();
+    return SkinJsonOfWindow(cur, buf, cap);
+}
+
+static int FnSkinJsonOf(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, int cap) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    return SkinJsonOfWindow(PluginWindowOfToken(window), buf, cap);   /* window=0 = 默认窗口 (PluginWindowOfToken 缺省) */
 }
 
 static int FnPrevBitmap(XjsPluginCtx* ctx, int requestId, int w, int h, const void* bgra, int stride) {
@@ -1133,6 +1144,7 @@ static const XjsPluginHost s_host = {
     FnPanelDeliverBitmap,
     FnPanelSetFocus,
     FnPanelSetCaret,
+    FnSkinJsonOf,
 };
 
 static const XjsPluginHost* PluginHostTable() { return &s_host; }
@@ -1365,6 +1377,13 @@ void XjsPluginOnSyncAfter() {
             e.fnOnEvent(e.ctx, XJS_PLUGIN_EVT_SYNC, 0, NULL);
 }
 
+void XjsPluginOnSkinChanged(unsigned long long windowToken) {
+    if (s_plugins.empty()) return;
+    for (auto& e : s_plugins)   /* 纯信号: 只报哪个窗口换了皮肤, 新配色插件经 GetSkinJsonOf 自取 */
+        if (PluginActive(e) && (e.evtMask & XJS_PLUGIN_EVT_SKIN) && e.fnOnEvent)
+            e.fnOnEvent(e.ctx, XJS_PLUGIN_EVT_SKIN, windowToken, NULL);
+}
+
 /* ==================== P2: 预览接管 / 批量重命名 ==================== */
 
 /* 预览接管: 只传 (requestId, 窗口令牌, fileId) — 路径/名称/扩展名插件经 xjs_db_GetPath/GetName
@@ -1444,12 +1463,6 @@ void XjsPluginPanelDispatch(unsigned long long window, int type, long long seria
         XjsSetPhase(L"plugin-panel:done");
         return;
     }
-}
-
-std::wstring XjsPluginPanelOwnerName(const std::wstring& pluginId) {
-    for (auto& e : s_plugins)
-        if (e.mf.id == pluginId) return e.mf.ok ? e.mf.name : e.mf.id;
-    return pluginId;   /* 清单尚未重扫到 = 回退 id (标题不至于空) */
 }
 
 /* owner 失效校验 (禁用/重扫后调): 接管会话的插件已禁用/消失 → 结束会话并恢复预览。

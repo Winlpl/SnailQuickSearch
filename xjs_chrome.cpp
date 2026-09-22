@@ -256,9 +256,10 @@ bool XjsSearchKey(WPARAM vk) {
 }
 
 /* 搜索框光标本帧是否可显: 驱动器 (闪烁相位×窗口激活) 之外, 其它编辑接管期必须让位
-   (行内重命名/模式对话框字段 — 否则接管期双光标齐闪, 同 2026-09-15 实锤的口径, 判定移到这里) */
+   (行内重命名/模式对话框字段/插件面板输入框聚焦 (PanelSetFocus) — 否则接管期双光标齐闪,
+   同 2026-09-15 实锤的口径, 判定移到这里; 让位解除后驱动器相位仍在, 下帧自然恢复) */
 static bool XjsSearchCaretAllowed() {
-    return !XjsRenameActive() && !XjsModeDlgActive();
+    return !XjsRenameActive() && !XjsModeDlgActive() && !g_plugPanelKey;
 }
 
 /* 搜索框右键菜单命令 (0剪切 1复制 2粘贴 3全选 4删除选中): 编辑操作走共享 XjsEditMenuApplyCmd */
@@ -1284,6 +1285,11 @@ static void XjsMdlgLayout(float W, float H, XjsModeDlgRects* R) {
     R->del = XjsRectF(lx, by, lx + 96 * s, by + btnH);
 }
 
+/* 模板多行字段的文本区 (渲染与滚动条悬停命中同源; 外框内缩与 fieldRow 同式) */
+static XjsRect XjsMdlgTplArea(const XjsModeDlgRects& R) {
+    return XjsRectF(R.tpl.left + XSF(10), R.tpl.top, R.tpl.right - XSF(10), R.tpl.bottom);
+}
+
 static const wchar_t* XjsMdlgTip(int type) {
     switch (type) {
         case 0: return XjsT(L"搜索框.提示通配符");
@@ -1505,6 +1511,9 @@ bool XjsModeDlgKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_MOUSEMOVE) {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         XjsEditFieldMouseMove(hwnd, pt);   /* 字段拖选跟手 (MouseDown 已 SetCapture, 拖出字段消息照来) */
+        /* 模板多行字段滚动条悬停增亮 (变化才失效重画; 文本区矩形/格式取最近帧渲染回写) */
+        if (d.tplEd.UpdateSbHover(pt))
+            XjsSearchWindow::Cur()->Invalidate();
         return true;
     }
     if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
@@ -1602,8 +1611,9 @@ void XjsModeDlgRender(XjsRt* rt, float w, float h) {
         rt->FillRoundedRectangle(XjsRoundedRectF(f, XSF(8), XSF(8)), g_br[XTH_PANEL2]);
         rt->DrawRoundedRectangle(XjsRoundedRectF(f, XSF(8), XSF(8)),
             d.tplEd.focused ? (XjsBrush*)g_br[XTH_ACCENT] : g_br[XTH_BORDER], 1.0f);
-        d.tplEd.Render(rt, XjsRectF(f.left + XSF(10), f.top, f.right - XSF(10), f.bottom),
-            g_tfRow, g_br[XTH_TEXT], g_br[XTH_ACCENT_SOFT], g_br[XTH_ACCENT], NULL, NULL, g_br[XTH_BORDER_STRONG]);
+        d.tplEd.Render(rt, XjsMdlgTplArea(R),
+            g_tfRow, g_br[XTH_TEXT], g_br[XTH_ACCENT_SOFT], g_br[XTH_ACCENT], NULL, NULL,
+            g_br[XTH_BORDER_STRONG], g_br[XTH_TEXT_FAINT]);
     }
     /* 提示三行 (左对齐小字, 收在卡片内): 类型语法提示 + 作用范围提示 + <keyword> 占位符提示 */
     {

@@ -25,7 +25,7 @@ if not exist "..\..\xjs_plugin_sdk.h" (
 )
 
 cl /nologo /EHsc /std:c++20 /O2 /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ai_assistant.cpp ^
-   /link /OUT:ai-assistant.dll gdiplus.lib winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+   /link /OUT:ai-assistant.dll gdiplus.lib winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ..\..\xunjieso.lib
 if errorlevel 1 (
     echo Build failed!
     pause

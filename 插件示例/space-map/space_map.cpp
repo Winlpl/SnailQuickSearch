@@ -182,9 +182,14 @@ static COLORREF Mix(COLORREF a, COLORREF b, double t) {   /* a*(1-t) + b*t */
                (int)(GetGValue(a) * (1 - t) + GetGValue(b) * t + 0.5),
                (int)(GetBValue(a) * (1 - t) + GetBValue(b) * t + 0.5));
 }
-static void ApplySkin() {
+static bool HostHasSkinJsonOf() {   /* 宿主表追加指针: 取用前先校验 host->size (SDK v4 追加口径) */
+    return g_host && g_host->size >= offsetof(XjsPluginHost, GetSkinJsonOf) + sizeof(g_host->GetSkinJsonOf);
+}
+static void ApplySkin() {   /* 跟随默认窗口的皮肤 (window=0); 打开时取一次, EVT_SKIN 到达再重取 */
     char buf[512] = {};
-    if (g_host && g_host->GetSkinJson(g_ctx, buf, sizeof(buf)) == XJS_PLUGIN_OK) {
+    int n = HostHasSkinJsonOf() ? g_host->GetSkinJsonOf(g_ctx, 0, buf, sizeof(buf))
+                                : (g_host ? g_host->GetSkinJson(g_ctx, buf, sizeof(buf)) : XJS_PLUGIN_ERR_FAIL);
+    if (n > 0) {   /* 缓冲类 API 返回写入字节数 (负数=错误), 不返回 XJS_PLUGIN_OK */
         std::string j = buf;
         auto cv = [&](const char* k, COLORREF def) {
             std::wstring s = JsonFieldW(j, k);
@@ -212,7 +217,7 @@ static void ApplySkin() {
 /* 存取插件存储 (免权限): 键规则见 SDK (UTF-8 文字, 禁控制字符与路径符) */
 static std::wstring StorageGet(const char* key) {
     char buf[256] = {};
-    if (g_host && g_host->StorageGet(g_ctx, key, buf, sizeof(buf)) == XJS_PLUGIN_OK) return W8(buf);
+    if (g_host && g_host->StorageGet(g_ctx, key, buf, sizeof(buf)) > 0) return W8(buf);   /* >0 = 字节数 (负=错误) */
     return L"";
 }
 static void StorageSet(const char* key, const std::wstring& v) {
@@ -3095,6 +3100,15 @@ static LRESULT CALLBACK MapWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY: {
             KillTimer(hwnd, 1); KillTimer(hwnd, 2); KillTimer(hwnd, 3);
             KillTimer(hwnd, 4); KillTimer(hwnd, 5); KillTimer(hwnd, 6); KillTimer(hwnd, 7);
+            /* 浮层瞬态随窗口归零: 隐藏定时器已随窗口销毁, 残留 true 会在下次开窗第一帧原样
+               画出且再无定时器清除 — Toast 永驻 (实锤: "双击放大查看" 出现后 2.5s 内关窗,
+               定时器 5 到点前 WM_DESTROY 不清 g_toastShow); Tooltip 的节点指针更会随下方
+               g_tiles.clear() 悬垂, 复现即崩 */
+            TipStateReset();   /* Tooltip 三态 (定时器 1/2 上面已清) */
+            g_toastShow = false;  g_toastText.clear();
+            g_menuOpen = false;   g_menu.clear();  g_menuHover = -1;  g_menuNodePath.clear();
+            g_marqueeOn = false;  g_sbDrag = false;
+            g_focusInput = false; g_hlPath.clear();
             g_hwnd = NULL;
             g_booted = false;
             g_items = NULL;
@@ -3251,7 +3265,7 @@ static void OpenMapWindow(const std::wstring& path, unsigned long long token) {
 
 /* ==================== 插件固定导出 ==================== */
 extern "C" __declspec(dllexport) const XjsPluginInfo* XJS_PLUGIN_CALL XjsPlugin_GetInfo(void) {
-    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "space-map", "1.2.0" };
+    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "space-map", "1.3.0" };
     return &info;
 }
 extern "C" __declspec(dllexport) int XJS_PLUGIN_CALL XjsPlugin_Init(XjsPluginCtx* ctx, const XjsPluginHost* host) {
@@ -3260,7 +3274,10 @@ extern "C" __declspec(dllexport) int XJS_PLUGIN_CALL XjsPlugin_Init(XjsPluginCtx
     static Gdiplus::GdiplusStartupInput gsi;
     if (Gdiplus::GdiplusStartup(&g_gdipToken, &gsi, NULL) != Gdiplus::Ok)
         return XJS_PLUGIN_ERR_FAIL;
-    if (g_host) g_host->Log(g_ctx, 1, "space-map 1.2.0 initialized (GDI+ replica of c-disk-cleaner, engine direct-link)");
+    if (g_host) {
+        g_host->Subscribe(g_ctx, XJS_PLUGIN_EVT_SKIN);   /* 皮肤变化 → 窗口配色跟随默认窗口 (OnEvent) */
+        g_host->Log(g_ctx, 1, "space-map 1.3.0 initialized (GDI+ replica of c-disk-cleaner, engine direct-link)");
+    }
     return XJS_PLUGIN_OK;
 }
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_Shutdown(XjsPluginCtx* ctx) {
@@ -3287,6 +3304,14 @@ extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnCommand(
     if (!p || !*p) return;
     std::wstring wpath = W8(p);
     OpenMapWindow(wpath, window);
+}
+/* 皮肤变化 (纯信号): 重取默认窗口皮肤并整帧重绘; 换的是别的窗口时取回同色, 重绘无观感变化 */
+extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnEvent(
+    XjsPluginCtx* ctx, int eventType, XjsWindowToken window, void* result) {
+    (void)ctx; (void)window; (void)result;
+    if (eventType != XJS_PLUGIN_EVT_SKIN) return;
+    ApplySkin();
+    if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
 }
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnHostGone(XjsPluginCtx* ctx) {
     (void)ctx;   /* 引擎即将销毁: 无常驻引擎资源, 窗口随 Shutdown 关闭 */

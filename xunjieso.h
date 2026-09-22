@@ -886,6 +886,15 @@ XJS_API int XJS_CALL xjs_lua_ToJson(void* L, int index, char* buffer, int buffer
 // 返回契约同 xjs_lua_ToJson
 XJS_API int XJS_CALL xjs_lua_ArgsToJson(void* L, char* buffer, int bufferCount);
 
+// 取 Lua 脚本提示词文本(UTF-8, '\0'结尾).
+// 引擎内嵌的 Lua 脚本编写提示词(AI 投喂用), 按类型返回其一:
+// 0=过滤模式提示词(-3 Lua脚本: 宿主多线程逐文件调用的单文件谓词, f 表 API/两种脚本形态/性能规则);
+// 1=执行模式提示词(-4 Lua执行: 脚本自主遍历数据库/排序/生成结果, db/f/res 三表 API 全集).
+// 宿主可将其作为系统提示词投喂给大模型生成对应模式的脚本.
+// promptType: 0=过滤模式, 1=执行模式; 其它值返回空字符串("").
+// 返回 UTF-8 文本指针; 指向进程级静态缓冲, 进程生命期内有效, 无需释放、请勿改写.
+XJS_API const char* XJS_CALL xjs_LUA_GetPprompt(int promptType);
+
 // ============================================================================
 // 搜索结果 API
 // ============================================================================

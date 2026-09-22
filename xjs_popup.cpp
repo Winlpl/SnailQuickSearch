@@ -1487,6 +1487,21 @@ void XjsLineEdit::MouseUp() {
     if (anchor == caret) anchor = -1;   /* 单击零长选区收拢 */
 }
 
+/* 多行滚动条悬停命中 (悬停提亮一档): sbHover 置为所在条 (0=无 1=纵 2=横), 变化返回真。
+   宿主在 WM_MOUSEMOVE 调用 (无需捕获), 变化时自行失效重画 */
+bool XjsLineEdit::UpdateSbHover(POINT pt, const XjsRect& area, XjsFormat* fmt) {
+    int h = 0;
+    if (multiline) {
+        XjsRect vt, ht; float mx, my;
+        Scrollbars(area, fmt, &vt, &ht, &mx, &my);
+        if (my > 0 && XjsPtIn(vt, pt)) h = 1;
+        else if (mx > 0 && XjsPtIn(ht, pt)) h = 2;
+    }
+    if (h == sbHover) return false;
+    sbHover = h;
+    return true;
+}
+
 bool XjsLineEdit::MouseDoubleClick(POINT pt, const XjsRect& area, XjsFormat* fmt) {
     if (text.empty()) return false;
     int i = IndexAtPoint(pt, area, fmt);
@@ -1615,7 +1630,7 @@ void XjsLineEdit::UpdateImeAnchor(HWND hwnd, const XjsRect& area, XjsFormat* fmt
 void XjsLineEdit::Render(XjsRt* target, const XjsRect& area, XjsFormat* fmt,
                          XjsBrush* textBr, XjsBrush* selectionBr, XjsBrush* caretBr,
                          const wchar_t* placeholder, XjsBrush* placeholderBr, bool caretOn,
-                         XjsBrush* scrollbarBr) {
+                         XjsBrush* scrollbarBr, XjsBrush* scrollbarHoverBr) {
     if (!target || area.right - area.left <= 1) return;
     if (multiline) {
         /* 多行绘制: 逐逻辑行排版 (行高精确), 原点取整像素 (亚像素定位伤 ClearType);
@@ -1673,11 +1688,13 @@ void XjsLineEdit::Render(XjsRt* target, const XjsRect& area, XjsFormat* fmt,
             target->FillRectangle(XjsRectF(area.left + cx - scroll, top + XSF(2),
                                               area.left + cx - scroll + 2.0f, top + lh - XSF(2)), caretBr);
         }
-        if (scrollbarBr) {   /* 溢出才画 (几何与命中/拖拽同源 Scrollbars) */
+        if (scrollbarBr) {   /* 溢出才画 (几何与命中/拖拽同源 Scrollbars); 悬停条提亮一档 */
             XjsRect vt, ht; float mx, my;
             Scrollbars(area, fmt, &vt, &ht, &mx, &my);
-            if (my > 0) target->FillRoundedRectangle(XjsRoundedRectF(vt, XSF(4), XSF(4)), scrollbarBr);
-            if (mx > 0) target->FillRoundedRectangle(XjsRoundedRectF(ht, XSF(4), XSF(4)), scrollbarBr);
+            if (my > 0) target->FillRoundedRectangle(XjsRoundedRectF(vt, XSF(4), XSF(4)),
+                (sbHover == 1 && scrollbarHoverBr) ? scrollbarHoverBr : scrollbarBr);
+            if (mx > 0) target->FillRoundedRectangle(XjsRoundedRectF(ht, XSF(4), XSF(4)),
+                (sbHover == 2 && scrollbarHoverBr) ? scrollbarHoverBr : scrollbarBr);
         }
         target->PopAxisAlignedClip();
         return;
