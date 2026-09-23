@@ -403,7 +403,12 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
                 wchar_t no[16];
                 swprintf(no, 16, L"%d. ", (int)(ti + 1));
                 *out += no;
+                /* 样本路径 = 可点击链接 (单击打开/右键定位复制; 前端 .ai-path 统一处理) */
+                *out += L"<span class=\"ai-path\" data-path=\"";
                 HtmlEscape(out, st.top[ti]);
+                *out += L"\">";
+                HtmlEscape(out, st.top[ti]);
+                *out += L"</span>";
                 if (ti + 1 < st.top.size()) *out += L"\n";
             }
             *out += L"</div>";
@@ -1264,6 +1269,48 @@ void WebCommand(AiSess* s, const Jv& msg) {
         const Jv* t = msg.Get(L"msg");
         if (t && t->t == 3 && g_host)
             g_host->Toast(g_ctx, s->tok, U8(t->str).c_str(), XJS_PLUGIN_TOAST_WARN);
+        return;
+    }
+    /* ---- 可点击交互 (用户点回答里的搜索卡片/文件路径) ----
+       search/searchfill = 搜索卡片: 置入搜索词 (+可选切换搜索模式), execute 区分是否立即执行;
+       open/reveal = 文件路径: 索引内走宿主 OpenFile (打开行为/资源管理器定位), 索引外插件自开;
+       copypath = 复制路径清单里的一条。全部用户主动点击, 不受 filePolicy 门 (那是 AI 自主工具的闸)。 */
+    if (c == L"search" || c == L"searchfill") {
+        std::wstring text = TrimW(msg.S(L"text"));
+        std::wstring mode = TrimW(msg.S(L"mode"));
+        if (text.empty() && mode.empty()) return;
+        if (!g_host) return;
+        int rc = g_host->SearchSetText(g_ctx, s->tok, U8(text).c_str(),
+                                       mode.empty() ? NULL : U8(mode).c_str(),
+                                       c == L"search" ? 1 : 0);
+        if (rc == XJS_PLUGIN_ERR_ARG)
+            g_host->Toast(g_ctx, s->tok, "未知搜索模式, 已忽略", XJS_PLUGIN_TOAST_WARN);
+        else if (rc != XJS_PLUGIN_OK)
+            g_host->Toast(g_ctx, s->tok, "搜索窗口不可用 (已关闭?)", XJS_PLUGIN_TOAST_WARN);
+        return;
+    }
+    if (c == L"open" || c == L"reveal") {
+        std::wstring path = TrimW(msg.S(L"path"));
+        if (path.empty() || !g_host) return;
+        bool isReveal = c == L"reveal";
+        xjs_engine* eng = xjs_GetDefaultEngine();
+        int fid = eng ? xjs_db_GetFileIdByPath(eng, U8(path).c_str()) : -1;
+        int rc = (fid >= 0) ? g_host->OpenFile(g_ctx, s->tok, fid, isReveal ? 1 : 0)
+                            : XJS_PLUGIN_ERR_NOTFOUND;
+        if (rc != XJS_PLUGIN_OK) {   /* 未索引/窗口失效: 插件自开 (SDK 契约: 非索引路径自理) */
+            HINSTANCE r = isReveal
+                ? ShellExecuteW(NULL, L"open", L"explorer.exe",
+                                (L"/select,\"" + path + L"\"").c_str(), NULL, SW_SHOWNORMAL)
+                : ShellExecuteW(NULL, L"open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            if ((INT_PTR)r <= 32)
+                g_host->Toast(g_ctx, s->tok, "打开失败: 路径不存在或无法访问", XJS_PLUGIN_TOAST_WARN);
+        }
+        return;
+    }
+    if (c == L"copypath") {
+        const Jv* t = msg.Get(L"path");
+        if (t && t->t == 3 && !t->str.empty() && g_host)
+            g_host->ClipboardSetText(g_ctx, U8(t->str).c_str());
         return;
     }
 }

@@ -51,6 +51,11 @@ int  PluginBufOut(char* buf, int cap, const std::string& s);
 void PluginJsonEscape(const std::string& s, std::string* out);
 std::string PluginJsonStr(const std::string& s);
 
+/* ---- 关键词模式名↔值 (xjs_plugin.cpp 接线 SearchSetText 的 mode 参数用) ----
+   名串与 settings.set "搜索模式"/配置文件同源 ("wildcard|regex|sql|lua"); 非法名 = -1。
+   应用口径在 xjs_plugin.cpp 侧与设置页同款: 写 w->mode + XjsSaveConfig, 重搜时机按 execute。 */
+int XjsPluginApiKeyModeIndexFromUtf8(const std::wstring& s);
+
 /* ---- 运行时搜索模式存储 (xjs_plugin_api.cpp 持有; 会话级, 不落盘) ----
  * 插件经 modes.add 运行时添加的模板型模式: 与清单 "搜索模式" 同一合并视图 (药丸菜单/
  * 托管标签链/prune 全走既有路径, 引擎零改动)。srcId 仍 = "p:<插件id>:<序>", 但序号从

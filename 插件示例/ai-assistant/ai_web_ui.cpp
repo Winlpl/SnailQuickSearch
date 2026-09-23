@@ -5,9 +5,15 @@
  * ai-cmd-policy/ai-usage/ai-jumpbar/ai-history-*), 颜色 = CSS 变量 (运行时由 C++
  * 推送的皮肤调色注入, 派生色一律 color-mix 从变量现算)。
  * 交互: C++→JS 推送 (boot/pal/cfg/convs/msgs/last/usage/status), JS→C++ 命令 (send/stop/
- * close/settings/policy/new/load/del/clearHist/copy/openurl/pallow/pdeny/retry/notify/ready)。
+ * close/settings/policy/new/load/del/clearHist/copy/openurl/pallow/pdeny/retry/notify/ready/
+ * search/searchfill/open/reveal/copypath)。
+ * 可点击交互 (AI 决定点击的类型, 一律标准 Markdown 链接语法): 模型输出 [指引](xjs://search?text=..&mode=..)
+ * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); [指引](xjs://open|reveal?path=..)
+ * 渲染成文件动作链接; 正文与工具样本里的绝对路径自动识别为文件链接 (单击=打开, 右键=打开/定位/复制);
+ * lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
  * 安全面: CSP 关 fetch/XHR/表单/外域; 模型输出永不产生活 HTML (C++ md4c 层转义裁剪);
- * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力。
+ * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力 (右键菜单只在
+ * 卡片/路径上接管为自绘菜单, 其余区域保留原生菜单 = 选区复制入口)。
  * 维护口径: 改内容直接在下方字面量里编辑, 段超限就再切一刀 (段界只是拼接缝)。
  */
 #include "ai_assistant.h"
@@ -205,7 +211,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
 /* 表格 */
 .ai-bubble .ai-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--glass-border);border-radius:5px}
 .ai-bubble table{width:100%;border-collapse:collapse;font-size:12px;line-height:1.5}
-.ai-bubble th,.ai-bubble td{padding:5px 9px;border-bottom:1px solid var(--divider);color:var(--text-primary);text-align:left}
+.ai-bubble th,.ai-bubble td{padding:5px 9px;border-bottom:1px solid var(--divider);color:var(--text-primary);text-align:left;
+                           overflow-wrap:break-word;word-break:normal}   /* break-word: "10" 这类短词不被 anywhere 拆成 "1 0" */
 .ai-bubble th{background:color-mix(in srgb,var(--accent-violet) 12%,transparent);
               color:color-mix(in srgb,var(--accent-violet) 72%,var(--text-primary));font-weight:600;white-space:nowrap}
 .ai-bubble tr:last-child td{border-bottom:0}
@@ -237,8 +244,47 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-code-copy.ai-code-copied{color:var(--accent-emerald);border-color:color-mix(in srgb,var(--accent-emerald) 45%,transparent)}
 .ai-bubble .ai-code pre{margin:0;padding:8px 10px;overflow-x:auto}
 .ai-bubble .ai-code pre code{padding:0;background:transparent;color:var(--text-primary);font-size:11.5px;line-height:1.6;white-space:pre}
-
-/* ---- 推理过程 (可折叠; 挂在 .ai-msg-main 里, 气泡之前) ---- */
+)AIWEBUI"
+           LR"AIWEBUI(/* ---- 可点击交互: 搜索卡片 (xjs-search 围栏渲染) ---- */
+.ai-chip{display:flex;align-items:center;gap:8px;width:fit-content;max-width:100%;margin:7px 0;
+         padding:7px 11px;border:1px solid color-mix(in srgb,var(--accent-violet) 40%,var(--glass-border));
+         border-radius:8px;background:color-mix(in srgb,var(--accent-violet) 8%,var(--surface-raised));
+         color:var(--text-primary);font-size:12px;line-height:1.5;cursor:pointer;
+         user-select:none;-webkit-user-select:none;
+         transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease}
+.ai-chip:hover{background:color-mix(in srgb,var(--accent-violet) 15%,var(--surface-raised));
+               border-color:color-mix(in srgb,var(--accent-violet) 62%,transparent);
+               box-shadow:0 2px 10px rgba(0,0,0,.16)}
+.ai-chip:active{transform:translateY(1px)}
+.ai-chip-ic{flex:0 0 auto;font-size:13px;color:var(--accent-violet)}
+.ai-chip-text{flex:0 1 auto;min-width:0;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+              font-family:Consolas,'Cascadia Mono',monospace;font-size:11.5px}
+.ai-chip-mode{flex:0 0 auto;padding:1px 7px;border-radius:999px;
+              background:color-mix(in srgb,var(--accent-violet) 20%,transparent);
+              color:color-mix(in srgb,var(--accent-violet) 82%,var(--text-primary));
+              font-size:10px;letter-spacing:.4px;text-transform:uppercase}
+.ai-chip-go{flex:0 0 auto;font-size:10px;color:var(--text-tertiary);transition:color 120ms ease}
+.ai-chip:hover .ai-chip-go{color:var(--accent-violet)}
+/* ---- 文件路径链接 (气泡正文自动识别 + 工具卡片样本): 单击打开, 右键菜单 ---- */
+.ai-path{color:var(--accent-cyan);border-bottom:1px dashed color-mix(in srgb,var(--accent-cyan) 48%,transparent);
+         cursor:pointer;transition:color 120ms ease,border-bottom-color 120ms ease}
+.ai-path:hover{color:color-mix(in srgb,var(--accent-cyan) 80%,#fff);border-bottom-style:solid}
+/* ---- 右键菜单 (文件路径 / 搜索卡片的操作项) ---- */
+.ai-ctx{position:fixed;left:0;top:0;z-index:13000;display:flex;flex-direction:column;min-width:150px;padding:4px;
+        border-radius:7px;background:var(--surface-raised);
+        box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.3);cursor:default}
+.ai-ctx-item{display:block;width:100%;padding:6px 10px;border:0;border-radius:4px;background:transparent;
+             color:var(--text-primary);font:inherit;font-size:12px;text-align:left;cursor:pointer;white-space:nowrap}
+.ai-ctx-item:hover{background:var(--btn-secondary-hover)}
+.ai-ctx-sep{height:1px;margin:3px 6px;background:var(--divider)}
+/* ---- 代码语法高亮 (Lua / SQL; 颜色取皮肤语义色, 深浅皮肤两用) ---- */
+.tok-k{color:color-mix(in srgb,var(--accent-violet) 72%,var(--text-primary));font-weight:600}
+.tok-s{color:var(--accent-emerald)}
+.tok-c{color:var(--text-tertiary);font-style:italic}
+.tok-n{color:var(--accent-amber)}
+.tok-f{color:var(--accent-cyan)}
+)AIWEBUI"
+           LR"AIWEBUI(/* ---- 推理过程 (可折叠; 挂在 .ai-msg-main 里, 气泡之前) ---- */
 .ai-reasoning{margin:0;overflow:hidden;width:100%;border:1px solid var(--ai-surface-border);border-radius:var(--ai-surface-radius);
               background:color-mix(in srgb,var(--accent-violet) 5%,transparent);
               --ai-reasoning-text:color-mix(in srgb,var(--text-secondary) 62%,var(--text-tertiary));
@@ -627,7 +673,7 @@ const S={
   pal:null, convs:[], msgs:[], cur:0,
   sending:false, net:0, phase:0,
   usage:{has:false,up:0,uo:0,ut:0,uch:0,lp:0,lc:0,tps:0},
-  sideOpen:false, cfgOpen:false, policyOpen:false, usageOpen:false,
+  sideOpen:false, cfgOpen:false, policyOpen:false, usageOpen:false, ctxOpen:false,
   dUrl:'',dKey:'',dModel:'',dReason:false,
   openSteps:{},     /* 展开的工具卡片样本: convId+':'+msgIdx → true */
   toolGrp:{},       /* 展开的连续工具组: convId+':'+k0 → true (缺省 = 含待确认卡才展开) */
@@ -808,6 +854,7 @@ function renderThread(keepScroll){
     i=turnEnd(i);
   }
   inner.innerHTML=html;
+  enhance(inner);
   applyBubbleShapes(); applyOpenSteps();
   if(stick){S.follow=true;scrollToEnd();}
   updateJumpbar();
@@ -824,6 +871,7 @@ function applyLast(){
   frag.innerHTML=turnGroupHtml(start);
   const row=frag.firstChild;
   if(old)inner.replaceChild(row,old);else inner.appendChild(row);
+  enhance(row);
   applyBubbleShapes(row); applyOpenSteps();
   if(stick){S.follow=true;scrollToEnd();}
   updateJumpbar();
@@ -936,7 +984,202 @@ function jumpTo(round){
   S.jumpFlashTimer=setTimeout(()=>{S.jumpFlashTimer=0;clear();},1600);
 }
 
-/* ---- 消息 HTML 内的点击 (事件委托) ---- */
+)AIWEBUI"
+           LR"AIWEBUI(/* ==================== 可点击交互 (搜索卡片 / 语法高亮 / 路径链接 / 右键菜单) ====================
+ * AI 决定点击的类型, 一律标准 Markdown 链接语法 (链接文字 = 给用户看的动作指引):
+ * [..](xjs://search?text=..&mode=..) = 搜索卡片 (点击置入搜索框并按模式执行);
+ * [..](xjs://open|reveal?path=..) = 文件动作链接; 正文/样本里的绝对路径 = 自动文件链接
+ * (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
+ * enhance() 挂在每次消息 HTML 落地之后 (innerHTML 重建后节点全新, 幂等无需去重)。 */
+const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua'};
+/* 路径字符边界: 停在 空格/引号/尖括号/管道/星号/冒号/问号/正斜杠 + 全角标点与中文句读,
+   其余 (含括号、逗号、点、&、汉字) 都是合法文件名字符, 种子照吞 —
+   "美人鱼 (2016)\美人鱼 (2016).mkv"、"a, b & c.mkv" 才切得完整 */
+const PATH_STOP=/[\s'"`<>|*\/:?\u3000-\u303F\uFF01-\uFF5E\u2010-\u2027]/;
+const PATH_RE=new RegExp("(?<![A-Za-z0-9])(?:[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\s'\"`<>|*/:?\\u3000-\\u303F\\uFF01-\\uFF5E\\u2010-\\u2027]+","g");   /* lookbehind 排除 https: 里的 "s:/" */
+/* 路径含空格 ("C:\Program Files\App\x.exe"、"美人鱼 (2016)\美人鱼 (2016).mkv"、整句英文长文件名):
+ * 种子切到空格后按词延伸 — 词内含 \ (路径续段) 或以"点+字母扩展名"收尾 (文件名) 才落锚记为路径;
+ * 纯汉字词 = 正文开始, 硬停 (锚点之前的部分就是路径); 其余 ASCII 词先吃进继续看。
+ * "共 12.5 GB" 的 12.5 不会被当扩展名 (限字母开头), "C:\a\b 是 x.txt 备份" 的"是"先断, 不会错并。 */
+const PATH_CJKWORD=/^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+$/;
+function pathStopCh(ch){return PATH_STOP.test(ch);}
+function extendPath(text,e){
+  let best=e,k=e;
+  for(;;){
+    if(text[k]!==' ')break;
+    let j=k+1;
+    while(j<text.length&&!pathStopCh(text[j]))j++;
+    if(j===k+1)break;
+    const seg=text.slice(k+1,j);
+    if(PATH_CJKWORD.test(seg))break;
+    k=j;
+    if(seg.indexOf('\\')>=0||/\.[A-Za-z][A-Za-z0-9]{0,4}$/.test(seg))best=k;
+  }
+  return best;
+}
+const LUA_KW=new Set('and break do else elseif end false for function goto if in local nil not or repeat return then true until while self'.split(' '));
+const SQL_KW=new Set('select from where group by order having limit offset as and or not null is like ilike in between case when then else end distinct join left right inner outer cross on asc desc union all exists insert into values update set delete create table view index with cast interval now current_date current_timestamp'.split(' '));
+function modeLabel(m){m=(m||'').toLowerCase();return MODE_LABELS[m]||m;}
+/* xjs:// 动作链接解析: "xjs://search?text=..&mode=.." → {kind, p}; 值兼容 %-编码与裸中文
+   (decodeURIComponent 失败原样用), 裸 & 会截断参数 — 提示词已要求 URL 编码 */
+function xjsUrl(href){
+  const m=/^xjs:\/\/([a-z]+)(?:\?(.*))?$/i.exec(String(href||'').trim());
+  if(!m)return null;
+  const p={};
+  (m[2]||'').split('&').forEach(function(kv){
+    const i=kv.indexOf('=');
+    if(i<1)return;
+    let v=kv.slice(i+1);
+    try{v=decodeURIComponent(v.replace(/\+/g,'%20'));}catch(e){}
+    p[kv.slice(0,i).toLowerCase()]=v;
+  });
+  return {kind:m[1].toLowerCase(),p:p};
+}
+/* Markdown 链接 → 可点击控件:
+   xjs://search → 搜索卡片 (链接文字 = 卡片上的动作指引, 搜索词藏在 data-text);
+   xjs://open|reveal → 文件动作链接 (.ai-path, 链接文字照 AI 写的指引显示, data-open 区分默认动作) */
+function transformActionLinks(root){
+  (root||$('threadInner')).querySelectorAll('a[href^="xjs://"]').forEach(a=>{
+    const u=xjsUrl(a.getAttribute('href'));
+    if(!u)return;
+    if(u.kind==='search'){
+      const q=(u.p.text||'').trim()||a.textContent.trim();
+      if(!q)return;
+      const chip=document.createElement('div');
+      chip.className='ai-chip';chip.setAttribute('role','button');
+      chip.setAttribute('data-text',q);
+      if(u.p.mode)chip.setAttribute('data-mode',u.p.mode.toLowerCase());
+      chip.title='点击执行搜索: '+q+' · 右键更多操作';
+      chip.innerHTML='<span class="ai-chip-ic glyph" aria-hidden="true">&#xE721;</span>'
+        +'<span class="ai-chip-text">'+esc(a.textContent.trim()||q)+'</span>'
+        +(u.p.mode?'<span class="ai-chip-mode">'+esc(modeLabel(u.p.mode))+'</span>':'')
+        +'<span class="ai-chip-go glyph" aria-hidden="true">&#xE768;</span>';
+      a.replaceWith(chip);
+    }else if(u.kind==='open'||u.kind==='reveal'){
+      const path=(u.p.path||'').trim();
+      if(!path)return;
+      const sp=document.createElement('span');
+      sp.className='ai-path';
+      sp.setAttribute('data-path',path);
+      if(u.kind==='reveal')sp.setAttribute('data-open','reveal');
+      sp.title=(u.kind==='reveal'?'定位: ':'打开: ')+path;
+      sp.textContent=a.textContent.trim()||path;
+      a.replaceWith(sp);
+    }
+  });
+}
+/* Lua / SQL 轻量词法高亮 (注释/字符串/数字/关键字/函数调用; 颜色见 .tok-*):
+   高亮只重涂 pre code 的内文, 复制按钮取的 data-code 原文不受影响 */
+function hlApply(code,src,lang){
+  const re=lang==='lua'
+    ? /(--\[(?:=*)\[[\s\S]*?(?:\](?:=*)\]|$)|--[^\n]*)|(\[(?:=*)\[[\s\S]*?(?:\](?:=*)\]|$)|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([A-Za-z_]\w*)|(\s+)|([\s\S])/g
+    : /(--[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|('(?:''|[^'\n])*'|"(?:""|[^"\n])*")|(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([A-Za-z_]\w*)|(\s+)|([\s\S])/g;
+  const kw=lang==='lua'?LUA_KW:SQL_KW;
+  let html='',m;
+  while((m=re.exec(src))){
+    if(m[1])html+='<span class="tok-c">'+esc(m[1])+'</span>';
+    else if(m[2])html+='<span class="tok-s">'+esc(m[2])+'</span>';
+    else if(m[3])html+='<span class="tok-n">'+esc(m[3])+'</span>';
+    else if(m[4]){
+      const w=m[4],lo=w.toLowerCase();
+      if(kw.has(lo))html+='<span class="tok-k">'+esc(w)+'</span>';
+      else{let k=re.lastIndex;while(k<src.length&&(src[k]===' '||src[k]==='\t'))k++;
+        html+=(src[k]==='(')?'<span class="tok-f">'+esc(w)+'</span>':esc(w);}
+    }
+    else html+=esc(m[5]||m[6]||'');
+  }
+  code.innerHTML=html;
+}
+function highlightCode(root){
+  (root||$('threadInner')).querySelectorAll('.ai-code').forEach(box=>{
+    const langEl=box.querySelector('.ai-code-lang');
+    if(!langEl)return;
+    const lang=langEl.textContent.trim().toLowerCase();
+    if(lang!=='lua'&&lang!=='luau'&&lang!=='sql')return;
+    const code=box.querySelector('pre code');
+    const raw=decodeHtml(box.getAttribute('data-code')||'');
+    if(code&&raw)hlApply(code,raw,lang==='sql'?'sql':'lua');
+  });
+}
+)AIWEBUI"
+           LR"AIWEBUI(/* 气泡正文里的绝对路径 → 可点击 .ai-path 链接 (TreeWalker 只碰文本节点,
+   跳过代码块/链接/已有链接/按钮; 句尾标点剥出链接外) */
+function linkifyPaths(root){
+  const scope=root||$('threadInner');
+  const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT,{acceptNode:function(n){
+    const v=n.nodeValue;
+    if(!v||v.length<4)return NodeFilter.FILTER_REJECT;
+    const p=n.parentElement;
+    if(!p||p.closest('.ai-code,a,.ai-path,button,textarea,select,script,style'))return NodeFilter.FILTER_REJECT;
+    return v.match(PATH_RE)?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT;
+  }});
+  const nodes=[];let n;
+  while((n=walker.nextNode()))nodes.push(n);
+  nodes.forEach(function(node){
+    const text=node.nodeValue;
+    let m,frag=null,last=0;
+    PATH_RE.lastIndex=0;
+    while((m=PATH_RE.exec(text))){
+      if(m.index+m[0].length<=last)continue;   /* 已被上一个延伸段覆盖 */
+      const end=extendPath(text,m.index+m[0].length);
+      if(end<=last)continue;
+      const path=text.slice(m.index,end);
+      const strip=path.replace(/[.。,，;；:!?)】」》>'"\u2019\u201d]+$/,'');
+      if(strip.length<3)continue;
+      if(!frag)frag=document.createDocumentFragment();
+      if(m.index>last)frag.appendChild(document.createTextNode(text.slice(last,m.index)));
+      const sp=document.createElement('span');
+      sp.className='ai-path';
+      sp.setAttribute('data-path',strip);
+      sp.title='点击打开 · 右键更多操作';
+      sp.textContent=strip;
+      frag.appendChild(sp);
+      if(strip.length<path.length)frag.appendChild(document.createTextNode(path.slice(strip.length)));
+      last=end;
+    }
+    if(frag){
+      if(last<text.length)frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag,node);
+    }
+  });
+}
+function enhance(root){
+  const scope=root||$('threadInner');
+  transformActionLinks(scope);
+  highlightCode(scope);
+  linkifyPaths(scope);
+}
+/* ---- 右键菜单 (文件路径 / 搜索卡片的操作项; 点外/Esc/滚动/缩放关闭) ---- */
+function hideCtx(){
+  const m=$('ctxMenu');
+  if(m)m.remove();
+  S.ctxOpen=false;
+}
+function showCtx(items,x,y){
+  hideCtx();
+  const menu=document.createElement('div');
+  menu.className='ai-ctx';
+  menu.id='ctxMenu';
+  items.forEach(function(it){
+    if(it==='-'){const sep=document.createElement('div');sep.className='ai-ctx-sep';menu.appendChild(sep);return;}
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='ai-ctx-item';
+    b.textContent=it.t;
+    b.addEventListener('click',function(ev){ev.stopPropagation();hideCtx();it.fn();});
+    menu.appendChild(b);
+  });
+  document.body.appendChild(menu);
+  const r=menu.getBoundingClientRect();
+  let L=x,T=y;
+  if(L+r.width>window.innerWidth-8)L=window.innerWidth-r.width-8;
+  if(T+r.height>window.innerHeight-8)T=Math.max(8,y-r.height-4);
+  menu.style.left=Math.round(Math.max(8,L))+'px';
+  menu.style.top=Math.round(T)+'px';
+  S.ctxOpen=true;
+}
+)AIWEBUI"
+           LR"AIWEBUI(/* ---- 消息 HTML 内的点击 (事件委托) ---- */
 function decodeHtml(s){const t=document.createElement('textarea');t.innerHTML=s;return t.value;}
 function copyTurn(mi){
   const m=S.msgs[mi];
@@ -951,6 +1194,14 @@ function bindThread(){
   inner.addEventListener('click',e=>{
     const sug=e.target.closest('.ai-suggestion');
     if(sug){if(!S.sending)post({c:'send',text:sug.textContent});return;}
+    /* 有非折叠选区 = 用户在拖选复制, 不当作点击 (路径/卡片误开防线) */
+    const hasSel=window.getSelection&&!window.getSelection().isCollapsed;
+    const chip=e.target.closest('.ai-chip');
+    if(chip&&!hasSel){post({c:'search',text:chip.getAttribute('data-text')||'',mode:chip.getAttribute('data-mode')||''});return;}
+    const pth=e.target.closest('.ai-path');
+    if(pth&&!hasSel){
+      const act=pth.getAttribute('data-open')==='reveal'?'reveal':'open';
+      post({c:act,path:pth.getAttribute('data-path')||pth.textContent});return;}
     const a=e.target.closest('a');
     if(a){e.preventDefault();const href=a.getAttribute('href')||'';
       if(/^https?:/i.test(href))post({c:'openurl',href});return;}
@@ -993,14 +1244,43 @@ function bindThread(){
       const turn=rh.closest('.ai-msg');   /* 回合组: 整组重渲染 (过程区+气泡同源) */
       if(turn){const start=+turn.getAttribute('data-mi');
         const f=document.createElement('div');f.innerHTML=turnGroupHtml(start);
-        turn.replaceWith(f.firstChild);applyOpenSteps();}
+        const nw=f.firstChild;enhance(nw);
+        turn.replaceWith(nw);applyOpenSteps();}
       return;}
+  });
+  /* 右键: 文件路径 / 搜索卡片的操作菜单 (其余区域保留浏览器原生菜单 = 选区复制入口) */
+  inner.addEventListener('contextmenu',e=>{
+    const chip=e.target.closest('.ai-chip');
+    if(chip){
+      e.preventDefault();
+      const text=chip.getAttribute('data-text')||'',mode=chip.getAttribute('data-mode')||'';
+      showCtx([
+        {t:'执行搜索',fn:()=>post({c:'search',text,mode})},
+        {t:'只填入, 不执行',fn:()=>post({c:'searchfill',text,mode})},
+        '-',
+        {t:'复制搜索词',fn:()=>post({c:'copy',text})}
+      ],e.clientX,e.clientY);
+      return;
+    }
+    const pth=e.target.closest('.ai-path');
+    if(pth){
+      e.preventDefault();
+      const p=pth.getAttribute('data-path')||pth.textContent;
+      showCtx([
+        {t:'打开文件',fn:()=>post({c:'open',path:p})},
+        {t:'定位文件',fn:()=>post({c:'reveal',path:p})},
+        '-',
+        {t:'复制路径',fn:()=>post({c:'copypath',path:p})}
+      ],e.clientX,e.clientY);
+      return;
+    }
   });
   /* 滚动: 跟随标记 + 当前轮次同步 (rAF 合并同帧多次触发) */
   const t=threadEl();
   t.addEventListener('scroll',()=>{
     S.follow=isNearBottom();
     hideJumpTip();
+    hideCtx();
     if(!S.jumpRounds.length||S.jumpFrame)return;
     S.jumpFrame=requestAnimationFrame(()=>{S.jumpFrame=0;syncJumpActive();});
   });
@@ -1253,18 +1533,20 @@ function bind(){
     }
   });
   document.addEventListener('mousedown',e=>{
+    if(S.ctxOpen&&!e.target.closest('#ctxMenu'))hideCtx();
     if(S.policyOpen&&!e.target.closest('#policy')&&!e.target.closest('#policyMenu'))policySetOpen(false);
     if(S.usageOpen&&!e.target.closest('#usagePanel')&&!e.target.closest('#usageBtn'))usageSetOpen(false);
   });
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if(S.ctxOpen){hideCtx();e.preventDefault();return;}
       if(S.cfgOpen){cfgToggle(false);e.preventDefault();return;}
       if(S.policyOpen){policySetOpen(false);e.preventDefault();return;}
       if(S.usageOpen){usageSetOpen(false);e.preventDefault();return;}
     }
   });
 )AIWEBUI"
-           LR"AIWEBUI(  window.addEventListener('resize',hideJumpTip);
+           LR"AIWEBUI(  window.addEventListener('resize',()=>{hideJumpTip();hideCtx();});
   /* 内容高度变化时自动跟随到底 (用户手动上滚后 S.follow=false 不再拉回) */
   try{
     new ResizeObserver(()=>{

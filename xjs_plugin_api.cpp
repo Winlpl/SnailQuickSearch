@@ -94,6 +94,9 @@ static int KeyModeIndexFromUtf8(const std::wstring& s) {
         if (s == XJS_MODE_NAMES[i]) return i;
     return -1;
 }
+int XjsPluginApiKeyModeIndexFromUtf8(const std::wstring& s) {
+    return KeyModeIndexFromUtf8(s);
+}
 
 /* ==================== 小工具 ==================== */
 

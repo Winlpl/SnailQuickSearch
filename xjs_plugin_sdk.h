@@ -163,7 +163,9 @@ struct XjsPluginHost {
     int (XJS_PLUGIN_CALL *DialogJson)(XjsPluginCtx*, const char* kind, const char* optsJson, char* buf, int cap);
 
     /* ---- 界面 (仅 UI 线程; 标注者需 ui 权限, 其余免权限) ---- */
-    /* 置入搜索词并触发搜索; kw=NULL 保持现词; execute=0 只填不搜; window=0 = 主窗 */
+    /* 置入搜索词并触发搜索; kw=NULL 保持现词; execute=0 只填不搜;
+       mode = "wildcard|regex|sql|lua" 切换该窗口搜索模式 (与 settings.set "搜索模式" 同口径:
+       非法名 = ERR_ARG; 写入即落盘, 配合 execute=0 时模式在下次搜索生效); window=0 = 主窗 */
     int (XJS_PLUGIN_CALL *SearchSetText)(XjsPluginCtx*, XjsWindowToken window,
                                          const char* kwUtf8, const char* modeUtf8, int execute);              /* ui */
     /* 打开索引文件 (走宿主打开行为: 提权/异步/打开后隐藏) ; reveal 非 0 = 资源管理器定位;

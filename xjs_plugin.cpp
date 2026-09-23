@@ -938,12 +938,19 @@ static int FnSearchSetText(XjsPluginCtx* ctx, XjsWindowToken window, const char*
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
     XjsWindowScope scope(w);
+    if (mode && *mode) {   /* 搜索模式切换 = 设置页"搜索模式"同一落点 (写字段+落盘); 重搜时机跟 execute */
+        int mi = XjsPluginApiKeyModeIndexFromUtf8(Utf8ToUtf16(mode));
+        if (mi < 0) return XJS_PLUGIN_ERR_ARG;
+        if (w->mode != mi) {
+            w->mode = mi;
+            XjsSaveConfig();
+        }
+    }
     if (kw && *kw) {
         if (execute) XjsSearchSetText(Utf8ToUtf16(kw));   /* 置入即搜 (输入即搜口径) */
         else XjsSearchSetTextQuiet(Utf8ToUtf16(kw));      /* execute=0 只填不搜 (SDK 契约) */
     }
-    else if (execute) XjsSearchNow(false);               /* 只重搜当前词 */
-    (void)mode;   /* 模式切换预留 (v1 不接线) */
+    else if (execute) XjsSearchNow(false);               /* 只切模式/只重搜: 按当前(新)模式重搜现词 */
     return XJS_PLUGIN_OK;
 }
 
