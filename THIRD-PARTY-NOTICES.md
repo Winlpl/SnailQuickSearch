@@ -414,3 +414,28 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 > lua-5.5.1 源码含中文标识符扩展补丁: 词法器接受 >=0x80 字节作为标识符字符, 属引擎扩展, 非标准 Lua 行为; 静态编译进本 DLL, 不单独分发。
+## AI 助手插件 - 第三方组件声明
+
+### 1. md4c
+
+The MIT License (MIT)
+
+Copyright © 2016-2026 Martin Mitáš
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+> 静态编译进 ai-assistant.dll (markdown → HTML), 不单独分发。
+
+### 2. WebView2 Loader (Microsoft Edge WebView2 SDK)
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+本插件随附分发 WebView2 SDK 的加载库 (WebView2Loader.dll, 运行期动态加载), 并使用操作系统内置的
+Microsoft Edge WebView2 运行时渲染界面 (运行时为 Windows 系统组件, 非本软件分发)。
+加载库的分发与使用受 Microsoft Webview2 SDK 随附许可条款约束, 详见
+https://learn.microsoft.com/microsoft-edge/webview2/ 。
+

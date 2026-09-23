@@ -1,21 +1,21 @@
 /*
- * ai_plugin.cpp — 插件边界: GetInfo / Init / Shutdown / OnCommand / OnPanelEvent。
+ * ai_plugin.cpp — 插件边界: GetInfo / Init / Shutdown / OnCommand / OnPanelEvent / OnEvent。
  * 宿主全局指针定义也在此 (Init 时存下, 指针终身有效)。
+ * 面板接管口径 (WebView2 版): 插件建真子窗口盖住面板内容区, 输入/渲染归浏览器 —
+ * 宿主只发 OPEN/RESIZE/CLOSE 三种事件 (鼠标/键盘/IME 转发与位图交付均已不适用)。
  */
 #include "ai_assistant.h"
 
 const XjsPluginHost* g_host = NULL;
 XjsPluginCtx*        g_ctx  = NULL;
-ULONG_PTR            g_gdipToken = 0;
 unsigned             g_uiThread = 0;
 
-#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "winhttp.lib")
 
 /* ==================== 插件导出面 ==================== */
 
 static const XjsPluginInfo* XJS_PLUGIN_CALL XjsPlugin_GetInfo(void) {
-    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "1.1.0" };
+    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "2.0.0" };
     return &info;
 }
 
@@ -26,10 +26,9 @@ static int XJS_PLUGIN_CALL XjsPlugin_Init(XjsPluginCtx* ctx, const XjsPluginHost
     if (!HOST_PANEL_OK) return XJS_PLUGIN_ERR_FAIL;   /* 旧宿主 (无 v4 Panel* 表) = 干净失败 */
     AgentToolInit();
     BuildInstructions();   /* 系统提示词 = 角色说明 + 引擎内嵌 Lua 两规范 (进程一次) */
-    Gdiplus::GdiplusStartupInput si;
-    if (GdiplusStartup(&g_gdipToken, &si, NULL) != Gdiplus::Ok) return XJS_PLUGIN_ERR_FAIL;
+    WebInit();             /* 子窗口类注册 */
     if (!AiMsgWndCreate()) return XJS_PLUGIN_ERR_FAIL;
-    SetTimer(g_msgwnd, 1, 530, NULL);   /* 光标闪烁节拍 (仅聚焦会话重渲染) */
+    if (g_host->Subscribe) g_host->Subscribe(g_ctx, XJS_PLUGIN_EVT_SKIN);   /* 换肤 → 重推调色 */
     return XJS_PLUGIN_OK;
 }
 
@@ -68,11 +67,12 @@ static void XJS_PLUGIN_CALL XjsPlugin_Shutdown(XjsPluginCtx* ctx) {
     static bool s_fini = false;
     if (s_fini) return;
     s_fini = true;
-    if (g_msgwnd) KillTimer(g_msgwnd, 1);
     AbortAndJoinAll(2000);   /* SDK 契约: Shutdown 时线程必须已收尾 (宽限 2 秒) */
     AgentToolShutdown();     /* 在途工具线程已 join, 结果对象安全销毁 */
+    for (auto& s : g_sess)
+        if (s.inUse) SessClose(&s);   /* 保存会话 + 收 WebView2 控制器/子窗 */
+    WebShutdown();           /* 环境释放 (进程尾, 无人再用) */
     if (g_msgwnd) { DestroyWindow(g_msgwnd); g_msgwnd = NULL; }
-    if (g_gdipToken) { Gdiplus::GdiplusShutdown(g_gdipToken); g_gdipToken = 0; }
 }
 
 static void XJS_PLUGIN_CALL XjsPlugin_OnCommand(XjsPluginCtx* ctx, const char* cmdIdUtf8,
@@ -93,7 +93,6 @@ static void XJS_PLUGIN_CALL XjsPlugin_OnPanelEvent(XjsPluginCtx* ctx, XjsWindowT
             if (!s) s = SessFree();
             if (!s) return;
             SessOpen(s, window, ev->serial, ev->w, ev->h, ev->scale);
-            RenderDeliver(s);
             return;
         }
         case XJS_PANEL_CLOSE: {
@@ -108,73 +107,34 @@ static void XJS_PLUGIN_CALL XjsPlugin_OnPanelEvent(XjsPluginCtx* ctx, XjsWindowT
             s->w = ev->w;
             s->h = ev->h;
             s->scale = ev->scale > 0 ? ev->scale : 1.0f;
-            s->layDirty = true;
-            RenderDeliver(s);
+            WebSessionRect(s);   /* 子窗口重定位 + 页面缩放档对齐 */
             return;
         }
-        case XJS_PANEL_MOUSE_MOVE:
-        case XJS_PANEL_LDOWN:
-        case XJS_PANEL_LUP:
-        case XJS_PANEL_RDOWN:
-        case XJS_PANEL_RUP:
-        case XJS_PANEL_DBLCLK: {
-            AiSess* s = SessByTok(window);
-            if (s) PanelMouse(s, ev->type, (float)ev->x, (float)ev->y, ev->flags);
-            return;
-        }
-        case XJS_PANEL_WHEEL: {
-            AiSess* s = SessByTok(window);
-            if (s) PanelWheel(s, (float)ev->x, (float)ev->y, ev->delta);
-            return;
-        }
-        case XJS_PANEL_KEY_DOWN: {
-            AiSess* s = SessByTok(window);
-            if (s) PanelKey(s, (unsigned)ev->delta, ev->flags);
-            return;
-        }
-        case XJS_PANEL_KEY_CHAR: {
-            AiSess* s = SessByTok(window);
-            if (s) PanelChar(s, ev->ch);
-            return;
-        }
-        case XJS_PANEL_FOCUS: {
-            AiSess* s = SessByTok(window);
-            if (s && s->winActive != (ev->delta != 0)) {
-                s->winActive = ev->delta != 0;
-                RenderDeliver(s);
-            }
-            return;
-        }
-        case XJS_PANEL_CAPTURE_LOST: {
-            AiSess* s = SessByTok(window);
-            if (s) { s->press = HIT_NONE; s->pressGrab = 0; }
-            return;
-        }
-        case XJS_PANEL_KEY_BLUR: {
-            /* 宿主收回键盘让渡 (用户点了面板以外的宿主 UI): 字段失焦熄光标,
-               不用回发 PanelSetFocus(0) — 宿主已自行清闸 */
-            AiSess* s = SessByTok(window);
-            if (s && (s->inputFocus || s->dFocus)) {
-                s->inputFocus = false;
-                s->dFocus = 0;
-                RenderDeliver(s);
-            }
-            return;
-        }
+        /* 鼠标/滚轮/键盘/IME/焦点转发与捕获丢失: WebView2 子窗口自带完整输入体系, 一律忽略 */
         default:
             return;
     }
 }
 
-/* 固定导出: OnHostGone (引擎尚未销毁的最后通知; 只收线程, GDI+/窗口留给随后的 Shutdown) */
+/* 事件订阅: 皮肤变化 → 会话重取皮肤并重推调色 (前端 CSS 变量即时跟随) */
+static void XJS_PLUGIN_CALL XjsPlugin_OnEvent(XjsPluginCtx* ctx, int eventType,
+                                              XjsWindowToken window, void* result) {
+    (void)ctx; (void)result;
+    if (eventType != XJS_PLUGIN_EVT_SKIN) return;
+    if (window == 0) {   /* 进程级广播: 全部活跃会话重取 */
+        for (auto& s : g_sess)
+            if (s.inUse && s.web) { SessLoadSkinOf(&s); WebPushSkin(&s); }
+        return;
+    }
+    AiSess* s = SessByTok(window);
+    if (s && s->web) {
+        SessLoadSkinOf(s);
+        WebPushSkin(s);
+    }
+}
+
+/* 固定导出: OnHostGone (引擎尚未销毁的最后通知; 只收线程, 窗口/环境留给随后的 Shutdown) */
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnHostGone(XjsPluginCtx* ctx) {
     (void)ctx;
     AbortAndJoinAll(2000);
 }
-
-
-
-
-
-
-

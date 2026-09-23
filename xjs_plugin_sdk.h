@@ -222,6 +222,14 @@ struct XjsPluginHost {
        window=0 = 默认窗口, 其余 = 窗口令牌; JSON 同 GetSkinJson。
        自建窗口要"跟随某窗口皮肤"用它取色, 再订阅 EVT_SKIN 在皮肤变化后重取重绘 */
     int (XJS_PLUGIN_CALL *GetSkinJsonOf)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
+
+    /* 面板内容区矩形 (v4 追加, 与 Panel* 同口径: 取用前先校验 host->size; 仅 UI 线程):
+       取本插件对面板的接管矩形 — hwnd = 所属搜索窗口 HWND, x/y/w/h = 面板内容区在该窗口
+       客户区内的物理像素矩形 (与 OPEN/RESIZE 事件的 w/h 同口径)。供"真子窗口"型面板
+       (WebView2 等自带输入体系的渲染层) 定位/缩放自建子窗口 — 子窗口盖住面板后鼠标键盘
+       自然归它, 宿主转发事件与位图交付都不再需要。会话未激活 = ERR_STATE。 */
+    int (XJS_PLUGIN_CALL *PanelGetRect)(XjsPluginCtx*, XjsWindowToken window, void** hwnd,
+                                        int* x, int* y, int* w, int* h);
 };
 
 /* ==================== 插件导出面 ==================== */

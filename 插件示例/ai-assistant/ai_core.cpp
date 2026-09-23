@@ -139,7 +139,8 @@ void CfgSave() {
         std::string enc = B64Enc(XorSecret(U8(g_cfg.apiKey), U8(MachineKeyStr())));
         j += L",\"apiKeyEnc\":\"enc:1:" + W8(enc.c_str()) + L"\"";
     }
-    j += g_cfg.reasoning ? L",\"reasoning\":true}" : L",\"reasoning\":false}";
+    j += g_cfg.reasoning ? L",\"reasoning\":true" : L",\"reasoning\":false";
+    j += L",\"filePolicy\":" + std::to_wstring(g_cfg.filePolicy) + L"}";
     std::string u8 = U8(j);
     g_host->StorageSet(g_ctx, "cfg", u8.c_str(), (int)u8.size());
 }
@@ -157,6 +158,8 @@ void CfgLoad() {
     if (!m.empty()) g_cfg.model = m;
     const Jv* r = v.Get(L"reasoning");
     if (r && r->t == 1) g_cfg.reasoning = r->b;
+    const Jv* fp = v.Get(L"filePolicy");
+    if (fp && fp->t == 2 && fp->num >= 0 && fp->num <= 3) g_cfg.filePolicy = (int)fp->num;
     std::wstring enc = v.S(L"apiKeyEnc");
     if (enc.rfind(L"enc:1:", 0) == 0) {
         std::string raw = B64Dec(U8(enc.substr(6)));

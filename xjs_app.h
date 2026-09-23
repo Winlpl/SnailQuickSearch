@@ -1837,6 +1837,9 @@ bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wc
 void XjsPreviewPanelClose(XjsSearchWindow* w, unsigned long long window, bool restore);   /* restore=false=窗口销毁路径不回写配置 */
 XjsRect XjsPreviewPanelContentRect();             /* 面板体矩形 (整块含头部带; 渲染/命中/坐标换算同源) */
 void XjsPreviewPanelSyncSize(bool notify);        /* 尺寸世代同步 (变化则 serial++ 并派发 RESIZE; notify=false 只记账) */
+bool XjsPreviewPanelRectOf(XjsSearchWindow* w, HWND* hwnd, int* x, int* y, int* w2, int* h2);
+                                                  /* 面板内容区矩形 → 真子窗口型面板 (WebView2) 定位:
+                                                     hwnd = 所属窗, x/y/w/h = 客户区物理像素 (未接管 = false) */
 void XjsPreviewPanelRender();                     /* 绘制接管位图 (XjsPreviewRender 接管分支; 绘制帧兼探测尺寸失配投 WM_PANEL_RESYNC) */
 bool XjsPreviewPanelMouseDown(POINT pt);          /* 内容区命中 → 转发 LDOWN (带捕获; 假=未接管或不在内容区) */
 bool XjsPreviewPanelMouseMove(POINT pt);          /* 捕获中/悬停内容区 → 转发 MOVE */

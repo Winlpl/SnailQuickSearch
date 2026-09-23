@@ -618,6 +618,20 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                         slot->args = a && a->t == 3 ? U8(a->str) : slot->args;
                     else if (d)
                         slot->args += (d->t == 3 ? U8(d->str) : std::string());
+                } else if (type == L"response.completed") {
+                    /* 用量统计 (对齐参考实现): input=计费输入, cached=前缀缓存命中 */
+                    const Jv* rsp = ev.Get(L"response");
+                    const Jv* us = (rsp && rsp->t == 5) ? rsp->Get(L"usage") : NULL;
+                    if (us && us->t == 5) {
+                        const Jv* x;
+                        j->turnUsage.has = true;
+                        if ((x = us->Get(L"input_tokens")) && x->t == 2) j->turnUsage.prompt = (long long)x->num;
+                        if ((x = us->Get(L"output_tokens")) && x->t == 2) j->turnUsage.completion = (long long)x->num;
+                        if ((x = us->Get(L"total_tokens")) && x->t == 2) j->turnUsage.total = (long long)x->num;
+                        const Jv* dt = us->Get(L"input_tokens_details");
+                        if (dt && dt->t == 5 && (x = dt->Get(L"cached_tokens")) && x->t == 2)
+                            j->turnUsage.cacheHit = (long long)x->num;
+                    }
                 } else if (type == L"response.failed") {
                     const Jv* rsp = ev.Get(L"response");
                     if (rsp && rsp->t == 5) {
@@ -668,8 +682,12 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { aborted = true; break; }
             bool lastTurn = turn == AI_AGENT_MAX_TURNS - 1;
             std::vector<AiCall> turnCalls;
+            ULONGLONG turnT0 = GetTickCount64();
             bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, !lastTurn, &turnCalls,
                                        &aborted, &truncated, &failed, &errMsg);
+            EnterCriticalSection(&j->cs);
+            j->turnOutMs = GetTickCount64() - turnT0;   /* 速度 = 本轮输出 / 本轮耗时 (含首 token 等待) */
+            LeaveCriticalSection(&j->cs);
             if (!okTurn) failed = true;
             if (aborted || failed) break;
             if (turnCalls.empty()) break;   /* 没有工具调用 = 最终答复完成 */
@@ -690,9 +708,25 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 j->stepsVersion++;
                 LeaveCriticalSection(&j->cs);
                 if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
-                std::wstring err = AgentToolExec(j, c.name, c.args, j->tok, &local);
-                local.state = err.empty() ? 2 : 3;
+                /* 文件操作权限闸 (对齐参考实现"命令行权限"): 禁用/只读直接拒绝并回喂模型;
+                   询问 = 先拒绝 + 卡片转询问态给确认按钮, 用户点"允许"后本作业后续调用放行 */
+                int pol = InterlockedCompareExchange(&j->policy, 0, 0);
+                bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
+                std::wstring err;
+                if (fileTool && pol == 0) {
+                    err = L"权限策略为「禁用」, 已拒绝文件操作";
+                    local.state = 3;
+                } else if (fileTool && pol == 1) {
+                    err = L"权限策略为「只读」, 已拒绝文件操作";
+                    local.state = 3;
+                } else if (fileTool && pol == 2) {
+                    err = L"等待用户确认文件操作 (在下方卡片选择「允许」后我会重试)";
+                    local.state = 4;
+                } else {
+                    err = AgentToolExec(j, c.name, c.args, j->tok, &local);
+                }
                 local.err = err;
+                if (local.state == 1) local.state = err.empty() ? 2 : 3;
                 std::string output = AgentToolOutput(err, local);
                 EnterCriticalSection(&j->cs);
                 if (sidx >= 0 && sidx < (int)j->steps.size()) {

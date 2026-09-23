@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-echo Building ai-assistant plugin ...
+echo Building ai-assistant plugin (WebView2 UI) ...
 
 :: Find Visual Studio (same locate order as the host build.bat)
 for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2^>nul`) do (
@@ -24,8 +24,29 @@ if not exist "..\..\xjs_plugin_sdk.h" (
     exit /b 1
 )
 
-cl /nologo /EHsc /std:c++20 /O2 /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ai_core.cpp ai_agent.cpp ai_session.cpp ai_render.cpp ai_input.cpp ai_plugin.cpp ..\..\md4c\md4c.c ^
-   /link /OUT:ai-assistant.dll gdiplus.lib winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ..\..\xunjieso.lib
+:: WebView2 SDK lives in the repo root too. The loader is the official
+:: WebView2Loader.dll (dynamically loaded, deployed next to the plugin DLL) --
+:: NOT the static lib, whose embedded CRT objects corrupted the environment
+:: pointer delivered by the creation callback (crash on panel open).
+if not exist "..\..\webview2\include\WebView2.h" (
+    echo ERROR: WebView2 SDK not found at ..\..\webview2 - keep it inside the repo.
+    pause
+    exit /b 1
+)
+if not exist "..\..\webview2\x64\WebView2Loader.dll" (
+    echo ERROR: WebView2Loader.dll not found at ..\..\webview2\x64 - keep it inside the repo.
+    pause
+    exit /b 1
+)
+
+:: UI = embedded WebView2 frontend (system Edge runtime renders; no GDI+ bitmap
+:: pipeline anymore). md4c is compiled straight in (markdown -> HTML for bubbles).
+cl /nologo /EHsc /std:c++20 /O2 /MP /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ^
+   /I..\..\webview2\include ^
+   ai_core.cpp ai_agent.cpp ai_session.cpp ai_web.cpp ai_web_ui.cpp ai_plugin.cpp ^
+   ..\..\md4c\md4c.c ^
+   /link /OUT:ai-assistant.dll winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib ^
+   ..\..\xunjieso.lib
 if errorlevel 1 (
     echo Build failed!
     pause
@@ -69,6 +90,12 @@ if errorlevel 1 (
     exit /b 1
 )
 copy /y manifest.json "..\..\plugins\ai-assistant\manifest.json" >nul
+copy /y "..\..\webview2\x64\WebView2Loader.dll" "..\..\plugins\ai-assistant\WebView2Loader.dll" >nul
+if errorlevel 1 (
+    echo ERROR: deploy failed - WebView2Loader.dll is locked.
+    pause
+    exit /b 1
+)
 echo.
 echo Build succeeded: ai-assistant.dll
 echo Deployed to plugins\ai-assistant\  (enable it in Settings - Plugins)

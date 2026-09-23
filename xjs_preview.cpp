@@ -748,6 +748,20 @@ XjsRect XjsPreviewPanelContentRect() {
     return XjsRectF(L.preview.left + XSF(3), L.preview.top, L.preview.right, L.preview.bottom);
 }
 
+/* XjsPreviewPanelInfo 的定位版 (宿主表 PanelGetRect 落点, xjs_plugin.cpp 转): 面板内容区在
+ * 所属窗口客户区内的物理像素矩形 + 所属窗口 HWND — 真子窗口型面板 (WebView2 自带输入体系)
+ * 用它定位/缩放自建子窗口。布局现算 (XjsChromeLayout 每帧现算口径, 无缓存可失效)。 */
+bool XjsPreviewPanelRectOf(XjsSearchWindow* w, HWND* hwnd, int* x, int* y, int* w2, int* h2) {
+    if (!w || !w->plugPanelOn) return false;
+    XjsRect r = XjsPreviewPanelContentRect();
+    if (hwnd) *hwnd = w->hWnd;
+    if (x) *x = (int)(r.left + 0.5f);
+    if (y) *y = (int)(r.top + 0.5f);
+    if (w2) *w2 = ximax(1, (int)(r.right - r.left + 0.5f));
+    if (h2) *h2 = ximax(1, (int)(r.bottom - r.top + 0.5f));
+    return true;
+}
+
 bool XjsPreviewPanelWantsPt(POINT pt) {
     if (!g_plugPanelOn || !g_previewVisible) return false;
     return XjsPtIn(XjsPreviewPanelContentRect(), pt);

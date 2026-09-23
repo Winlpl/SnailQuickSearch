@@ -1018,6 +1018,27 @@ static int FnPanelSetCaret(XjsPluginCtx* ctx, XjsWindowToken window, int x, int 
     return XJS_PLUGIN_OK;
 }
 
+/* 面板内容区矩形 (v4 追加): 真子窗口型面板 (WebView2) 定位自建子窗口用 — 布局现算,
+ * 需先切到所属窗作用域 (g_layout/g_hWnd 全是 Cur 宏)。仅 UI 线程。 */
+static int FnPanelGetRect(XjsPluginCtx* ctx, XjsWindowToken window, void** hwnd,
+                          int* x, int* y, int* w, int* h) {
+    XjsPluginEntry* p; int e;
+    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    XjsSearchWindow* win = PluginWindowOfToken(window);
+    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
+    XjsWindowScope scope(win);
+    XjsChromeLayout();   /* 面板矩形随预览宽/窗口尺寸变: 取前先对齐本窗布局 (现算, 无副作用) */
+    HWND hw = NULL;
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    if (!XjsPreviewPanelRectOf(win, &hw, &rx, &ry, &rw, &rh)) return XJS_PLUGIN_ERR_STATE;
+    if (hwnd) *hwnd = (void*)hw;
+    if (x) *x = rx;
+    if (y) *y = ry;
+    if (w) *w = rw;
+    if (h) *h = rh;
+    return XJS_PLUGIN_OK;
+}
+
 /* ==================== 宿主 API: 事件 / 存储 / 日志 ==================== */
 
 static int FnSubscribe(XjsPluginCtx* ctx, unsigned mask) {
@@ -1145,6 +1166,7 @@ static const XjsPluginHost s_host = {
     FnPanelSetFocus,
     FnPanelSetCaret,
     FnSkinJsonOf,
+    FnPanelGetRect,   /* v4 追加 (只追加纪律: 恒在表尾, 插件按 host->size 校验) */
 };
 
 static const XjsPluginHost* PluginHostTable() { return &s_host; }

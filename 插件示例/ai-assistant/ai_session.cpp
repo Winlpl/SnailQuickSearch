@@ -1,10 +1,10 @@
 /*
- * ai_session.cpp — 会话层: 会话池 / 字体表面 / 发送入口 / 流泵 (UI 抽取增量与
- * 同步工具卡片) / 消息窗口。会话状态全在 AiSess (一窗一份)。
+ * ai_session.cpp — 会话层: 会话池 / 发送入口 / 流泵 (UI 抽取增量 → Web 增量同步) /
+ * 消息窗口。会话状态全在 AiSess (一窗一份); 界面归 WebView2 前端 (ai_web.cpp)。
  */
 #include "ai_assistant.h"
 
-HWND g_msgwnd = NULL;    /* 消息窗口: 工作线程 PostMessage 回 UI 线程渲染 (渲染不进工作线程) */
+HWND g_msgwnd = NULL;    /* 消息窗口: 工作线程 PostMessage 回 UI 线程泵 (渲染不进工作线程) */
 
 AiSess g_sess[8];
 
@@ -17,54 +17,13 @@ AiSess* SessFree() {
     return NULL;
 }
 
-/* ---- 字体 / 表面 ---- */
-static void SessFreeFonts(AiSess* s) {
-    delete s->fBody; delete s->fBodyB; delete s->fBodyL; delete s->fBodyBL;
-    delete s->fMono; delete s->fTiny; delete s->fTinyL; delete s->fTitle;
-    s->fBody = s->fBodyB = s->fBodyL = s->fBodyBL = s->fMono = s->fTiny = s->fTinyL = s->fTitle = NULL;
-    delete s->famUI; delete s->famMono;
-    if (s->famLatOwn) delete s->famLat;   /* 回退共享 famUI 时只删一次 */
-    s->famUI = s->famMono = NULL;
-    s->famLat = NULL; s->famLatOwn = false;
-    s->madeScale = 0.0f;
-}
-void SessEnsureFonts(AiSess* s) {
-    if (s->madeScale == s->scale && s->fBody) return;
-    SessFreeFonts(s);
-    s->famUI = new Gdiplus::FontFamily(L"Microsoft YaHei UI");
-    if (!s->famUI->IsAvailable()) { delete s->famUI; s->famUI = new Gdiplus::FontFamily(L"Microsoft YaHei"); }
-    if (!s->famUI->IsAvailable()) { delete s->famUI; s->famUI = new Gdiplus::FontFamily(L"Segoe UI"); }
-    s->famLat = new Gdiplus::FontFamily(L"Segoe UI");
-    s->famLatOwn = s->famLat->IsAvailable();
-    if (!s->famLatOwn) { delete s->famLat; s->famLat = s->famUI; }   /* 无 Segoe = 拉丁同 CJK 族 */
-    s->famMono = new Gdiplus::FontFamily(L"Consolas");
-    if (!s->famMono->IsAvailable()) { delete s->famMono; s->famMono = new Gdiplus::FontFamily(L"Courier New"); }
-    float k = s->scale;
-    s->fBody = new Gdiplus::Font(s->famUI, 12.5f * k, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    s->fBodyB = new Gdiplus::Font(s->famUI, 12.5f * k, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-    s->fBodyL = new Gdiplus::Font(s->famLat, 12.5f * k, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    s->fBodyBL = new Gdiplus::Font(s->famLat, 12.5f * k, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-    s->fMono = new Gdiplus::Font(s->famMono, 11.0f * k, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    s->fTiny = new Gdiplus::Font(s->famUI, 10.5f * k, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    s->fTinyL = new Gdiplus::Font(s->famLat, 10.5f * k, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    s->fTitle = new Gdiplus::Font(s->famUI, 15.0f * k, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-    s->madeScale = s->scale;
-}
-void SessEnsureSurface(AiSess* s) {
-    int bw = s->w > 0 ? s->w : 1, bh = s->h > 0 ? s->h : 1;
-    if (s->bw == bw && s->bh == bh) return;
-    s->stride = bw * 4;
-    s->px.assign((size_t)s->stride * bh, 0);
-    s->bw = bw;
-    s->bh = bh;
-}
-
-/* ---- 皮肤 ---- */
-static void SessLoadSkin(AiSess* s) {
+/* ---- 皮肤 (GetSkinJsonOf 按会话所属窗取; 打开会话时 / 皮肤事件后) ---- */
+void SessLoadSkinOf(AiSess* s) {
     s->skinOk = false;
     if (!g_host) return;
     char buf[1024];
-    int n = g_host->GetSkinJson(g_ctx, buf, (int)sizeof(buf) - 1);
+    int n = HOST_PANEL_OK ? g_host->GetSkinJsonOf(g_ctx, s->tok, buf, (int)sizeof(buf) - 1)
+                          : g_host->GetSkinJson(g_ctx, buf, (int)sizeof(buf) - 1);
     if (n <= 0) return;
     buf[n] = 0;
     Jv v = JsonParseW(W8(buf));
@@ -79,7 +38,6 @@ static void SessLoadSkin(AiSess* s) {
 }
 
 std::vector<AiJob*> s_orphans;   /* 会话已关而流未完的作业 (泵里清扫 join) */
-
 
 void AbortSend(AiSess* s) {
     if (!s->job) return;
@@ -102,11 +60,12 @@ void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, flo
     s->w = w;
     s->h = h;
     s->scale = scale > 0 ? scale : 1.0f;
-    s->winActive = true;
-    s->layDirty = true;
-    static bool s_dataLoaded = false;   /* cfg/历史进程级一份, 多窗共享 */
-    if (!s_dataLoaded) { s_dataLoaded = true; CfgLoad(); HistLoad(); }
-    SessLoadSkin(s);
+    if (!s->web) {
+        static bool s_dataLoaded = false;   /* cfg/历史进程级一份, 多窗共享 */
+        if (!s_dataLoaded) { s_dataLoaded = true; CfgLoad(); HistLoad(); }
+    }
+    SessLoadSkinOf(s);
+    WebSessionCreate(s);   /* 子窗口 + WebView2 控制器 (异步; ready 后 JS 拉 boot) */
 }
 
 void SessClose(AiSess* s) {
@@ -116,18 +75,12 @@ void SessClose(AiSess* s) {
     if (s->job) { s_orphans.push_back(s->job); s->job = NULL; }   /* 流未完 → 孤儿 (泵清扫 join) */
     s->msgs.clear();
     s->curId = 0;
-    s->input.clear();
-    s->lay.clear();
-    s->layOffsets.clear();
-    s->px.clear();
-    s->px.shrink_to_fit();
-    s->bw = s->bh = 0;
-    SessFreeFonts(s);
+    WebSessionDestroy(s);
 }
 
-void SendCurrent(AiSess* s) {
+void SendCurrent(AiSess* s, const std::wstring& textIn) {
     if (s->sending || !g_host) return;
-    std::wstring text = TrimW(s->input);
+    std::wstring text = TrimW(textIn);
     if (text.empty()) return;
     if (g_cfg.apiKey.empty()) {
         g_host->Toast(g_ctx, s->tok, "尚未配置接口密钥 — 请点右上角 接口设置 填写", XJS_PLUGIN_TOAST_WARN);
@@ -137,13 +90,7 @@ void SendCurrent(AiSess* s) {
     um.role = 0;
     um.text = text;
     s->msgs.push_back(um);
-    s->input.clear();
-    s->caret = 0;
-    s->anchor = 0;
-    s->inScroll = 0;
-    s->layDirty = true;
-    s->sticky = true;
-    MsgSelClear(s);   /* 新消息入列重排, 旧选区失效 (含键盘归还) */
+    WebTouch(s);
     /* 请求要素快照 (线程只读这些; 请求体每轮在 worker 构建 — input 随工具往返增长) */
     AiJob* j = new AiJob();
     j->keyA = U8(g_cfg.apiKey);
@@ -170,6 +117,7 @@ void SendCurrent(AiSess* s) {
     }
     j->pathA = U8(path + L"/responses");
     j->tok = s->tok;   /* open_file 走宿主 OpenFile 的目标窗口 */
+    InterlockedExchange(&j->policy, g_cfg.filePolicy);   /* 权限快照 (确认卡"允许"由 UI 更新) */
     /* 对话快照 (只含 role 0/1 文本消息; 工具往返由 worker 在循环中累计) */
     for (auto& m : s->msgs)
         if (m.role != 2 && !m.text.empty()) j->hist.push_back(m);
@@ -180,10 +128,12 @@ void SendCurrent(AiSess* s) {
     s->stepBase = (int)s->msgs.size();   /* 本作业工具卡片起点 (历史恢复的 role==2 卡片在其之前) */
     s->netStatus = g_cfg.apiKey.empty() ? 0 : s->netStatus;
     j->th = new std::thread([j]() { WorkerMain(j); });
-    RenderDeliver(s);
+    WebTouch(s);
+    WebSyncSession(s);   /* msgs (新用户消息) + status (发送中) 即时跟手 */
 }
 
 static void PumpStreams() {
+    bool histChanged = false;
     for (auto& s : g_sess) {
         AiJob* j = s.job;
         if (!s.inUse || !j) continue;
@@ -203,9 +153,34 @@ static void PumpStreams() {
         if (stepsVer != s.lastStepsVer) steps = j->steps;   /* 有变化才拷 (少一次全量复制) */
         LeaveCriticalSection(&j->cs);
         if (state == 0) {
+            /* 用量累计: 每轮 response.completed 的 usage 取一次 (对齐参考实现:
+               累计=计费量; 上下文占用/速度只认最近一轮) */
+            bool takeUsage = false;
+            AiJob::TurnUsage tu;
+            ULONGLONG outMs = 0;
+            EnterCriticalSection(&j->cs);
+            if (j->turnUsage.has && !j->turnUsageTaken) {
+                j->turnUsageTaken = true;
+                tu = j->turnUsage;
+                outMs = j->turnOutMs;
+                takeUsage = true;
+            }
+            LeaveCriticalSection(&j->cs);
+            if (takeUsage) {
+                s.uPrompt += tu.prompt;
+                s.uCompletion += tu.completion;
+                s.uTotal += tu.total ? tu.total : (tu.prompt + tu.completion);
+                s.uCacheHit += tu.cacheHit;
+                s.uLastPrompt = tu.prompt;
+                s.uLastCompletion = tu.completion;
+                s.uLastCacheHit = tu.cacheHit;
+                s.uTokPerSec = (outMs > 200 && tu.completion > 0)
+                    ? (double)tu.completion / ((double)outMs / 1000.0) : 0.0;
+                s.usageHas = s.usageHas || tu.prompt > 0 || tu.completion > 0;
+            }
             /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
-             * 内容按版本对齐; 保留 open)。历史恢复的 role==2 卡片在 stepBase 之前,
-             * 不得被新作业的步骤误配覆盖。 */
+             * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
+             * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。 */
             if (!steps.empty()) {
                 int have = 0;
                 for (int i = s.stepBase; i < (int)s.msgs.size(); i++)
@@ -214,19 +189,21 @@ static void PumpStreams() {
                 if (!s.msgs.empty() && s.msgs.back().role == 1 &&
                     s.msgs.back().text.empty() && s.msgs.back().reason.empty()) {
                     s.msgs.pop_back();
-                    s.layDirty = true;
+                    WebTouch(&s);
                 }
                 while (have < (int)steps.size()) {
                     AiMsg cm;
                     cm.role = 2;
                     s.msgs.push_back(cm);
                     have++;
-                    s.layDirty = true;
+                    WebTouch(&s);
                 }
                 int seen = 0;
                 for (int i = s.stepBase; i < (int)s.msgs.size(); i++) {
                     AiMsg& m = s.msgs[i];
                     if (m.role != 2 || seen >= (int)steps.size()) continue;
+                    bool uiResolved = (m.steps.size() == 1 && m.steps[0].state == 3 &&
+                                       steps[seen].state == 4);   /* 确认卡已允许/拒绝: 保持 UI 态 */
                     bool changed = (int)m.steps.size() != 1 ||
                                    m.steps[0].state != steps[seen].state ||
                                    m.steps[0].count != steps[seen].count ||
@@ -235,11 +212,9 @@ static void PumpStreams() {
                                    m.steps[0].name != steps[seen].name ||
                                    m.steps[0].mode != steps[seen].mode ||
                                    m.steps[0].query != steps[seen].query;
-                    if (changed) {
-                        bool wasOpen = !m.steps.empty() && m.steps[0].open;
-                        steps[seen].open = wasOpen;
+                    if (changed && !uiResolved) {
                         m.steps.assign(1, steps[seen]);
-                        RelayoutOne(&s, i);
+                        WebTouch(&s);
                     }
                     seen++;
                 }
@@ -250,25 +225,21 @@ static void PumpStreams() {
                 if (!s.msgs.empty() && s.msgs.back().role == 1 &&
                     s.msgs.back().text.empty() && s.msgs.back().reason.empty()) {
                     s.msgs.pop_back();
-                    s.layDirty = true;
+                    WebTouch(&s);
                 }
             } else if (!out.empty() || !reason.empty() || s.msgs.empty() || s.msgs.back().role != 1) {
                 if (s.msgs.empty() || s.msgs.back().role != 1) {
                     AiMsg am;
                     am.role = 1;
-                    am.reasonOpen = true;
                     s.msgs.push_back(am);
-                    s.layDirty = true;
+                    WebTouch(&s);
                 }
                 AiMsg& back = s.msgs.back();
                 if (back.text != out || back.reason != reason) {
-                    bool reasonGrew = reason.size() > back.reason.size();
                     back.text = out;
                     back.reason = reason;
-                    if (reasonGrew) back.reasonOpen = true;
-                    RelayoutOne(&s, (int)s.msgs.size() - 1);
+                    /* 不 WebTouch: 末条流式增长走 WebSyncSession 的 last 增量径 */
                 }
-                if (back.reason.empty() && back.reasonOpen) back.reasonOpen = false;
             }
         } else {
             /* 收尾: 状态落消息 + 中止的执行中卡片落败 + 落库 (role==2 工具卡片一并入库) + join + 清作业 */
@@ -283,13 +254,13 @@ static void PumpStreams() {
             AiMsg& back = s.msgs.back();
             back.text = out;
             back.reason = reason;
-            back.reasonOpen = !reason.empty();   /* 收尾默认展开推理 (有内容才展开; 用户可点收) */
             if (state == 3) {
                 if (back.text.empty()) back.text = L"已停止生成";
                 else back.text += L"\n\n*(已停止生成)*";
                 if (!err.empty()) s.netStatus = 2;
             } else if (state == 2) {
                 s.netStatus = 2;
+                back.err = true;
                 std::wstring et = err;
                 back.text = back.text.empty() ? (L"请求失败: " + et) : (back.text + L"\n\n请求失败: " + et);
             } else {
@@ -297,9 +268,9 @@ static void PumpStreams() {
                 if (truncated) back.text += L"\n\n*(回答已截断)*";
             }
             s.sending = false;
-            s.layDirty = true;
-            MsgSelClear(&s);   /* 收尾重排, 选区失效 (含键盘归还) */
+            WebTouch(&s);
             s.curId = HistUpsert(s.curId, s.msgs);
+            histChanged = true;
             s.job = NULL;
             s.lastStepsVer = -1;
             if (j->th) {
@@ -309,8 +280,9 @@ static void PumpStreams() {
             }
             delete j;
         }
-        RenderDeliver(&s);
+        WebSyncSession(&s);
     }
+    if (histChanged) WebSyncHist();
     /* 孤儿清扫 (会话已关而流未完) */
     for (size_t i = 0; i < s_orphans.size();) {
         AiJob* j = s_orphans[i];
@@ -328,17 +300,12 @@ static void PumpStreams() {
     }
 }
 
-/* ==================== 消息窗口 (流式泵 + 光标闪烁节拍) ==================== */
+/* ==================== 消息窗口 (流式泵) ==================== */
 
 static LRESULT CALLBACK AiMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case XJS_AI_STREAM:
             PumpStreams();
-            return 0;
-        case WM_TIMER:   /* 光标闪烁: 输入框聚焦的会话重渲染 (530ms 相位在渲染里取 GetTickCount64) */
-            if (wParam == 1)
-                for (auto& s : g_sess)
-                    if (s.inUse && (s.inputFocus || s.dlg || s.sending)) RenderDeliver(&s);
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);

@@ -2,15 +2,19 @@
  * ai_assistant.h — 「AI 助手」插件内部共享头 (结构定义 + 各编译单元接口声明)
  * ============================================================================
  * 文件分工 (一文件一职责, 与主程序 13 文件同口径):
- *   ai_core.cpp    基础设施: 编码转换 / 简易 JSON / 颜色几何 / 配置 / 多对话历史
+ *   ai_core.cpp    基础设施: 编码转换 / 简易 JSON / 颜色 / 配置 / 多对话历史
  *   ai_agent.cpp   agent 大脑: 系统提示词组装 / 工具定义 / 引擎直连工具执行 /
  *                  请求体构建 / SSE 轮 (function calling) / 工作线程循环
- *   ai_session.cpp 会话层: 会话池 / 字体表面 / 发送入口 / 流泵 (UI 抽取) / 消息窗口
- *   ai_render.cpp  渲染层: markdown-lite / 排版断行 / 绘制小件 / 消息与工具卡片 /
- *                  输入框布局 / 整帧渲染 / 交付
- *   ai_input.cpp   交互层: 命中测试 / 鼠标滚轮键盘 IME / 输入框编辑 / 消息选区 /
- *                  接口设置对话框 / 历史侧栏操作
+ *   ai_session.cpp 会话层: 会话池 / 发送入口 / 流泵 (UI 抽取 → Web 增量同步) / 消息窗口
+ *   ai_web.cpp     Web 前端宿主: 系统 WebView2 生命周期 (环境/控制器/子窗口) /
+ *                  C++↔JS JSON 桥 / 皮肤调色派生 / markdown→HTML (md4c) / 消息 HTML 生成
+ *   ai_web_ui.cpp  嵌入式前端: 整套对话 UI 的单文件 HTML+CSS+JS (资源内嵌, 免外部文件)
  *   ai_plugin.cpp  插件边界: GetInfo / Init / Shutdown / OnCommand / OnPanelEvent
+ *
+ * 渲染口径 (2026-09-23): 整块 UI 交给系统 WebView2 (Edge 运行时) — 插件建真子窗口
+ * 盖住面板内容区 (宿主表 PanelGetRect 定位), HTML/CSS/JS 全权负责排版/输入/选区/IME/
+ * 滚动; C++ 只留业务状态 (会话/作业/工具/存储) 并经 PostWebMessage 增量推送。
+ * 旧 litehtml+GDI+ 渲染层 (ai_render/ai_input/ai_html) 已整体退役。
  *
  * 跨文件符号一律在本头声明 (禁止各 cpp 互相前置声明); 文件内部实现保持 static。
  */
@@ -19,7 +23,7 @@
 
 #define NOMINMAX
 #include <windows.h>
-#include <gdiplus.h>
+#include <gdiplus.h>   /* 仅用 Color 值类型 (皮肤色), 不做 GDI+ 初始化/绘制 */
 #include <winhttp.h>
 #include <string>
 #include <vector>
@@ -38,14 +42,14 @@
 
 extern const XjsPluginHost* g_host;
 extern XjsPluginCtx*        g_ctx;
-extern ULONG_PTR            g_gdipToken;
 extern unsigned             g_uiThread;
-extern HWND                 g_msgwnd;    /* 消息窗口: 工作线程 PostMessage 回 UI 线程渲染 (定义在 ai_session.cpp) */
+extern HWND                 g_msgwnd;    /* 消息窗口: 工作线程 PostMessage 回 UI 线程泵 (定义在 ai_session.cpp) */
 
 static bool HostHas(unsigned need) {   /* 宿主表按"只追加"扩字段: 取用前先验 size (旧宿主干净失败) */
     return g_host && g_host->size >= need;
 }
-#define HOST_PANEL_OK (HostHas(offsetof(XjsPluginHost, PanelSetCaret) + sizeof(void*)))
+#define HOST_PANEL_OK   (HostHas(offsetof(XjsPluginHost, PanelSetCaret) + sizeof(void*)))
+#define HOST_RECT_OK    (HostHas(offsetof(XjsPluginHost, PanelGetRect) + sizeof(void*)))
 
 static const UINT XJS_AI_STREAM = WM_APP + 40;  /* 流式增量到达 (wParam=0, lParam=Job*) */
 static const UINT XJS_AI_SWEEP  = WM_APP + 41;  /* 孤儿作业清扫 */
@@ -60,8 +64,6 @@ size_t NextCp(const std::wstring& s, size_t i);
 Gdiplus::Color HexCol(const std::wstring& hex, int alpha = 255);
 Gdiplus::Color MixCol(Gdiplus::Color a, Gdiplus::Color b, float t);
 Gdiplus::Color WithA(Gdiplus::Color c, BYTE a);
-static float minf(float a, float b) { return a < b ? a : b; }
-static float maxf(float a, float b) { return a > b ? a : b; }
 
 /* ---- 简易 JSON (SSE 载荷/配置/历史 都是小型文档, 自带解析器零依赖) ---- */
 struct Jv {
@@ -194,19 +196,6 @@ struct JParser {
 std::string JsonEscapeUtf8(const std::wstring& s);   /* → 完整 JSON 字符串字面量 (含首尾引号) */
 Jv JsonParseW(const std::wstring& text);
 
-/* ---- 面板内坐标矩形 / 命中 id ---- */
-struct FRect { float x = 0, y = 0, w = 0, h = 0;   /* 面板内坐标 (像素) */
-               bool Hit(float px, float py) const { return px >= x && px < x + w && py >= y && py < y + h; } };
-
-enum {
-    HIT_NONE = 0, HIT_STOPGEN = 1, HIT_HSET = 2, HIT_HHIST = 3, HIT_HNEW = 4,
-    HIT_CLEAR = 5, HIT_INPUT = 6, HIT_SEND = 7, HIT_CLOSE = 8, HIT_INTHUMB = 9,
-    HIT_SBROW = 20, HIT_SBDEL = 60,          /* +i: 侧栏行 / 行删除 */
-    HIT_DURL = 100, HIT_DKEY = 101, HIT_DMODEL = 102, HIT_DCHK = 103, HIT_DCANCEL = 104, HIT_DSAVE = 105,
-    HIT_THUMB = 120, HIT_TRACK = 121, HIT_REASON = 130,   /* +i: 推理块头 */
-    HIT_STEPHEAD = 140                                    /* +i: 工具卡片头 (idxOut=消息下标; 点击=展开/收起样本) */
-};
-
 /* ==================== 配置 (存储键 "cfg"; 定义 ai_core.cpp) ==================== */
 
 struct AiCfg {
@@ -215,6 +204,8 @@ struct AiCfg {
                                                  deepseek-chat 等旧名在此端点被拒) */
     std::wstring apiKey;
     bool reasoning = false;   /* 深度思考: true=effort high, false=none (DeepSeek 须显式传) */
+    int filePolicy = 2;       /* 文件操作权限 (对话区下方分段控件): 0=禁用 1=只读 2=询问 3=允许;
+                                 禁用/只读拒绝 open_file 与 copy_paths, 询问先拒后给确认卡, 允许直接执行 */
 };
 extern AiCfg g_cfg;
 void CfgSave();
@@ -225,20 +216,21 @@ void CfgLoad();
 struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
-    int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 */
+    int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
     std::wstring emit;          /* lua 两模式 ai.print 过程/统计输出 (并入工具结果 output 回喂模型; 不渲染不落库) */
     std::wstring err;           /* 失败原因 */
     std::vector<std::wstring> top;   /* 结果样本路径 (≤20; 展开显示) */
-    bool open = false;          /* 样本列表展开态 (UI 态; 泵同步镜像时保留) */
+    bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
 };
 struct AiMsg {
     int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 不重发给模型) */
     std::wstring text;
     std::wstring reason;        /* 推理过程 (只在折叠块显示, 从不发送/入库发送体) */
     bool reasonOpen = false;    /* 折叠块展开态 (流式中自动展开, 完成后收起) */
+    bool err = false;           /* 失败消息 (气泡转错误配色) */
     std::vector<AiToolStep> steps;   /* role==2: 本组工具步骤 */
 };
 struct AiConv {
@@ -269,14 +261,22 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     std::wstring out, reason;      /* 当前轮的文本增量 (worker 写, UI 抽; 每轮工具执行后清空重开) */
     int state = 0;                 /* 0=进行中 1=完成 2=失败 3=已中止 */
     int phase = 0;                 /* 0=流式中 1=工具执行中 (泵据此冻结/新开文本气泡) */
-    std::vector<AiToolStep> steps; /* 工具步骤镜像 (泵同步进 msgs 的 role==2 消息; 保留 open 态) */
-    int stepsVersion = 0;          /* steps 每次内容变化 +1 (泵据版本号决定重排) */
+    std::vector<AiToolStep> steps; /* 工具步骤镜像 (泵同步进 msgs 的 role==2 消息) */
+    int stepsVersion = 0;          /* steps 每次内容变化 +1 (泵据版本号决定同步) */
     std::wstring err;
     bool truncated = false;
     std::string hostA, pathA, keyA;   /* 请求要素 (UTF-8; worker 自取; 请求体每轮在 worker 构建) */
     INTERNET_PORT port = 443;
     bool secure = true;
     XjsWindowToken tok = 0;        /* 发起窗口 (open_file 走宿主 OpenFile 用) */
+    volatile LONG policy = 2;      /* 文件操作权限快照 (发送时定格; 确认卡"允许"后由 UI 更新,
+                                      之后的工具调用即时放行; g_cfg.filePolicy 为持久事实源) */
+    struct TurnUsage {             /* 最近一轮 SSE 的用量 (response.completed.usage; 泵累计进会话) */
+        bool has = false;
+        long long prompt = 0, completion = 0, total = 0, cacheHit = 0;
+    } turnUsage;
+    bool turnUsageTaken = false;   /* 泵已把 turnUsage 累计进会话 (每轮取一次) */
+    ULONGLONG turnOutMs = 0;       /* 本轮输出耗时 (速度 = completion/秒, 不跨轮平均) */
     std::vector<AiMsg> hist;       /* 发送时对话快照 (只含 role 0/1; worker 构造每轮 body 用) */
     volatile LONG abort = 0;
     HANDLE hReq = NULL;            /* UI 线程"停止"用它打断阻塞读 (并发关句柄=中断语义) */
@@ -287,184 +287,103 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
 };
 extern std::vector<AiJob*> s_orphans;   /* 会话已关而流未完的作业 (泵里清扫 join) */
 
-/* 排版产物: 一行 = 若干 run (自带文本与样式, 渲染期不依赖临时块) */
-struct AiLine {
-    float h = 0;
-    float prefixW = 0;    /* 列表前缀宽 (首行 runs 整体右移) */
-    std::wstring prefix;  /* 列表前缀文本 ("• " / "1. ") */
-    bool hard = true;     /* 逻辑行界 (真换行: 块首/代码行首); false = 软折行续行 (复制时不插 \n) */
-    bool leadSpace = false; /* 软折行时被丢的行首空格 (复制拼接处补回, "ORDER BY" 不粘成 "ORDERBY") */
-    struct Run { float x = 0, w = 0; std::wstring text; bool bold = false, code = false, accent = false, cjk = false; };
-    std::vector<Run> runs;
-    std::vector<float> tblCols;   /* 表格行: 列 x 边界 (气泡内容坐标系, 绘制列竖线; 空 = 普通行) */
-    bool tblRuleAfter = false;    /* 表头末行: 本行底画横向分隔线 */
-};
-
-/* 最小断行单元 (排版/输入框布局共用) */
-struct AiAtom {
-    std::wstring t;
-    float w = 0;
-    bool code = false, bold = false, accent = false, cjk = false;
-};
-
 struct AiSess {
     bool inUse = false;
     XjsWindowToken tok = 0;
     long long serial = 0;
     int w = 0, h = 0;
     float scale = 1.0f;
-    bool winActive = true;
-    /* 皮肤 (GetSkinJson; 打开会话时取一次) */
+    /* 皮肤 (GetSkinJson; 打开会话时取一次, 皮肤事件后重取) */
     Gdiplus::Color cBg, cPanel, cText, cDim, cAccent, cLine;
     bool skinOk = false;
-    /* 字体 (按 scale 重建) */
-    Gdiplus::Font* fBody = NULL;      /* 12.5px 正文 (CJK = 雅黑; 拉丁 = Segoe, 同 em 双族 —
-                                         单族画中英混排时拉丁字形观感突兀, 主程序 GDI+ 后端同口径) */
-    Gdiplus::Font* fBodyB = NULL;
-    Gdiplus::Font* fBodyL = NULL;     /* 拉丁版 (Segoe UI) */
-    Gdiplus::Font* fBodyBL = NULL;
-    Gdiplus::Font* fMono = NULL;      /* 11.5px 代码 */
-    Gdiplus::Font* fTiny = NULL;      /* 10.5px 提示 */
-    Gdiplus::Font* fTinyL = NULL;
-    Gdiplus::Font* fTitle = NULL;     /* 15px 标题 (加粗) */
-    float madeScale = 0.0f;
-    Gdiplus::FontFamily* famUI = NULL;
-    Gdiplus::FontFamily* famLat = NULL;   /* 拉丁家族 (不可用时共享 famUI; owns=false 不二次删) */
-    bool famLatOwn = false;
-    Gdiplus::FontFamily* famMono = NULL;
-    /* 交付表面 (BGRA, 顶层不透明) */
-    std::vector<uint8_t> px;
-    int stride = 0, bw = 0, bh = 0;
     /* 数据 */
     bool loaded = false;
     std::vector<AiMsg> msgs;
     unsigned long long curId = 0;
     bool sending = false;
     AiJob* job = NULL;
-    int lastStepsVer = -1;            /* 泵已同步到卡片的 stepsVersion (变化才重排) */
+    int lastStepsVer = -1;            /* 泵已同步到卡片的 stepsVersion (变化才拷镜像) */
     int stepBase = 0;                 /* 本作业工具卡片起始下标 (SendCurrent 时定格; 历史恢复的
-                                         role==2 卡片在其之前, 泉的步骤同步不碰它们) */
+                                         role==2 卡片在其之前, 泵的步骤同步不碰它们) */
     int netStatus = 0;                /* 0=未配置/未知(灰) 1=正常(绿) 2=失败(红) */
-    /* 输入框 */
-    std::wstring input;
-    size_t caret = 0;
-    bool inputFocus = false;
-    /* 输入框编辑 (对齐宿主搜索框 XjsLineEdit 口径): 选区/拖选/行导航期望列/单档撤销/右键编辑菜单 */
-    size_t anchor = 0;                /* 选区锚点 (== caret = 无选区) */
-    bool selDragging = false;         /* 按住拖选进行中 (宿主捕获中 MOVE 持续转发) */
-    float expectCol = -1.0f;          /* ↑↓ 行导航的期望列 x (<0 = 无, 取当前列) */
-    std::wstring undoText;            /* 单档撤销快照 (交换式) */
-    size_t undoCaret = 0, undoAnchor = 0;
-    bool undoSnap = false;
-    int inScroll = 0;                 /* 输入框滚动: 首个可视行 (可视窗口 4 行, 溢出才 >0) */
-    float inGrab = 0;                 /* 输入框滚动条拖拽: 抓点偏移 (>0 = 拖拽中) */
-    FRect hInThumb;                   /* 输入框滚动条 (渲染回填; 无溢出 = 零矩形) */
-    float inTrackY = 0, inTrackH = 0;
-    bool menuOpen = false;            /* 输入框右键编辑菜单 (自绘浮层; 几何渲染回填) */
-    FRect menuBox; std::vector<FRect> menuRows;
-    /* 消息文本选区 (拖选复制; 单条消息内, atom 粒度 — 行/atom 两端点) */
-    bool txtSel = false;
-    bool txtDragging = false;
-    int selMsg = -1;
-    int selALine = -1, selAAtom = -1, selBLine = -1, selBAtom = -1;
-    bool msgKeyBorrow = false;        /* 拖选开始时向宿主借的键盘 (Ctrl+C 复制用; 清选区即归还) */
-    /* 滚动 */
-    double scrollY = 0;
-    bool sticky = true;               /* 吸底 (流式跟随); 向上滚即解除 */
-    /* 历史侧栏 */
-    bool sideOpen = false;
-    double sideScroll = 0;
-    bool clearArm = false;
-    FRect sidePanel;                  /* 侧栏浮层矩形 (渲染回填; 点浮层外 = 关闭) */
-    /* 接口设置对话框 */
-    bool dlg = false;
-    std::wstring dUrl, dKey, dModel;
-    int dFocus = 0;                   /* 0无 1=URL 2=Key 3=Model */
-    size_t dCaret = 0, dAnchor = 0;   /* 焦点字段的光标/选区锚 (UTF-16 下标, 密钥 ● 显示与值 1:1) */
-    bool dSelDragging = false;        /* 对话框字段拖选进行中 (按住拖动扩选区) */
-    bool dReason = false;
-    /* 命中矩形 (渲染回填; 面板内坐标) */
-    FRect hSet, hHist, hNew, hClose, hInput, hSend, hClear;
-    FRect hThumb; float thumbTrackY = 0, thumbTrackH = 0;
-    std::vector<FRect> hRows, hRowDel;
-    FRect dUrlR, dKeyR, dModelR, dChkR, dCancelR, dSaveR;
-    FRect dCardR;                     /* 对话框卡片整体 (卡内空白 = 标题/标签/按钮带空档, 点它不关闭) */
-    int hover = HIT_NONE;             /* 高亮 hover (低频: 值变化才重渲染) */
-    int press = HIT_NONE;
-    float pressX = -1, pressY = -1;   /* 按下点 (蒙层取消判定: 按下与松开都在卡外才关闭) */
-    int pressGrab = 0;                /* 滚动条拖拽: 抓点偏移 */
-    /* 排版缓存 */
-    struct MsgLayout {
-        std::vector<AiLine> lines;
-        std::vector<AiLine> reasonLines;   /* 推理块 (reason 非空才有) */
-        float bodyH = 0, reasonH = 0, totalH = 0, bubbleW = 0;
-        /* role==2 工具卡片组 */
-        std::vector<float> stepHs;                       /* 每 step 卡片总高 */
-        std::vector<std::vector<AiLine>> stepErrLines;   /* 失败信息折行 */
-        std::vector<std::wstring> stepQueryCut;          /* 截断好的查询行 (排版期算定, 绘制期零测量) */
-        std::vector<std::wstring> stepStat;              /* 右侧状态文字 (同上) */
-        std::vector<float> stepStatW;
-    };
-    std::vector<MsgLayout> lay;
-    std::vector<float> layOffsets;    /* 每条消息 y 起点 (排版产物) */
-    float contentH = 0;               /* 消息流总高 */
-    bool layDirty = true;
-    int layW = 0;
-    float layScale = 0;
+    /* 用量 (对齐参考实现: 累计=计费量; 上下文占用只认最近一次请求) */
+    long long uPrompt = 0, uCompletion = 0, uTotal = 0, uCacheHit = 0, uCacheWrite = 0;
+    long long uLastPrompt = 0, uLastCompletion = 0, uLastCacheHit = 0;
+    double uTokPerSec = 0;
+    bool usageHas = false;
+    /* Web 前端 (实现 ai_web.cpp; 不透明指针 — 共享头不 include WebView2) */
+    struct AiWebCtx* web = NULL;      /* 会话 Web 上下文 (SessOpen 建, SessClose 收) */
+    long long pushStamp = 0;          /* 结构性变化 +1 (新消息/卡片/收尾等非流式文本变动) → 全量重推 */
+    long long syncStamp = -1;         /* 前端已收到的 pushStamp */
+    int syncN = -1;                   /* 前端已收到的消息数 */
+    size_t syncText = 0, syncReason = 0;   /* 前端已收到的末条 text/reason 长度 (流式增量判定) */
+    bool histSynced = false;          /* 前端历史列表与 g_hist 一致 */
+    bool bootDone = false;            /* JS 已 ready 且 boot 快照已推 */
 };
 extern AiSess g_sess[8];
 
 AiSess* SessByTok(XjsWindowToken tok);
 AiSess* SessFree();
-void SessEnsureFonts(AiSess* s);
-void SessEnsureSurface(AiSess* s);
+void SessLoadSkinOf(AiSess* s);                /* 皮肤五色 ← GetSkinJsonOf(会话所属窗) */
 void AbortSend(AiSess* s);
 void SessSaveConv(AiSess* s);
 void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, float scale);
 void SessClose(AiSess* s);
-void SendCurrent(AiSess* s);
+void SendCurrent(AiSess* s, const std::wstring& text);
 bool AiMsgWndCreate();
 void WorkerMain(AiJob* j);     /* agent 工作线程入口 (SendCurrent 起线程; 实现ai_agent.cpp) */
 
-/* ==================== 渲染 (定义 ai_render.cpp) ==================== */
-
-static const float AI_HEAD_H = 42.0f;      /* ×scale */
-static const float AI_LINE_H = 20.0f;      /* 正文行高 ×scale */
-static const float AI_CODE_H = 16.5f;
-static const float AI_TINY_H = 15.0f;
-
-float AiMeasure(Gdiplus::Graphics& g, Gdiplus::Font* f, const std::wstring& t);
-void RelayoutOne(AiSess* s, int mi);
-void RenderDeliver(AiSess* s);   /* 渲染 + 交付 (UI 线程) */
-
-/* 输入框布局 (行/字符位置表): 折行/光标/点定位/选区渲染/行导航五处同源 — 禁止各写一套折行累加 */
-struct InpLine {
-    size_t start = 0;             /* 行首字符偏移 */
-    float w = 0;                  /* 行宽 */
-    std::vector<AiAtom> atoms;
-    std::vector<float> cum;       /* 各 atom 行内起点 x */
-    size_t len() const { size_t n = 0; for (auto& a : atoms) n += a.t.size(); return n; }
+/* ==================== 皮肤调色 (实现 ai_web.cpp; 参考 AI 对话框的调色派生) ====================
+ * 白/黑透明叠加类 (hover/divider/边框) 一律从文字色取 alpha — 深浅皮肤两用 */
+struct AiPal {
+    Gdiplus::Color bg, panel, text, dim, accent;   /* 皮肤五色 (别名) */
+    Gdiplus::Color t3;             /* text-tertiary (三级文字) */
+    Gdiplus::Color hover;          /* btn-secondary-hover (悬停叠加) */
+    Gdiplus::Color divider;        /* 分隔线 */
+    Gdiplus::Color border;         /* glass-border */
+    Gdiplus::Color borderStrong;   /* overlay-border */
+    Gdiplus::Color cyan, emerald, amber, red, ok;  /* 语义色 (信息/成功/警告/危险/在线) */
+    Gdiplus::Color userAcc;        /* 用户气泡暖橙 */
 };
-void InputLayout(AiSess* s, float boxInnerW, std::vector<InpLine>* out);
-void InputPosOf(AiSess* s, const std::vector<InpLine>& lay, float boxInnerW, size_t idx,
-                int* outLine, float* outX);
-size_t InputIndexFromPoint(AiSess* s, const std::vector<InpLine>& lay, float boxInnerW,
-                           float px, float py, float boxX, float boxY);
-int InputLineCount(AiSess* s, float boxInnerW);
-void InputCaretPos(AiSess* s, float boxInnerW, int* outLine, float* outX);
-int InOverflowLines(AiSess* s);
-void InputGeom(AiSess* s, float* bx, float* by, float* bw, float* bh, float* inH);
+AiPal PalOf(AiSess* s);
+std::wstring ColHex(const Gdiplus::Color& c);      /* → "#rrggbb" */
+std::wstring ColHexA(const Gdiplus::Color& c);     /* → "#rrggbbaa" */
 
-/* ==================== 交互 (定义 ai_input.cpp) ==================== */
+/* ==================== Web 前端宿主 (实现 ai_web.cpp; 全部 UI 线程) ====================
+ * 推送协议 (C++ → JS, PostWebMessageAsJson):
+ *   {t:"boot",...}   JS ready 后的会话全量快照 (cfg/调色/历史/当前对话/用量/状态)
+ *   {t:"pal",...}    皮肤调色 (EVT_SKIN / 打开会话)
+ *   {t:"cfg",...}    接口配置变化 (保存后)
+ *   {t:"convs",...}  历史列表 (最新在前由 JS 排; 载入/增删/清空/落库后)
+ *   {t:"msgs",...}   当前对话全量 (含每条消息 HTML; 消息数或结构性变化后)
+ *   {t:"last",...}   流式中的末条助手消息 (正文/推理 HTML 全量重推 — 部分增量无法转 md)
+ *   {t:"usage",...}  用量计数
+ *   {t:"status",...} 发送中/网络状态 (工具栏状态点)
+ * 命令协议 (JS → C++, postMessage): 见 WebCommand (ai_web.cpp) — send/stop/close/settings/
+ *   policy/new/load/del/clearHist/copy/openurl/policyAllow/policyDeny/ready。
+ * 安全面: 模型输出永不产生活 HTML (md4c 转换层 HTML/实体按旧口径裁剪转义), CSP 关
+ *   fetch/XHR/表单/导航, 外链只经 openurl 命令走 ShellExecute。 */
+void WebInit();                                   /* 进程一次: 子窗口类注册等 */
+void WebShutdown();                               /* 全部会话控制器/子窗收尾 (Shutdown 调, SessClose 之前) */
+void WebSessionCreate(AiSess* s);                 /* OPEN: 建子窗口 + 异步建控制器 + ready 后 boot */
+void WebSessionDestroy(AiSess* s);                /* CLOSE: 收控制器与子窗口 (幂等) */
+void WebSessionRect(AiSess* s);                   /* OPEN/RESIZE: 按宿主矩形重定位子窗口 + ZoomFactor */
+void WebSyncSession(AiSess* s);                   /* 泵/命令后: 按同步状态推增量 (msgs/last/status/usage) */
+void WebSyncHist();                               /* g_hist 变化后向全部活跃会话推 convs */
+void WebTouch(AiSess* s);                         /* 会话数据结构性变化登记 (→ 全量重推) */
+void WebCommand(AiSess* s, const Jv& msg);        /* JS 命令分发 (WebMessageReceived 回调) */
+void WebPushSkin(AiSess* s);                      /* 皮肤变化后向该会话重推调色 (EVT_SKIN) */
+std::wstring WebPaletteJson(AiSess* s);           /* 调色 → {"bg":"#..",...} */
+std::wstring WebCfgJson();                        /* g_cfg → {"baseUrl":..,"model":..,"hasKey":..} */
+void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* out);
+                                                  /* 消息气泡 HTML (含工具卡片; data-act 点击路由) */
+void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, std::string* out);
+                                                  /* 单条消息 → JSON 对象字面量 (msgs/last 共用; UTF-8 组装) */
 
-void PanelMouse(AiSess* s, int type, float x, float y, unsigned flags);
-void PanelWheel(AiSess* s, float x, float y, int delta);
-void PanelKey(AiSess* s, unsigned vk, unsigned flags);
-void PanelChar(AiSess* s, unsigned int ch);
-bool InputSelRange(AiSess* s, size_t* a, size_t* b);       /* 选区 [a,b) (渲染与交互共用) */
-void MsgSelNorm(AiSess* s, int* aL, int* aA, int* bL, int* bA);   /* 消息选区两端归一 */
-void MsgSelClear(AiSess* s);   /* 清消息选区并归还借用键盘 */
-size_t FieldVisWindow(AiSess* s, const std::wstring& disp, float maxW, std::wstring* visOut);
-float FieldWidthOf(AiSess* s, const std::wstring& t, size_t n);
+/* markdown → HTML (md4c; 表格/任务列表/删除线; 模型裸 HTML 不渲染 — 实现收口本文件) */
+bool MdToHtml(const std::wstring& text, std::wstring* out);
+
+/* 嵌入式前端整文档 (实现 ai_web_ui.cpp; 两段宽字面量拼接 — MSVC 单字面量 32767 字符上限) */
+const wchar_t* AiWebUiHtml();
 
 #endif /* AI_ASSISTANT_H */
