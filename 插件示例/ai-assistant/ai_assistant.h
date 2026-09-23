@@ -360,7 +360,7 @@ std::wstring ColHexA(const Gdiplus::Color& c);     /* → "#rrggbbaa" */
  *   {t:"usage",...}  用量计数
  *   {t:"status",...} 发送中/网络状态 (工具栏状态点)
  * 命令协议 (JS → C++, postMessage): 见 WebCommand (ai_web.cpp) — send/stop/close/settings/
- *   policy/new/load/del/clearHist/copy/openurl/policyAllow/policyDeny/ready。
+ *   policy/pallow/pdeny/retry/new/load/del/clearHist/copy/openurl/notify/ready。
  * 安全面: 模型输出永不产生活 HTML (md4c 转换层 HTML/实体按旧口径裁剪转义), CSP 关
  *   fetch/XHR/表单/导航, 外链只经 openurl 命令走 ShellExecute。 */
 void WebInit();                                   /* 进程一次: 子窗口类注册等 */

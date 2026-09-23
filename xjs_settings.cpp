@@ -487,6 +487,7 @@ static std::wstring XjsSetPluginPermsText(unsigned m) {
     add(m & XPP_WRITE, L"设置.插件.权限.写文件");
     add(m & XPP_EXEC, L"设置.插件.权限.执行程序");
     add(m & XPP_UI, L"设置.插件.权限.界面操作");
+    add(m & XPP_SETTINGS, L"设置.插件.权限.设置");
     return s.empty() ? XjsT(L"设置.插件.权限.无") : s;
 }
 static std::wstring XjsSetPluginCapsText(unsigned m) {

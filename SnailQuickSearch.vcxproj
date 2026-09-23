@@ -100,12 +100,14 @@
     <ClCompile Include="xjs_settings.cpp" />
     <ClCompile Include="xjs_md.cpp" />
     <ClCompile Include="xjs_plugin.cpp" />
+    <ClCompile Include="xjs_plugin_api.cpp" />
     <ClCompile Include="md4c\md4c.c" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="xjs_app.h" />
     <ClInclude Include="xjs_plugin_sdk.h" />
+    <ClInclude Include="xjs_plugin_api.h" />
     <ClInclude Include="xunjieso.h" />
   </ItemGroup>
   <ItemGroup>

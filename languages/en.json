@@ -419,6 +419,7 @@
  "设置.插件.权限.写文件": "Write/delete files",
  "设置.插件.权限.执行程序": "Run external programs",
  "设置.插件.权限.界面操作": "UI actions (read selection, set search text, open paths)",
+ "设置.插件.权限.设置": "Read/write app settings (read/change window settings, manage search modes)",
  "设置.插件.徽章分隔": " / ",
  "设置.插件.能力.文件右键": "File context menu",
  "设置.插件.能力.搜索框菜单": "Search box menu",

@@ -18,6 +18,7 @@
  */
 #include "xjs_app.h"
 #include "xjs_plugin_sdk.h"
+#include "xjs_plugin_api.h"   /* 扩展 API 接缝 (实现收口 xjs_plugin_api.cpp, 不堆本文件) */
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <cwctype>
@@ -65,6 +66,7 @@ struct XjsPluginEntry {
     int  (XJS_PLUGIN_CALL *fnOnPreview)(XjsPluginCtx*, int, XjsWindowToken, int) = NULL;
     void (XJS_PLUGIN_CALL *fnOnEvent)(XjsPluginCtx*, int, XjsWindowToken, void*) = NULL;
     void (XJS_PLUGIN_CALL *fnOnPanelEvent)(XjsPluginCtx*, XjsWindowToken, const XjsPanelEvent*) = NULL;
+    int  (XJS_PLUGIN_CALL *fnOnPluginMessage)(XjsPluginCtx*, const char*, const char*, char*, int) = NULL;   /* 插件间消息收信口 (可选) */
     void (XJS_PLUGIN_CALL *fnOnHostGone)(XjsPluginCtx*) = NULL;
 };
 
@@ -105,8 +107,9 @@ static CRITICAL_SECTION s_storageCs;
 
 /* ==================== 小工具 ==================== */
 
-/* 调用方缓冲输出: buf/cap 为空 = 返回所需字节数; 否则写入(截断)并返回实际写入数 (均不含 NUL) */
-static int PluginBufOut(char* buf, int cap, const std::string& s) {
+/* 调用方缓冲输出: buf/cap 为空 = 返回所需字节数; 否则写入(截断)并返回实际写入数 (均不含 NUL)。
+   (去 static: xjs_plugin_api.cpp 共用, 声明在 xjs_plugin_api.h — 唯一实现仍在本文件) */
+int PluginBufOut(char* buf, int cap, const std::string& s) {
     int need = (int)s.size();
     if (!buf || cap <= 0) return need;
     int n = (cap - 1 < need) ? cap - 1 : need;
@@ -115,8 +118,8 @@ static int PluginBufOut(char* buf, int cap, const std::string& s) {
     return n;
 }
 
-/* JSON 字符串转义 (输入按 UTF-8 字节, <0x20 控制字符转 \u00XX; 其余原样) */
-static void PluginJsonEscape(const std::string& s, std::string* out) {
+/* JSON 字符串转义 (输入按 UTF-8 字节, <0x20 控制字符转 \u00XX; 其余原样) — 与 PluginBufOut 同口共用 */
+void PluginJsonEscape(const std::string& s, std::string* out) {
     out->push_back('"');
     for (unsigned char c : s) {
         switch (c) {
@@ -132,8 +135,7 @@ static void PluginJsonEscape(const std::string& s, std::string* out) {
     }
     out->push_back('"');
 }
-static std::string PluginJsonStr(const std::string& s) { std::string r; PluginJsonEscape(s, &r); return r; }
-
+std::string PluginJsonStr(const std::string& s) { std::string r; PluginJsonEscape(s, &r); return r; }
 static std::string PluginPathsJson(const std::vector<std::wstring>& paths) {
     std::string j = "[";
     for (size_t i = 0; i < paths.size(); i++) {
@@ -175,6 +177,7 @@ static bool PluginReadSmallFile(const std::wstring& path, std::string* out) {
 static bool PluginUiThread() { return s_uiThread && GetCurrentThreadId() == s_uiThread; }
 
 static const XjsPluginHost* PluginHostTable();   /* 定义在函数表处 (表引用 Fn*, 见文件尾) */
+void XjsPluginOnPluginsChanged();                /* 定义在事件派发区 (EVT_PLUGINS: 启停/重扫信号) */
 
 /* 窗口令牌 ↔ 窗口 */
 static int PluginSlotOfHwnd(HWND hwnd) {
@@ -196,6 +199,32 @@ static XjsSearchWindow* PluginWindowOfToken(unsigned long long tok) {
     XjsSearchWindow* w = XjsSearchWindow::At((int)idx);
     if (!w || (tok >> 32) != s_winGen[idx]) return NULL;   /* 槽位已换窗 = 旧令牌失效 */
     return w;
+}
+
+/* ---- 扩展 API (xjs_plugin_api.cpp) 的窄口: 闸门/令牌/身份唯一出口 (声明见 xjs_plugin_api.h) ----
+   注册表/票号/令牌代是本文件实现细节, 扩展 API 一律经这四个包装取用, 不外泄条目指针 */
+static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPluginEntry** out);   /* 定义在下方 */
+int XjsPluginApiGate(XjsPluginCtx* ctx, unsigned perm, unsigned cap) {
+    XjsPluginEntry* p;
+    int e = PluginApiCheck(ctx, perm, true, &p);   /* 扩展 API 全部仅 UI 线程 */
+    if (e != XJS_PLUGIN_OK) return e;
+    if (cap && !(p->mf.caps & cap)) return XJS_PLUGIN_ERR_PERM;
+    return XJS_PLUGIN_OK;
+}
+XjsSearchWindow* XjsPluginApiWindow(XjsPluginCtx* ctx, unsigned long long token, int* err) {
+    XjsPluginEntry* p;
+    if (PluginApiCheck(ctx, 0, true, &p) != XJS_PLUGIN_OK) { if (err) *err = XJS_PLUGIN_ERR_PERM; return NULL; }
+    XjsSearchWindow* w = PluginWindowOfToken(token);
+    if (err) *err = w ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_NOTFOUND;
+    return w;
+}
+void XjsPluginApiPluginId(XjsPluginCtx* ctx, std::wstring* out) {
+    XjsPluginEntry* p;
+    if (out) out->clear();
+    if (PluginApiCheck(ctx, 0, true, &p) == XJS_PLUGIN_OK && out) *out = p->mf.id;
+}
+unsigned long long XjsPluginApiTokenOf(XjsSearchWindow* w) {
+    return (w && w->hWnd) ? PluginTokenOf(w->hWnd) : 0;
 }
 
 /* s_plugins 本体重建 (PluginScan, UI 线程) 与插件线程取条目 (PluginApiCheck) 的同步。
@@ -223,6 +252,66 @@ static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPlug
 static bool PluginActive(const XjsPluginEntry& e) {   /* "启用且可用": 声明式看 enabled, DLL 插件还要加载成功 */
     if (!e.enabled || !e.mf.ok) return false;
     return e.mf.dllName.empty() ? true : e.loaded;
+}
+
+/* ---- 插件互操作桥梁: 消息派发的注册表侧落点 (扩展 API msg.* 经此收发, 声明见 xjs_plugin_api.h) ----
+   消息一律宿主中转 (启停闸门/fromId 身份/线程契约统一把守, 插件之间不直连):
+   同步派发到目标 OnPluginMessage (恒 UI 线程), fromId 取发送方注册表身份不可伪造;
+   深度闸防 A↔B 互发递归爆栈 (超 16 层 = ERR_STATE 干净失败, 不静默)。 */
+static const size_t XJS_MSG_MAX = 1u << 20;   /* 载荷上限 1MB (UTF-8 字节) */
+static int s_msgDepth = 0;
+
+static const XjsPluginEntry* PluginEntryById(const std::wstring& id) {
+    for (auto& e : s_plugins)
+        if (e.mf.id == id) return &e;
+    return NULL;
+}
+
+int XjsPluginApiMsgSend(XjsPluginCtx* sender, const char* targetIdUtf8, const char* jsonUtf8,
+                        char* buf, int cap) {
+    if (!targetIdUtf8 || !*targetIdUtf8 || !jsonUtf8 || strlen(jsonUtf8) > XJS_MSG_MAX) return XJS_PLUGIN_ERR_ARG;
+    if (s_msgDepth >= 16) return XJS_PLUGIN_ERR_STATE;
+    const XjsPluginEntry* target = PluginEntryById(Utf8ToUtf16(targetIdUtf8));
+    if (!target) return XJS_PLUGIN_ERR_NOTFOUND;                            /* 没这个插件 (未扫描到) */
+    if (!PluginActive(*target) || !target->fnOnPluginMessage) return XJS_PLUGIN_ERR_STATE;   /* 禁用/未加载/没导出收信口 */
+    XjsPluginEntry* sp;
+    int ge = PluginApiCheck(sender, 0, true, &sp);
+    if (ge != XJS_PLUGIN_OK) return ge;
+    if (!sp) return XJS_PLUGIN_ERR_ARG;
+    std::string from8 = Utf16ToUtf8(sp->mf.id.c_str());
+    int depth = ++s_msgDepth;
+    static wchar_t ph[72];
+    swprintf(ph, 72, L"plugin-msg:%s", target->mf.id.c_str());
+    XjsSetPhase(ph);
+    int r = target->fnOnPluginMessage(target->ctx, from8.c_str(), jsonUtf8, buf, cap);
+    s_msgDepth = depth - 1;
+    XjsSetPhase(L"plugin-msg:done");
+    return r;
+}
+
+int XjsPluginApiMsgBroadcast(XjsPluginCtx* sender, const char* jsonUtf8) {
+    if (!jsonUtf8 || strlen(jsonUtf8) > XJS_MSG_MAX) return XJS_PLUGIN_ERR_ARG;
+    if (s_msgDepth >= 16) return XJS_PLUGIN_ERR_STATE;
+    XjsPluginEntry* sp;
+    int ge = PluginApiCheck(sender, 0, true, &sp);
+    if (ge != XJS_PLUGIN_OK) return ge;
+    if (!sp) return XJS_PLUGIN_ERR_ARG;
+    std::string from8 = Utf16ToUtf8(sp->mf.id.c_str());
+    /* 先快照收信人再派发 (收信人里再发消息不踩迭代器; UI 线程同步调用期间注册表不会重建) */
+    struct Rcv { XjsPluginCtx* ctx; const XjsPluginEntry* e; };
+    std::vector<Rcv> rs;
+    for (auto& e : s_plugins)
+        if (&e != sp && PluginActive(e) && e.fnOnPluginMessage) rs.push_back({ e.ctx, &e });
+    int depth = ++s_msgDepth;
+    for (auto& r : rs) {
+        static wchar_t ph[72];
+        swprintf(ph, 72, L"plugin-msg:%s", r.e->mf.id.c_str());
+        XjsSetPhase(ph);
+        r.e->fnOnPluginMessage(r.ctx, from8.c_str(), jsonUtf8, NULL, 0);   /* 广播无回复 (buf=NULL 走所需长度约定) */
+    }
+    s_msgDepth = depth - 1;
+    XjsSetPhase(L"plugin-msg:done");
+    return XJS_PLUGIN_OK;
 }
 
 static void PluginUserSync(const XjsPluginEntry& e) {   /* 开关/确认版本 → 配置镜像 (调用方随后 XjsSaveConfig) */
@@ -289,6 +378,7 @@ static void PluginScan() {
                 e.fnOnCommand = o.fnOnCommand; e.fnBuildMenu = o.fnBuildMenu; e.fnOnSearchMode = o.fnOnSearchMode;
                 e.fnOnInput = o.fnOnInput; e.fnOnPreview = o.fnOnPreview; e.fnOnEvent = o.fnOnEvent;
                 e.fnOnPanelEvent = o.fnOnPanelEvent;
+                e.fnOnPluginMessage = o.fnOnPluginMessage;
                 e.fnOnHostGone = o.fnOnHostGone;
                 if (o.loaded && e.mf.ok && !e.dllPath.empty()) {   /* 已加载插件: DLL 被换过 → 需重启生效 */
                     FILETIME now = PluginFileWriteTime(e.dllPath);
@@ -349,6 +439,7 @@ static bool PluginLoadOne(XjsPluginEntry& e, std::wstring* err) {
         e.fnOnPreview = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, int, XjsWindowToken, int))GetProcAddress(e.mod, "XjsPlugin_OnPreview");
         e.fnOnEvent = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, int, XjsWindowToken, void*))GetProcAddress(e.mod, "XjsPlugin_OnEvent");
         e.fnOnPanelEvent = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, XjsWindowToken, const XjsPanelEvent*))GetProcAddress(e.mod, "XjsPlugin_OnPanelEvent");
+        e.fnOnPluginMessage = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, const char*, const char*, char*, int))GetProcAddress(e.mod, "XjsPlugin_OnPluginMessage");
         e.fnOnHostGone = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*))GetProcAddress(e.mod, "XjsPlugin_OnHostGone");
     }
     if (!e.ctx) { *err = L"内部状态错误 (ctx 未初始化)"; return false; }   /* 扫描后置已保证分配 */
@@ -397,7 +488,9 @@ void XjsPluginRescan() {
         std::wstring err;
         if (!PluginLoadOne(e, &err)) e.loadErr = err;
     }
+    XjsPluginApiPruneOwners();   /* 重扫可能移除插件: 运行时模式的失效 owner 整条剪掉 */
     XjsPluginPanelValidateOwners();   /* 重扫可能移除/清空能力: owner 失效的接管会话立即结束 */
+    XjsPluginOnPluginsChanged();   /* 注册表变了: 订阅 EVT_PLUGINS 的插件重查 plugins.list */
 }
 
 void XjsPluginOnWindowDestroyed(HWND hwnd) {
@@ -430,8 +523,9 @@ bool XjsPluginEnable(int i, std::wstring* err) {
     XjsPluginEntry& e = s_plugins[i];
     e.enabled = true;
     PluginUserSync(e);
-    if (!PluginLoadOne(e, err)) { e.loadErr = *err; return false; }   /* enabled 保持 true, 状态列显示原因 */
+    if (!PluginLoadOne(e, err)) { e.loadErr = *err; XjsPluginOnPluginsChanged(); return false; }   /* enabled 保持 true, 状态列显示原因 */
     e.loadErr.clear();
+    XjsPluginOnPluginsChanged();   /* 同伴有新成员上线 (订阅 EVT_PLUGINS 的重查 plugins.list) */
     return true;
 }
 void XjsPluginDisable(int i) {
@@ -440,6 +534,7 @@ void XjsPluginDisable(int i) {
     e.enabled = false;
     PluginUserSync(e);
     XjsPluginPanelValidateOwners();   /* 面板接管会话的 owner 失效 → 立即结束并恢复预览 */
+    XjsPluginOnPluginsChanged();   /* 同伴下线信号 (订阅者重查 plugins.list) */
     /* 不卸载不释放 (照源样式口径); 其搜索模式/托管来源由调用方剔除并重搜。
        evtMask 不清: 事件派发本就按 PluginActive (enabled) 闸住, 清了则再启用时
        loaded=true 短路 Init 不重跑、Subscribe 不会再调 = 插件永久收不到事件 */
@@ -1167,6 +1262,7 @@ static const XjsPluginHost s_host = {
     FnPanelSetCaret,
     FnSkinJsonOf,
     FnPanelGetRect,   /* v4 追加 (只追加纪律: 恒在表尾, 插件按 host->size 校验) */
+    XjsPluginApiQuery,   /* 名称式扩展 API 解析 (2026-09-24 表尾追加, 表自此冻结; 实现收口 xjs_plugin_api.cpp) */
 };
 
 static const XjsPluginHost* PluginHostTable() { return &s_host; }
@@ -1296,9 +1392,14 @@ unsigned long long XjsPluginCurWindowToken() {
 /* ==================== P1: 搜索模式 / 输入拦截 / 状态栏 / 事件 ==================== */
 
 int XjsPluginModeCount() {
+    /* 模式序空间: 每插件 = [清单模式] + [运行时模式 (modes.add, 序 ≥ XJS_PLUGIN_RT_MODE_BASE)]。
+       运行时段由 xjs_plugin_api.cpp 持有, 经窄口三函数接入 — 合并视图/标签链/菜单零改动 */
     int n = 0;
-    for (auto& e : s_plugins)
-        if (PluginActive(e) && (e.mf.caps & XPC_SEARCHMODES)) n += (int)e.mf.modes.size();
+    for (int pi = 0; pi < (int)s_plugins.size(); pi++) {
+        const XjsPluginEntry& e = s_plugins[pi];
+        if (!PluginActive(e) || !(e.mf.caps & XPC_SEARCHMODES)) continue;
+        n += (int)e.mf.modes.size() + XjsPluginApiRtModeCount(pi);
+    }
     return n;
 }
 bool XjsPluginModeAt(int i, XjsPluginModeRef* out) {
@@ -1308,14 +1409,19 @@ bool XjsPluginModeAt(int i, XjsPluginModeRef* out) {
         if (!PluginActive(e) || !(e.mf.caps & XPC_SEARCHMODES)) continue;
         if (i < (int)e.mf.modes.size()) { *out = { pi, i }; return true; }
         i -= (int)e.mf.modes.size();
+        int rt = XjsPluginApiRtModeCount(pi);
+        if (i < rt) { *out = { pi, XJS_PLUGIN_RT_MODE_BASE + i }; return true; }
+        i -= rt;
     }
     return false;
 }
 const XjsPluginModeDef* XjsPluginModeDefAt(const XjsPluginModeRef& r) {
     if (r.plugin < 0 || r.plugin >= (int)s_plugins.size() || r.modeIdx < 0) return NULL;
     const XjsPluginEntry& e = s_plugins[r.plugin];
-    if (!PluginActive(e) || r.modeIdx >= (int)e.mf.modes.size()) return NULL;   /* 已禁用/已消失 = NULL */
-    return &e.mf.modes[r.modeIdx];
+    if (!PluginActive(e) || !(e.mf.caps & XPC_SEARCHMODES)) return NULL;   /* 已禁用/已消失 = NULL */
+    if (r.modeIdx < (int)e.mf.modes.size()) return &e.mf.modes[r.modeIdx];
+    if (r.modeIdx >= XJS_PLUGIN_RT_MODE_BASE) return XjsPluginApiRtModeDefAt(r.plugin, r.modeIdx);
+    return NULL;
 }
 void XjsPluginFireSearchMode(const XjsPluginModeRef& r, unsigned long long window, const std::wstring& input) {
     const XjsPluginModeDef* d = XjsPluginModeDefAt(r);
@@ -1404,6 +1510,15 @@ void XjsPluginOnSkinChanged(unsigned long long windowToken) {
     for (auto& e : s_plugins)   /* 纯信号: 只报哪个窗口换了皮肤, 新配色插件经 GetSkinJsonOf 自取 */
         if (PluginActive(e) && (e.evtMask & XJS_PLUGIN_EVT_SKIN) && e.fnOnEvent)
             e.fnOnEvent(e.ctx, XJS_PLUGIN_EVT_SKIN, windowToken, NULL);
+}
+
+void XjsPluginOnPluginsChanged() {
+    /* 进程级纯信号 (EVT_PLUGINS): 有同伴启用/禁用/重扫后派发, 插件收到重查 plugins.list。
+       启动期不派发 (逐个加载时互相都在变) — 插件 Init 时自己查一次。 */
+    if (s_plugins.empty()) return;
+    for (auto& e : s_plugins)
+        if (PluginActive(e) && (e.evtMask & XJS_PLUGIN_EVT_PLUGINS) && e.fnOnEvent)
+            e.fnOnEvent(e.ctx, XJS_PLUGIN_EVT_PLUGINS, 0, NULL);
 }
 
 /* ==================== P2: 预览接管 / 批量重命名 ==================== */

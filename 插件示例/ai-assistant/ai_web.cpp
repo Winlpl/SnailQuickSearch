@@ -160,11 +160,11 @@ static int HEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
                heads 栈顶复用为完成标记 (1=完成) */
             MD_BLOCK_LI_DETAIL* d = (MD_BLOCK_LI_DETAIL*)detail;
             if (d->is_task) {
-                c->out += L"<li class=\"task\"><span class=\"tbox";
+                c->out += L"<li class=\"ai-task\"><span class=\"ai-task-box";
                 if (d->task_mark != L' ') c->out += L" done";
                 c->out += L"\"></span>";
                 if (d->task_mark != L' ') {
-                    c->out += L"<span class=\"tdone\">";
+                    c->out += L"<span class=\"ai-task-text\">";
                     c->heads.push_back(1);
                 }
                 c->blocks.push_back(type);
@@ -183,14 +183,14 @@ static int HEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
             wchar_t nb[16];
             swprintf(nb, 16, L"%d\x1\">", c->codeIdx++);   /* 占位 (leave 时回填转义原文) */
             c->out += nb;
-            c->out += L"<div class=\"codehead\"><span class=\"codelang\">";
+            c->out += L"<div class=\"ai-code-head\"><span class=\"ai-code-lang\">";
             std::wstring lang = d->info.text ? MdUtf8(d->info.text, (MD_SIZE)d->info.size) : L"";
             HtmlEscape(&c->out, lang.empty() ? L"text" : lang);
-            c->out += L"</span><span class=\"codecopy\">复制</span></div><pre><code>";
+            c->out += L"</span><span class=\"ai-code-copy\">复制</span></div><pre><code>";
             c->blocks.push_back(type);
             break;
         }
-        case MD_BLOCK_TABLE: c->out += L"<div class=\"tblwrap\"><table>"; c->blocks.push_back(type); break;
+        case MD_BLOCK_TABLE: c->out += L"<div class=\"ai-table-wrap\"><table>"; c->blocks.push_back(type); break;
         case MD_BLOCK_THEAD: c->out += L"<thead>"; c->blocks.push_back(type); break;
         case MD_BLOCK_TBODY: c->out += L"<tbody>"; c->blocks.push_back(type); break;
         case MD_BLOCK_TR: c->out += L"<tr>"; c->blocks.push_back(type); break;
@@ -225,10 +225,10 @@ static int HLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
                         size_t strongInner = close - (c->pStart + 11);
                         size_t tailLen = bodyEnd - (close + 9);
                         if (strongInner >= 1 && strongInner <= 60 && tailLen == 0)
-                            c->out.replace(c->pStart, 3, L"<p class=\"sub\">");
+                            c->out.replace(c->pStart, 3, L"<p class=\"ai-md-sub\">");
                         else if (strongInner >= 1 && strongInner <= 60 && tailLen == 1 &&
                                  (c->out[bodyEnd - 1] == L':' || c->out[bodyEnd - 1] == L'\xFF1A'))
-                            c->out.replace(c->pStart, 3, L"<p class=\"sub\">");
+                            c->out.replace(c->pStart, 3, L"<p class=\"ai-md-sub\">");
                     }
                 }
             }
@@ -384,7 +384,8 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
         if (st.state == 3 || st.state == 4) *out += L" bad";
         *out += L"\">";
         HtmlEscape(out, StepStatText(st));
-        *out += L"</span></div>";
+        /* 折叠/展开箭头 (点击头部切换; 样本列表默认收起) */
+        *out += L"</span><span class=\"sarr glyph\">&#xE70D;</span></div>";
         if (st.state == 4) {
             /* 策略询问: 允许 (转允许并放行后续) / 保持拒绝 */
             *out += L"<div class=\"sask\">";
@@ -411,12 +412,13 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
     }
 }
 
-/* 消息气泡 (浏览器端 shrink-to-fit 自然收窄, 无需排版期测宽) */
+/* 消息气泡 (类名与参考实现同源: ai-bubble / ai-bubble-user / ai-bubble-error /
+ * ai-steps — 前端 CSS 按这套名字取值) */
 void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* out) {
     (void)s;
     (void)thinking;
     if (m.role == 2) {
-        *out += L"<div class=\"bubble\">";
+        *out += L"<div class=\"ai-steps\">";
         StepsHtml(m, mi, out);
         *out += L"</div>";
         return;
@@ -424,16 +426,16 @@ void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* o
     std::wstring body;
     if (!m.text.empty()) {
         if (!MdToHtml(m.text, &body)) {   /* 解析失败兜底: 原文按代码块呈现 */
-            body = L"<div class=\"ai-code\"><div class=\"codehead\"><span class=\"codelang\">text</span></div>"
+            body = L"<div class=\"ai-code\"><div class=\"ai-code-head\"><span class=\"ai-code-lang\">text</span></div>"
                    L"<pre><code>";
             HtmlEscape(&body, m.text);
             body += L"</code></pre></div>";
         }
     }
     if (body.empty()) body = L"&nbsp;";   /* 空气泡占位 (打字三点由前端覆绘, 这里只兜瞬态) */
-    *out += L"<div class=\"bubble";
-    if (m.role == 0) *out += L" b-user";
-    if (m.err) *out += L" b-err";
+    *out += L"<div class=\"ai-bubble";
+    if (m.role == 0) *out += L" ai-bubble-user";
+    if (m.err) *out += L" ai-bubble-error";
     *out += L"\">";
     *out += body;
     *out += L"</div>";
@@ -1167,6 +1169,21 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         WebTouch(s);
         WebSyncSession(s);
+        return;
+    }
+    if (c == L"retry") {   /* 重试本轮: 截断到该轮提问之前再重发 (提问由 SendCurrent 重挂;
+                              提问之后的工具卡片与回答一并丢弃 — 与参考实现 retryAiTurn 同语义) */
+        if (s->sending) return;
+        int lastA = -1, lastU = -1;
+        for (int i = (int)s->msgs.size() - 1; i >= 0; i--)
+            if (s->msgs[i].role == 1) { lastA = i; break; }
+        if (lastA <= 0) return;
+        for (int i = lastA - 1; i >= 0; i--)
+            if (s->msgs[i].role == 0) { lastU = i; break; }
+        if (lastU < 0) return;
+        std::wstring prompt = s->msgs[lastU].text;
+        s->msgs.resize(lastU);
+        SendCurrent(s, prompt);
         return;
     }
     if (c == L"new") {

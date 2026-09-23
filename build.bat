@@ -105,7 +105,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "SRCS=xjs_app.cpp xjs_util.cpp xjs_d2d.cpp xjs_gdiplus.cpp xjs_engine.cpp xjs_popup.cpp xjs_chrome.cpp xjs_toast.cpp xjs_list.cpp xjs_preview.cpp xjs_settings.cpp xjs_md.cpp xjs_plugin.cpp md4c\md4c.c main.cpp"
+set "SRCS=xjs_app.cpp xjs_util.cpp xjs_d2d.cpp xjs_gdiplus.cpp xjs_engine.cpp xjs_popup.cpp xjs_chrome.cpp xjs_toast.cpp xjs_list.cpp xjs_preview.cpp xjs_settings.cpp xjs_md.cpp xjs_plugin.cpp xjs_plugin_api.cpp md4c\md4c.c main.cpp"
 echo Compiling all sources /MP parallel...
 cl /MP /EHsc /std:c++20 /O2 /GL /utf-8 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /c %SRCS% /Fo%INT_DIR%\ /Fd%INT_DIR%\
 if errorlevel 1 (

@@ -72,7 +72,10 @@ enum {
     XJS_PLUGIN_EVT_SELECTION       = 1 << 1,   /* 选中变化 (window/result = 所属窗口; 选中自取 GetSelectedCount/CopySelectedFileId) */
     XJS_PLUGIN_EVT_SYNC            = 1 << 2,   /* 文件同步变化 (进程级: window=0, result=NULL) */
     XJS_PLUGIN_EVT_DBSTATE         = 1 << 3,   /* 库状态 (预留; 进程级: window=0, result=NULL) */
-    XJS_PLUGIN_EVT_SKIN            = 1 << 4    /* 皮肤变化 (window = 换肤窗口令牌; 自建窗口取新皮肤重绘, 配合 GetSkinJsonOf) */
+    XJS_PLUGIN_EVT_SKIN           = 1 << 4,  /* 皮肤变化 (window = 换肤窗口令牌; 自建窗口取新皮肤重绘, 配合 GetSkinJsonOf) */
+    XJS_PLUGIN_EVT_PLUGINS        = 1 << 5   /* 插件启停/注册表变化 (进程级: window=0, result=NULL;
+                                                2026-09-24; 有同伴上线/下线/重扫后派发, 收到后重查
+                                                plugins.list; 启动期不派发 — Init 时自行查一次) */
 };
 
 /* Toast 类型 */
@@ -230,7 +233,107 @@ struct XjsPluginHost {
        自然归它, 宿主转发事件与位图交付都不再需要。会话未激活 = ERR_STATE。 */
     int (XJS_PLUGIN_CALL *PanelGetRect)(XjsPluginCtx*, XjsWindowToken window, void** hwnd,
                                         int* x, int* y, int* w, int* h);
+
+    /* ============ 名称式扩展 API 解析 (2026-09-24 表尾追加; 宿主表自此冻结) ============
+       拿"设置读写 / 界面操作 / 搜索模式管理"等扩展回调: name → 函数指针, 未知名或旧宿主
+       (host->size 不够) = NULL, 插件干净降级。取用前照例校验:
+         host->size >= offsetof(XjsPluginHost, QueryApi) + sizeof(void*)
+       返回的指针终身有效; 全部仅 UI 线程 (错线程 ERR_THREAD), 权限闸在各 API 入口照常生效。
+       名称常量 (XJS_API_*) 与函数指针类型 (XjsApi*) 见下方专节。此后新增宿主能力一律
+       "在这里加名字 + 在 SDK 头加类型", 不再扩本表、不再动 ABI 号。 */
+    void* (XJS_PLUGIN_CALL *QueryApi)(XjsPluginCtx*, const char* name);
 };
+
+/* ==================== 名称式扩展 API (host->QueryApi 按名解析; 全部仅 UI 线程) ====================
+ * 用法 (Init 里或之后任意时刻):
+ *   if (host->size < offsetof(XjsPluginHost, QueryApi) + sizeof(void*)) return XJS_PLUGIN_ERR_FAIL; // 旧宿主
+ *   auto settingsGet = (XjsApiSettingsGet)host->QueryApi(ctx, XJS_API_SETTINGS_GET);
+ *   if (settingsGet) { char j[2048]; settingsGet(ctx, 0, j, sizeof(j)); }   // 0 = 默认窗口
+ *
+ * 权限 (清单 "权限"; 未声明调用 = ERR_PERM):
+ *   免权限    = settings.get / settings.global.get / windows.enum / window.state / modes.list
+ *   "ui"      = window.cmd / window.create / modes.apply
+ *   "settings"= settings.set / settings.global.set / modes.add / modes.remove
+ * JSON 键为中文主键 (与 manifest/配置文件口径一致); 输出 = 调用方缓冲约定; 窗口令牌照旧
+ * (0 = 默认窗口)。设置写入即时生效并落盘; 未知键/非法值 = ERR_ARG (不静默半套)。
+ * 运行时搜索模式 (modes.add) 是会话级的, 不写进配置文件 — 要持久模式用清单 "搜索模式" 声明。 */
+
+#define XJS_API_SETTINGS_GET    "settings.get"        /* XjsApiSettingsGet: 每窗设置快照 JSON */
+#define XJS_API_SETTINGS_SET    "settings.set"        /* XjsApiSettingsSet: 白名单键写入 (即时生效+落盘) */
+#define XJS_API_GLOBAL_GET      "settings.global.get" /* XjsApiGlobalGet: 全局设置子集 JSON */
+#define XJS_API_GLOBAL_SET      "settings.global.set" /* XjsApiGlobalSet: 全局白名单键写入 */
+#define XJS_API_WINDOWS_ENUM    "windows.enum"        /* XjsApiWindowsEnum: 全部窗口清单 JSON */
+#define XJS_API_WINDOW_STATE    "window.state"        /* XjsApiWindowState: 窗口运行态 JSON */
+#define XJS_API_WINDOW_CMD      "window.cmd"          /* XjsApiWindowCmd: show | dismiss | openSettings */
+#define XJS_API_WINDOW_CREATE   "window.create"       /* XjsApiWindowCreate: 按档案建窗 (回传令牌) */
+#define XJS_API_MODES_LIST      "modes.list"          /* XjsApiModesList: 该窗口可见模式清单 JSON */
+#define XJS_API_MODES_ADD       "modes.add"           /* XjsApiModesAdd: 运行时添加模板型模式 (回传 id) */
+#define XJS_API_MODES_REMOVE    "modes.remove"        /* XjsApiModesRemove: 删除自己的运行时模式 */
+#define XJS_API_MODES_APPLY     "modes.apply"         /* XjsApiModesApply: 按模式执行搜索 */
+
+typedef int (XJS_PLUGIN_CALL *XjsApiSettingsGet)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
+/* settings.set: membersJson = {"视图":"details","页面缩放":150,"皮肤":"dark","预览":true,
+   "预览宽度":400,"置顶":false,"失焦行为":0,"显示控制按钮":true,"显示筛选框":true,
+   "显示状态栏":true,"任务栏图标":true,"鼠标打开":0,"默认选中":1,
+   "搜索模式":"wildcard|regex|sql|lua"} (子集随意; 全部键都要合法, 一个未知即整体拒绝) */
+typedef int (XJS_PLUGIN_CALL *XjsApiSettingsSet)(XjsPluginCtx*, XjsWindowToken window, const char* membersJsonUtf8);
+typedef int (XJS_PLUGIN_CALL *XjsApiGlobalGet)(XjsPluginCtx*, char* buf, int cap);
+/* settings.global.set: {"双击Ctrl目标":""|"默认窗口"|档案名, "绘制引擎":"d2d"|"gdiplus"(重启生效)} */
+typedef int (XJS_PLUGIN_CALL *XjsApiGlobalSet)(XjsPluginCtx*, const char* membersJsonUtf8);
+/* windows.enum → [{"令牌":n,"名称":"..","主窗":bool,"档案槽":n}] */
+typedef int (XJS_PLUGIN_CALL *XjsApiWindowsEnum)(XjsPluginCtx*, char* buf, int cap);
+/* window.state → {"令牌","名称","主窗","档案槽","视图","页面缩放","皮肤","预览","预览宽度",
+   "置顶","搜索模式","搜索词","结果数","选中数","可见","最小化","最大化","窗口矩形":[l,t,r,b]} */
+typedef int (XJS_PLUGIN_CALL *XjsApiWindowState)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
+/* window.cmd: "show"=唤起到前台 / "dismiss"=窗口消失统一策略 (主窗藏托盘, 子窗真销毁) /
+   "openSettings"=打开设置窗并绑定该窗口 */
+typedef int (XJS_PLUGIN_CALL *XjsApiWindowCmd)(XjsPluginCtx*, XjsWindowToken window, const char* cmdUtf8);
+/* window.create: profileNameUtf8 = 窗口档案名 (NULL/空 = 新建空白档案; 档案已开 = 幂等激活)。
+   inheritFrom = 新窗尺寸继承自哪个窗口 (0 = 默认窗口); tokenOut (可 NULL) 回传新/存活窗令牌。
+   引擎遍历扫描中 = ERR_STATE。 */
+typedef int (XJS_PLUGIN_CALL *XjsApiWindowCreate)(XjsPluginCtx*, XjsWindowToken inheritFrom,
+                                                  const char* profileNameUtf8, XjsWindowToken* tokenOut);
+/* modes.list → 该窗口可见的全部模式 (用户自定义按作用范围过滤 + 插件模式):
+   [{"标识":"..","名称":"..","简介":"..","类型":"wildcard|regex|sql|lua","模板":"..",
+     "来源":"用户|插件:<插件id>"}] — 标识 = modes.apply/modes.remove 吃的模式来源 id */
+typedef int (XJS_PLUGIN_CALL *XjsApiModesList)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
+/* modes.add (模板型, 会话级): defJson = {"名称":"..(≤64字,必填)","简介":"..(≤256)",
+   "类型":"wildcard|regex|sql|lua","模板":"..(≤2048,必填,<keyword> 占位)"}
+   → buf 回传 {"标识":"p:<插件id>:<序>"}; 声明 searchModes 能力才可调 */
+typedef int (XJS_PLUGIN_CALL *XjsApiModesAdd)(XjsPluginCtx*, XjsWindowToken window,
+                                              const char* defJsonUtf8, char* buf, int cap);
+/* modes.remove: 只能删自己 modes.add 的 id; 用户自定义/清单声明模式不归 API 管 */
+typedef int (XJS_PLUGIN_CALL *XjsApiModesRemove)(XjsPluginCtx*, const char* modeIdUtf8);
+/* modes.apply (语义 = 用户在药丸菜单点了这个模式): 模板型 → inputUtf8 (NULL = 框内现词)
+   置入搜索框并转托管标签执行; 接管型 (无模板) → 回调该插件 OnSearchMode */
+typedef int (XJS_PLUGIN_CALL *XjsApiModesApply)(XjsPluginCtx*, XjsWindowToken window,
+                                                const char* modeIdUtf8, const char* inputUtf8);
+
+/* ---- 插件互操作桥梁 (2026-09-24; 全部免权限, 恒 UI 线程; 经 QueryApi 解析) ----
+ * 发现: plugins.list / plugins.state — "有没有某个插件 / 启用没有" 查这两个;
+ * 消息: msg.send (点对点同步, 带回复) / msg.broadcast (广播, 不收集回复)。
+ * 收信 = 可选导出 XjsPlugin_OnPluginMessage (见导出面节)。消息一律经宿主中转:
+ * 启停闸门/身份(fromId 不可伪造)/线程契约宿主统一把守, 插件之间不直连。
+ * 配套事件 XJS_PLUGIN_EVT_PLUGINS (Subscribe): 同伴上线/下线/重扫后收到纯信号, 重查 plugins.list。 */
+
+#define XJS_API_PLUGINS_LIST    "plugins.list"   /* XjsApiPluginsList: 注册表清单 (含禁用/清单错误项) */
+#define XJS_API_PLUGINS_STATE   "plugins.state"  /* XjsApiPluginsState: 单插件 存在/启用/加载态 */
+#define XJS_API_MSG_SEND        "msg.send"       /* XjsApiMsgSend: 点对点同步消息 (带回复) */
+#define XJS_API_MSG_BROADCAST   "msg.broadcast"  /* XjsApiMsgBroadcast: 广播 (无回复, 不达自己) */
+
+/* plugins.list → (按标识排序) [{"标识":"..","名称":"..","版本":"..","作者":"..","简介":"..",
+   "类型":"library|app","启用":bool,"已加载":bool}] */
+typedef int (XJS_PLUGIN_CALL *XjsApiPluginsList)(XjsPluginCtx*, char* buf, int cap);
+/* plugins.state: id 未扫描到也返回 OK → {"存在":false}; 找到 →
+   {"存在":true,"启用":bool,"已加载":bool,"名称":"..","版本":"..","作者":"..","简介":"..","类型":"library|app"} */
+typedef int (XJS_PLUGIN_CALL *XjsApiPluginsState)(XjsPluginCtx*, const char* idUtf8, char* buf, int cap);
+/* msg.send: jsonUtf8 = 载荷 (UTF-8 ≤1MB, 内容双方自定, 建议 JSON); 同步调目标的 OnPluginMessage,
+   返回它写的回复字节数 (0 = 无回复; 负值 = 目标报告的错误)。目标未扫描 = ERR_NOTFOUND;
+   禁用/未加载/没导出收信口 = ERR_STATE; A↔B 互发递归上限 16 层 (超 = ERR_STATE 干净失败)。 */
+typedef int (XJS_PLUGIN_CALL *XjsApiMsgSend)(XjsPluginCtx*, const char* targetIdUtf8,
+                                             const char* jsonUtf8, char* buf, int cap);
+/* msg.broadcast: 送达全部"启用且已加载且导出 OnPluginMessage"的插件 (不含自己), 不收集回复 */
+typedef int (XJS_PLUGIN_CALL *XjsApiMsgBroadcast)(XjsPluginCtx*, const char* jsonUtf8);
 
 /* ==================== 插件导出面 ==================== */
 
@@ -277,6 +380,16 @@ extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnEvent(XjsPlugi
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnPanelEvent(XjsPluginCtx*,
                                                                              XjsWindowToken window,
                                                                              const XjsPanelEvent* ev);
+/* 插件间消息收信口 (2026-09-24, 可选导出; 宿主 GetProcAddress 探测, 缺失 = 收不到消息):
+   其它插件经 msg.send / msg.broadcast 发来的消息在此到达 (恒 UI 线程)。
+   fromIdUtf8 = 发送方插件 id (宿主填, 不可伪造); jsonUtf8 = 载荷 (UTF-8 ≤1MB, 内容双方自定)。
+   返回值 = 写入 buf 的回复字节数 (调用方缓冲约定: buf==NULL/cap==0 = 只报所需长度;
+   0 = 无回复, 负值 = 本插件向发送方报告的错误)。广播调用 buf=NULL (无回复语义)。
+   契约: 不要在本回调里等自己的工作线程 (会卡住宿主 UI 线程) — 回缓存值, 或先受理再查询。 */
+extern "C" __declspec(dllexport) int  XJS_PLUGIN_CALL XjsPlugin_OnPluginMessage(XjsPluginCtx*,
+                                                                                const char* fromIdUtf8,
+                                                                                const char* jsonUtf8,
+                                                                                char* buf, int cap);
 /* 宿主即将退出 (引擎尚未销毁的最后通知; 之后 DLL 不卸载, 线程必须已在此前收尾) */
 extern "C" __declspec(dllexport) void XJS_PLUGIN_CALL XjsPlugin_OnHostGone(XjsPluginCtx*);
 

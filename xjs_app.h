@@ -1547,6 +1547,12 @@ void XjsAddHistory(const std::wstring& text);
  * 键 → 全局状态的分发在 XjsLoadConfig/XjsSaveConfig; 新增键 = 两处各一行, 不碰文件层。 */
 int XjsJsonStringArray(const char* json, std::vector<std::wstring>* out);  /* 解析字符串JSON数组 */
 
+/* 顶层 JSON 对象摊平 (插件扩展 API 的 settings.set / modes.add 入参; 实现在 xjs_engine.cpp,
+   picojson 唯一 include 红线不破)。只收顶层标量成员: type 1=bool 2=number 3=string
+   (嵌套数组/对象/null 忽略)。返回假 = 非法 JSON 或顶层不是对象。 */
+struct XjsJsonMember { std::wstring key; int type = 0; bool b = false; double num = 0; std::wstring str; };
+bool XjsPluginJsonMembers(const char* utf8Json, std::vector<XjsJsonMember>* out);
+
 void XjsLoadConfig();
 void XjsSaveConfig();
 void XjsSaveWindowRect();
@@ -1722,7 +1728,8 @@ enum { XPC_FILECTX = 1 << 0, XPC_SEARCHBOXMENU = 1 << 1, XPC_SEARCHMODES = 1 << 
        XPC_HOSTED = 1 << 3, XPC_INPUTINTERCEPT = 1 << 4, XPC_STATUSBAR = 1 << 5,
        XPC_EVENTS = 1 << 6, XPC_PREVIEW = 1 << 7, XPC_BATCHRENAME = 1 << 8,
        XPC_PANEL = 1 << 9 };
-enum { XPP_READ = 1 << 0, XPP_WRITE = 1 << 1, XPP_EXEC = 1 << 2, XPP_UI = 1 << 3 };
+enum { XPP_READ = 1 << 0, XPP_WRITE = 1 << 1, XPP_EXEC = 1 << 2, XPP_UI = 1 << 3,
+       XPP_SETTINGS = 1 << 4 };   /* settings: 读写程序设置/增删运行时搜索模式 (扩展 API, 2026-09-24) */
 
 /* 清单解析产物 (宿主内部用, 不跨界; 插件菜单 when: 0=any 1=file 2=dir 3=drive) */
 struct XjsPluginMenuDef { std::wstring cmd, text; int order = 0; int when = 0; std::vector<std::wstring> exts; };

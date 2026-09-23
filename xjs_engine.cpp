@@ -801,6 +801,7 @@ static unsigned XjsPmPerms(const picojson::value& v) {
         else if (s == "file.write") m |= XPP_WRITE;
         else if (s == "exec") m |= XPP_EXEC;
         else if (s == "ui") m |= XPP_UI;
+        else if (s == "settings") m |= XPP_SETTINGS;   /* 扩展 API: 设置读写/运行时搜索模式管理 */
     }
     return m;
 }
@@ -1003,6 +1004,26 @@ int XjsJsonStringArray(const char* json, std::vector<std::wstring>* out) {
     for (auto& e : v.get<picojson::array>())
         if (e.is<std::string>()) out->push_back(Utf8ToUtf16(e.get<std::string>().c_str()));
     return (int)out->size();
+}
+
+bool XjsPluginJsonMembers(const char* utf8Json, std::vector<XjsJsonMember>* out) {
+    /* 插件扩展 API 的顶层对象摊平 (settings.set / modes.add 入参): 只收顶层标量成员,
+       嵌套数组/对象/null 忽略 (扩展 API 不吃嵌套) — picojson 细节不外泄本文件 */
+    out->clear();
+    if (!utf8Json || !*utf8Json) return false;
+    picojson::value v;
+    if (!picojson::parse(v, utf8Json).empty() || !v.is<picojson::object>()) return false;
+    for (auto& kv : v.get<picojson::object>()) {
+        XjsJsonMember m;
+        m.key = Utf8ToUtf16(kv.first.c_str());
+        const picojson::value& e = kv.second;
+        if (e.is<bool>()) { m.type = 1; m.b = e.get<bool>(); }
+        else if (e.is<double>()) { m.type = 2; m.num = e.get<double>(); }
+        else if (e.is<std::string>()) { m.type = 3; m.str = Utf8ToUtf16(e.get<std::string>().c_str()); }
+        else continue;
+        out->push_back(m);
+    }
+    return true;
 }
 
 /* ==================== 文件分类 (引擎筛选器) / 路径别名 配置 ====================
