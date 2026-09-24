@@ -771,6 +771,8 @@ void XjsPreviewPanelSyncSize(bool notify) {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
     if (!w || !w->plugPanelOn) return;
     XjsRect r = XjsPreviewPanelContentRect();
+    int cx = (int)(r.left + 0.5f);
+    int cy = (int)(r.top + 0.5f);
     int cw = ximax(1, (int)(r.right - r.left + 0.5f));
     int chh = ximax(1, (int)(r.bottom - r.top + 0.5f));
     float sc = XSF(1.0f);   /* dpi×页面缩放 (XSF 基准), 插件字号/几何按它缩放 */
@@ -778,8 +780,13 @@ void XjsPreviewPanelSyncSize(bool notify) {
     long long serial;
     {
         XjsPanelLock lk;
-        changed = (cw != w->plugPanelW || chh != w->plugPanelH || sc != w->plugPanelScale);
+        /* 原点必须一并比对: 加宽窗口时预览面板宽高都不变、只有左缘随列表平移,
+           漏比 x/y 插件就永远收不到 RESIZE, 子窗停在旧位置 (宽度失配之坑) */
+        changed = (cx != w->plugPanelX || cy != w->plugPanelY ||
+                   cw != w->plugPanelW || chh != w->plugPanelH || sc != w->plugPanelScale);
         if (changed) {
+            w->plugPanelX = cx;
+            w->plugPanelY = cy;
             w->plugPanelW = cw;
             w->plugPanelH = chh;
             w->plugPanelScale = sc;
@@ -894,7 +901,7 @@ void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h,
     if (scale) *scale = w->plugPanelScale;
 }
 
-/* 渲染接管位图 (XjsPreviewRender 会话分支; 绘制帧兼探测尺寸失配 → 投 WM_PANEL_RESYNC,
+/* 渲染接管位图 (XjsPreviewRender 会话分支; 绘制帧兼探测尺寸/位置失配 → 投 WM_PANEL_RESYNC,
    下一拍消息循环里做世代同步 — 插件回调禁在 WM_PAINT 内) */
 void XjsPreviewPanelRender() {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
@@ -914,9 +921,13 @@ void XjsPreviewPanelRender() {
             bmp = w->plugPanelCache;
         }
     }
+    int ex = (int)(r.left + 0.5f);
+    int ey = (int)(r.top + 0.5f);
     int ew = ximax(1, (int)(r.right - r.left + 0.5f));
     int eh = ximax(1, (int)(r.bottom - r.top + 0.5f));
-    if (!w->plugPanelResyncPosted && (ew != w->plugPanelW || eh != w->plugPanelH) && g_hWnd) {
+    /* 原点一并探测 (同 SyncSize 口径): 宽度不变位置平移也是失配 */
+    if (!w->plugPanelResyncPosted &&
+        (ex != w->plugPanelX || ey != w->plugPanelY || ew != w->plugPanelW || eh != w->plugPanelH) && g_hWnd) {
         w->plugPanelResyncPosted = true;
         PostMessageW(g_hWnd, WM_PANEL_RESYNC, 0, 0);
     }
@@ -997,13 +1008,17 @@ void XjsPreviewPanelMouseLeave() {
 
 /* 面板外宿主点击 (搜索框/列表/标题栏/预览头/右键): 键盘让渡即时收回并通知插件失焦 —
    否则 plugPanelKey 闸仍开着, 按键继续吞给面板 (表象: 焦点已在搜索框, 打字却进 AI 输入框)。
-   面板内容区内的点击不收 (插件自管聚焦); 插件自愿归还仍走 PanelSetFocus(0), 不经此处 */
+   面板内容区内的点击不收 (插件自管聚焦); 插件自愿归还仍走 PanelSetFocus(0), 不经此处。
+   SetFocus 顶层 = 真实焦点一并收回 (2026-09-24 实锤): WebView2 等真子窗渲染层拿走 Win32
+   焦点后, 自绘搜索框没有 HWND 抢不回来 — 只清标志则聊天框光标不灭 (双光标齐亮)、
+   按键继续进浏览器 (打字窜道); SetFocus 后浏览器 LostFocus 自然到达, 插件侧光标自灭 */
 void XjsPreviewPanelKeyBlur(POINT pt) {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
     if (!w || !w->plugPanelOn || !w->plugPanelKey) return;
     if (XjsPreviewPanelWantsPt(pt)) return;
     w->plugPanelKey = false;
     XjsPanelSend(w, XJS_HPANEL_KEY_BLUR, 0, 0, 0, 0, 0);
+    if (w->hWnd && GetFocus() && IsChild(w->hWnd, GetFocus())) SetFocus(w->hWnd);
 }
 
 void XjsPreviewPanelKey(unsigned vk) {

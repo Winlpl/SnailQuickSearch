@@ -96,7 +96,7 @@
 #define WM_POPUP_RESULT     (WM_APP + 1)
 #define WM_HOTKEY_WARN      (WM_APP + 3)      /* 全局热键注册失败提醒 (WM_CREATE 时窗未显示, 延后弹 toast) */
 #define WM_WAKEUP           (WM_APP + 4)      /* 第二实例唤起本窗恢复显示 (跨完整性级别唯一放行通道, 见 wWinMain 单实例守卫) */
-#define WM_PANEL_RESYNC     (WM_APP + 5)      /* 插件面板接管: 绘制帧发现尺寸失配, 投到消息循环做世代同步 (回调禁在 WM_PAINT 内) */
+#define WM_PANEL_RESYNC     (WM_APP + 5)      /* 插件面板接管: 绘制帧发现尺寸/位置失配, 投到消息循环做世代同步 (回调禁在 WM_PAINT 内) */
 
 /* 面板接管事件类型 (镜像 xjs_plugin_sdk.h 的 XJS_PANEL_*; SDK 头只有 xjs_plugin.cpp include,
    宿主路由走这套同名值 — xjs_plugin.cpp 内 static_assert 逐项对值, 禁止单边改号) */
@@ -126,7 +126,7 @@ void XjsSetPhase(const wchar_t* p);
    判定顺序有讲究 — 带高位标志的先剥标志, 无上界的 IDM_MENU_BASE 段必须排在最后) */
 #define IDM_CTX_BASE        1000   /* 文件右键: +1..8 单选组 / +9 重命名 +10 别名 +11 多选打开 +12 多选定位;
                                       +20..24 搜索框右键编辑; +30 别名对话框; +40..44 重命名框右键编辑 */
-#define IDM_MODE_BASE       2000   /* +0..3 关键词模式 (通配符/正则/SQL/Lua) */
+#define IDM_MODE_BASE       2000   /* +0..4 关键词模式 (通配符/正则/SQL/Lua 过滤/Lua 执行) */
 #define IDM_CMODE_BASE      2500   /* 用户自定义搜索模式菜单项 (+下标, 上限100) */
 #define IDM_HISTORY_BASE    3000   /* +0..998 历史项; +999 清空历史 */
 #define IDM_FILTER_BASE     4000   /* +筛选分类下标 (XjsApplyFilter) */
@@ -769,7 +769,7 @@ struct XjsModeDlg {
     int scope = 0;                   /* 作用范围段: 0=全局共享 1=仅本窗口 (新增默认全局, 2026-09-17) */
     std::wstring ownerName;          /* 打开对话框的窗口档案名 (scope=1 绑定/提示用; 打开时捕获, 不依赖"当前窗") */
     bool delConfirm = false;
-    int pressCmd = 0;               /* 按下待定 (松开触发口径): 0=无; 1+i=类型段 5+i=作用范围段 7=取消 8=保存 9=删除 */
+    int pressCmd = 0;               /* 按下待定 (松开触发口径): 0=无; 1..5=类型段 6+i=作用范围段 8=取消 9=保存 10=删除 */
     XjsEditField nameEd, descEd, tplEd;
 };
 
@@ -782,8 +782,10 @@ struct XjsPreviewHits {
     bool valid = false;
 };
 
-/* 搜索模式 (keywordType 强制指定; AUTO 已移除) — 每窗可各自选择 */
-enum XjsSearchMode { XMODE_WILDCARD = 0, XMODE_REGEX = 1, XMODE_SQL = 2, XMODE_LUA = 3 };
+/* 搜索模式 (keywordType 强制指定; AUTO 已移除) — 每窗可各自选择。
+   LUA=脚本过滤 (每文件求布尔谓词, XJS_KEYWORD_LUA); LUA_EXEC=执行 (脚本即程序,
+   自主遍历/排序, return ID 数组=结果, XJS_KEYWORD_LUA_EXEC; 不进多重搜索链) */
+enum XjsSearchMode { XMODE_WILDCARD = 0, XMODE_REGEX = 1, XMODE_SQL = 2, XMODE_LUA = 3, XMODE_LUA_EXEC = 4 };
 
 /* 用户自定义搜索模式 (源样式 11-search-modes.js: "添加搜索模式"弹窗创建, 上限 100)
  * 存储: 共享 = 顶层 "共享搜索模式"; 私有 = 各窗口条目的 "私有搜索模式" (存储位置即作用域)。
@@ -1121,7 +1123,8 @@ public:
     bool plugPanelOn = false;               /* 接管会话激活 (预览面板内容区由插件交付) */
     std::wstring plugPanelPluginId;         /* 接管插件 id (派发按 id 找插件, 重扫换槽不串窗) */
     bool plugPanelWasVisible = false;       /* 打开时预览面板原状态 (关闭恢复: 原本关着就连预览一起关) */
-    long long plugPanelSerial = 0;          /* 面板世代 (尺寸/缩放变化递增; 插件交付按它对齐, 过期静默丢弃) */
+    long long plugPanelSerial = 0;          /* 面板世代 (尺寸/位置/缩放变化递增; 插件交付按它对齐, 过期静默丢弃) */
+    int plugPanelX = 0, plugPanelY = 0;     /* 当前世代期望像素原点 (内容区, 客户区坐标; 只比宽高会漏"宽度不变位置平移"的失配) */
     int plugPanelW = 0, plugPanelH = 0;     /* 当前世代期望像素尺寸 (内容区, 物理像素) */
     float plugPanelScale = 1.0f;            /* 当前世代 dpi×页面缩放 (96dpi=1.0) */
     bool plugPanelKey = false;              /* 插件持有键盘 (面板输入框聚焦; 键盘/IME 路由让给面板) */
@@ -1352,11 +1355,11 @@ extern std::wstring g_scanDrive;
 extern int g_scanEnumerated, g_scanTotal;
 
 /* 搜索模式枚举已上移至 XjsSearchWindow 之前 (每窗字段初始化需要) */
-extern const int g_modeToKeyword[4];
-extern const wchar_t* g_modeName[4];
-extern const wchar_t* g_modeDesc[4];
-extern const wchar_t* g_modeHint[4];
-extern const wchar_t* g_modeIni[4];
+extern const int g_modeToKeyword[5];
+extern const wchar_t* g_modeName[5];
+extern const wchar_t* g_modeDesc[5];
+extern const wchar_t* g_modeHint[5];
+extern const wchar_t* g_modeIni[5];
 
 /* 列表/筛选 (筛选进程共享: DB 级分类, 各窗内容一致, 库加载/扫描完成时刷新);
    搜索历史已每窗化 (g_history 宏 → Cur()->history, 见宏区) */
@@ -1431,6 +1434,9 @@ std::string XjsTUtf8(const wchar_t* key);       // UTF-8 场景 (询问框 butto
 void XjsI18nInit();                             // wWinMain 启动时装载全部语言表 (一次全载, 切换零重装)
 const wchar_t* XjsLangLabel(int lang);          // 语言显示名 (设置下拉/菜单用, 恒母语不翻译)
 const wchar_t* XjsLangAutoLabel();              // "自动 (跟随系统)"
+int XjsLangIndexFromCode(const wchar_t* code);  // 语言代码 → XjsLang ("zh"/"zh-TW"/…; 未知/NULL = XLANG_AUTO)
+const char* XjsLangCodeUtf8(int lang);          // XjsLang → 语言代码串 ("zh"/…/"auto"; 配置与扩展 API 同串)
+void XjsApplyUiLang(XjsSearchWindow* w, int lang);   // 语言应用唯一入口 (写窗字段+落盘+逐窗标题按各自语言刷新+托盘随主窗; 设置页下拉与插件扩展 API 同落点)
 
 /* ---- xjs_util ---- */
 std::wstring XjsGetExeDir();

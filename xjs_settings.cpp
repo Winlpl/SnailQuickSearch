@@ -2899,22 +2899,11 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     return 0;
                 }
                 /* 界面语言下拉结果 (每窗 = owner): 919=自动, 920..925=zh/zh-TW/en/ko/th/ms。
-                   写 owner 字段 → 落盘; 各搜索窗标题按**各自语言**刷新 (回调内 XjsWindowScope 切换),
-                   托盘提示随主窗语言; 本窗行模型按 owner 新语言重建 */
+                   应用 = XjsApplyUiLang 唯一入口 (写 owner 字段+落盘+逐窗标题刷新+托盘随主窗;
+                   插件扩展 API settings.set "语言" 同落点)。本窗行模型按 owner 新语言重建 */
                 if (id >= 919 && id <= 925) {
                     XjsWindowScope scope(XjsSetOwner());
-                    g_lang = (id == 919) ? XLANG_AUTO : id - 920;
-                    XjsSaveConfig();
-                    struct LangRefresh { static void Run(XjsSearchWindow* w) {
-                        XjsWindowScope ws(w);   /* XjsT 解析到 w 自己的语言 */
-                        const std::wstring& st = w->searchEd.text;
-                        SetWindowTextW(w->hWnd, st.empty() ? XjsT(L"应用.名称")
-                                                           : (st + L" - " + XjsT(L"应用.名称")).c_str());
-                        w->Invalidate();
-                    }};
-                    XjsSearchWindow::ForEach(&LangRefresh::Run);
-                    if (XjsSetOwner()->isMain)
-                        XjsTrayAdd(XjsSearchWindow::MainHwnd());   /* 已入托盘时 = NIM_MODIFY 刷新提示 */
+                    XjsApplyUiLang(XjsSetOwner(), (id == 919) ? XLANG_AUTO : id - 920);
                     s_set.rowsDirty = true;
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;

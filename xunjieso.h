@@ -41,27 +41,20 @@
  * 版本：见 xjs_GetVersion()
  * 官网：https://www.xunjieso.com
  * 表结构: (需要注意的是, 部分需要自己添加)
-CREATE TABLE alltable (
-    ID         integer,    -- 编号
-    ParentID   integer,    -- 父目录ID
-    Path       text,       -- 完整文件路径
-    FName      text,       -- 文件名（不含扩展名）
-    Ext        text,       -- 扩展名
-    ParentName text,       -- 直接父目录名称
-    ParentPath text,       -- 直接父目录路径
-    AnyParent  text,       -- 任意一级父目录名称
-    Size       bigint,      -- 文件大小（字节数，支持 '100M'/'2G' 简写）
-    CreateTime bigint,     -- 创建时间（OLE日期, 可能会没有创建此字段）
-    ModTime    bigint,     -- 修改时间（OLE日期, 可能会没有创建此字段）
-    AccessTime bigint,     -- 访问时间（OLE日期, 可能会没有创建此字段）
-    FileType   text,       -- 文件类型分类（视频/音频/图片/文档/办公/程序/压缩/系统/其他）
-    IsDir      integer,    -- 是否为目录 (1=是 0=否)
-    Alias      text,       -- 别名 (可能会没有创建此字段)
-    Score      smallint,   -- 文件评分 (可能会没有创建此字段)
-    FAttr      text,       -- 文件属性字符串（如 "A__D" 表示存档+目录, 可能会没有创建此字段）
-    FileContent text,       -- 文件内容（用于内容搜索，读取时有200MB上限）
-    FileNumber  integer      -- 文件编号 (用于调试查看使用)
-);
+    CREATE TABLE alltable (
+        Path        TEXT,      -- 完整文件路径
+        FName       TEXT,      -- 文件名
+        Ext         TEXT,      -- 扩展名
+        ParentName  TEXT,      -- 直接父目录名称
+        ParentPath  TEXT,      -- 直接父目录路径
+        AnyParent   TEXT,      -- 任意一级父目录名称
+        Size        TEXT,      -- 文件大小(需开启才有)
+        ModTime     DATETIME,  -- 修改时间(需开启才有)
+        FileType    TEXT,      -- 文件类型分类
+        IsDir       INTEGER,   -- 是否为目录
+        Alias       TEXT,      -- 别名(需开启才有)
+        Content     BLOB       -- 文件内容（用于内容搜索）虚拟字段, 用到才会读取文件.
+    );
 */
 
 #pragma once
@@ -168,10 +161,10 @@ enum xjs_result_event_type {
     XJS_RESULT_EVENT_ICON_ASK = 13   /* 询问继续获取图标; 异步图标线程在真实获取图标之前触发(搜索结果读锁内, 回调内禁止写库/等待锁); 返回: 非0=继续获取, 0=放弃当前图标; 参数: 搜索指纹, 文件ID, 表项索引, 图标大小, 回调信息(UTF-8) */
 };
 
-/* 搜索关键词类型 (xjs_result_Query 的 keywordType 参数; 类型必须强制指定: 0/1/2 为强制类型, -2 为多重搜索, -3 为Lua脚本过滤, -4 为Lua执行(脚本即程序)) */
+/* 搜索关键词类型 (xjs_result_Query 的 keywordType 参数; 类型必须强制指定: 0/1/2 为强制类型, -2 为多重搜索, -3 为Lua过滤, -4 为Lua执行(脚本即程序)) */
 enum xjs_keyword_type {
     XJS_KEYWORD_LUA_EXEC = -4, /* Lua执行模式(脚本即程序, 经 xjs_result_Query 以本类型提交): 脚本自主遍历数据库/自主排序/return ID数组=最终结果 */
-    XJS_KEYWORD_LUA      = -3, /* Lua脚本(过滤模式): 搜索词为Lua脚本, 每文件求值布尔谓词; 宿主多线程驱动, 可作多重搜索阶段 {"搜索模式":"Lua"}; 环境 f 表见 Lua脚本示例 目录 */
+    XJS_KEYWORD_LUA      = -3, /* Lua过滤(过滤模式, 多线程): 搜索词为Lua脚本, 每文件求值布尔谓词; 宿主多线程驱动, 可作多重搜索阶段 {"搜索模式":"Lua"}; 环境 f 表见 Lua脚本示例 目录 */
     XJS_KEYWORD_MULTI    = -2, /* 多重搜索(JSON链式搜索): 搜索词为JSON数组 [{"搜索模式":"通配符","搜索词":"你好"},...]; 先搜索A再以A的结果为基础继续搜索B; 多重搜索里不允许嵌套多重搜索 */
     XJS_KEYWORD_WILDCARD = 0,  /* 通配符(强制) */
     XJS_KEYWORD_REGEX    = 1,  /* 正则表达式(强制) */
@@ -856,7 +849,7 @@ XJS_API BOOL XJS_CALL xjs_lua_RegisterFunction(xjs_engine* engine, const char* c
     @return 真=至少注销一项; 假=引擎无效/class_name为NULL(30=参数无效)/无匹配. */
 XJS_API BOOL XJS_CALL xjs_lua_UnregisterFunction(xjs_engine* engine, const char* class_name, const char* method_name);
 
-/** @brief 注册用户自定义 Lua C 函数(结果对象级): 仅对该结果对象之后的 -3(Lua脚本过滤)/-4(Lua执行) 创建的虚拟机生效.
+/** @brief 注册用户自定义 Lua C 函数(结果对象级): 仅对该结果对象之后的 -3(Lua过滤)/-4(Lua执行) 创建的虚拟机生效.
     不同结果对象互不相通(各挂各的); 同名 类名.方法名 时对象级覆盖进程级(装配时先挂进程级后挂对象级, 更具体的注册生效);
     对象销毁时其对象级注册随之消失, 无需逐个注销.
     其余语义(类名/方法名规则、func 签名、生效时机、线程安全)与 xjs_lua_RegisterFunction 完全一致.
@@ -916,9 +909,10 @@ XJS_API int XJS_CALL xjs_lua_ArgsToJson(void* L, char* buffer, int bufferCount);
 /** @brief 取 Lua 脚本提示词文本(UTF-8, '\0'结尾).
     引擎内嵌的 Lua 脚本编写提示词(AI 投喂用), 按类型返回其一:
     0=搜索过程提示词(《搜索过程提示词.md》: -3 过滤模式脚本——宿主多线程逐文件调用的单文件谓词, f 表 API/两种脚本形态/性能规则);
-    1=全局搜索提示词(《ExecuteLua脚本生成提示词.md》: -4 执行模式脚本——脚本自主遍历数据库/排序/生成结果, db/f/res 三表 API 全集).
+    1=全局搜索提示词(《ExecuteLua脚本生成提示词.md》: -4 执行模式脚本——脚本自主遍历数据库/排序/生成结果, db/f/res 三表 API 全集);
+    2=合集提示词(《Lua提示词合集.md》: 0 与 1 的合并去重版——公共章节只讲一遍, 一次投喂即可生成 -3/-4 两种模式脚本, 节约 token).
     宿主可将其作为系统提示词投喂给大模型生成对应模式的脚本.
-    promptType: 0=搜索过程, 1=全局搜索; 其它值返回空字符串("").
+    promptType: 0=搜索过程, 1=全局搜索, 2=合集; 其它值返回空字符串("").
     @return UTF-8 文本指针; 指向进程级静态缓冲, 进程生命期内有效, 无需释放、请勿改写. */
 XJS_API const char* XJS_CALL xjs_LUA_GetPprompt(int promptType);
 
@@ -991,7 +985,7 @@ XJS_API int XJS_CALL xjs_result_Query(
                          //   通配符示例: "*.txt" 或 "文档"
                          //   正则示例:   "^[0-9]+$"
                          //   SQL示例:    "SELECT Path FROM alltable WHERE IsDir=0"
-    int keywordType,     // 搜索词类型(必须强制指定)：参见 xjs_keyword_type 枚举 (-2=多重搜索(JSON链式搜索), -3=Lua脚本(过滤模式), -4=Lua执行(脚本即程序), 0=通配符(强制), 1=正则(强制), 2=SQL语句(强制))
+    int keywordType,     // 搜索词类型(必须强制指定)：参见 xjs_keyword_type 枚举 (-2=多重搜索(JSON链式搜索), -3=Lua过滤(过滤模式), -4=Lua执行(脚本即程序), 0=通配符(强制), 1=正则(强制), 2=SQL语句(强制))
                          // keywordType=-2 时 searchWord 为 JSON 阶段数组: [{"搜索模式":"通配符","搜索词":"你好"},{"搜索模式":"SQL","搜索词":"SELECT ..."},{"搜索模式":"正则","搜索词":"[0-9]+"}]
                          // 多重搜索先搜索A再以A的结果为基础继续搜索B, 依此类推, 最终结果=最后阶段的输出; 不允许嵌套多重搜索; 失败时触发 SearchFailed 事件(错误JSON含 错误类型="多重搜索错误"/错误信息/阶段)
                          // keywordType=-4 时 searchWord 为 Lua 脚本(UTF-8): 脚本自主遍历数据库(db表)/读取当前结果(res表)/自主排序, return 的 ID 数组(及其顺序)就是最终搜索结果;
@@ -1477,7 +1471,7 @@ XJS_API int XJS_CALL xjs_result_GetSQLSortDescending(
 
 // 搜索类型枚举值，由 xjs_result_GetSearchType 返回
 #define XJS_SEARCH_TYPE_LUA_EXEC    -4  // Lua执行模式(脚本即程序, 经 xjs_result_Query 以本类型提交, 脚本自定义序)
-#define XJS_SEARCH_TYPE_LUA         -3  // Lua脚本(过滤模式, 宿主驱动谓词过滤)
+#define XJS_SEARCH_TYPE_LUA         -3  // Lua过滤(过滤模式, 多线程宿主驱动谓词过滤)
 #define XJS_SEARCH_TYPE_MULTI       -2  // 多重搜索(JSON链式搜索, 见 xjs_keyword_type::XJS_KEYWORD_MULTI)
 #define XJS_SEARCH_TYPE_WILDCARD    0   // 通配符搜索
 #define XJS_SEARCH_TYPE_REGEX       1   // 正则搜索

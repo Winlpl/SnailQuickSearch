@@ -15,7 +15,7 @@ unsigned             g_uiThread = 0;
 /* ==================== 插件导出面 ==================== */
 
 static const XjsPluginInfo* XJS_PLUGIN_CALL XjsPlugin_GetInfo(void) {
-    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "2.0.0" };
+    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "2.1.0" };
     return &info;
 }
 
@@ -24,6 +24,7 @@ static int XJS_PLUGIN_CALL XjsPlugin_Init(XjsPluginCtx* ctx, const XjsPluginHost
     g_host = host;
     g_uiThread = GetCurrentThreadId();
     if (!HOST_PANEL_OK) return XJS_PLUGIN_ERR_FAIL;   /* 旧宿主 (无 v4 Panel* 表) = 干净失败 */
+    ApiResolveAll();   /* 名称式扩展 API 一次性解析 (旧宿主 = 全 NULL, 代办工具报不支持) */
     AgentToolInit();
     BuildInstructions();   /* 系统提示词 = 角色说明 + 引擎内嵌 Lua 两规范 (进程一次) */
     WebInit();             /* 子窗口类注册 */

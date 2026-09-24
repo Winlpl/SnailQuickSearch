@@ -41,7 +41,7 @@ size_t NextCp(const std::wstring& s, size_t i) {
     return i;
 }
 
-/* ---- base64 (API Key 混淆用) ---- */
+/* ---- base64 (API Key 加密存储用) ---- */
 static const char* B64C = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static std::string B64Enc(const std::string& in) {
     std::string out;
@@ -108,16 +108,46 @@ Jv JsonParseW(const std::wstring& text) {
     return jp.Val();
 }
 
-/* ==================== 配置 (存储键 "cfg"; API Key 按机器码 XOR 混淆, 明文不落盘) ==================== */
+/* ==================== 配置 (存储键 "cfg"; API Key 以本机 GUID 为密码加密, 明文不落盘) ==================== */
 
 AiCfg g_cfg;
 
-static std::wstring MachineKeyStr() {   /* 机器码: 注册表 MachineGuid, 缺失回退常量 (换机解密失败=重输) */
+/* 加密密码 = 本机 GUID: ① 注册表 MachineGuid (系统自带, 首选); ② 读不到 (受限环境)
+   → C:\ProgramData\SnailQuickSearch\ai-key-guid.txt 生成一份专属 GUID 落盘, 长期复用 —
+   密码不出本机且在程序目录之外, 配置目录被整包分享到别的机器也解不开 (防分享泄漏);
+   ③ GUID 生成也失败 (几乎不可能) → 常量兜底, 当次可加解自洽, 换机=视为未配置重输 */
+static std::wstring MachineKeyStr() {
+    const wchar_t* SALT = L"|snail-ai-key";   /* 派生盐: 与注册表路径口径一致, 防密码串被原样照搬 */
     wchar_t buf[128] = {};
     DWORD sz = sizeof(buf);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
                      RRF_RT_REG_SZ, NULL, buf, &sz) == ERROR_SUCCESS && buf[0])
-        return std::wstring(buf) + L"|snail-ai-key";
+        return std::wstring(buf) + SALT;
+    /* 回退: C 盘 GUID 文件 (UTF-16 文本一行), 有则读用, 无则生成并写回 */
+    const wchar_t* file = L"C:\\ProgramData\\SnailQuickSearch\\ai-key-guid.txt";
+    wchar_t line[128] = {};
+    HANDLE h = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD rd = 0;
+        ReadFile(h, line, sizeof(line) - sizeof(line[0]), &rd, NULL);
+        CloseHandle(h);
+        std::wstring guid(line, rd / sizeof(line[0]));
+        while (!guid.empty() && (guid.back() == 0 || guid.back() == L'\r' || guid.back() == L'\n'
+                              || guid.back() == L' ' || guid.back() == L'\t')) guid.pop_back();
+        if (guid.size() >= 36) return guid + SALT;
+    }
+    GUID g;
+    wchar_t wgs[64] = {};
+    if (CoCreateGuid(&g) == S_OK && StringFromGUID2(g, wgs, 64) > 0) {
+        CreateDirectoryW(L"C:\\ProgramData\\SnailQuickSearch", NULL);   /* 已存在则无害失败 */
+        h = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD wr = 0;
+            WriteFile(h, wgs, (DWORD)(wcslen(wgs) * sizeof(wchar_t)), &wr, NULL);
+            CloseHandle(h);
+        }
+        return std::wstring(wgs) + SALT;   /* 文件写失败 (只读盘等) = 当次内存 GUID, 下次解不开按未配置 */
+    }
     return std::wstring(L"snail-ai-key-fallback");
 }
 static std::string XorSecret(const std::string& plain, const std::string& key) {
@@ -204,6 +234,10 @@ void HistSave() {
                     j += sh;
                     j += L",\"name\":";
                     j += W8(JsonEscapeUtf8(t.name).c_str());
+                    if (!t.argz.empty()) {
+                        j += L",\"argz\":";
+                        j += W8(JsonEscapeUtf8(t.argz).c_str());
+                    }
                     if (!t.mode.empty()) {
                         j += L",\"mode\":";
                         j += W8(JsonEscapeUtf8(t.mode).c_str());
@@ -215,6 +249,33 @@ void HistSave() {
                     if (!t.err.empty()) {
                         j += L",\"err\":";
                         j += W8(JsonEscapeUtf8(t.err.substr(0, 512)).c_str());
+                    }
+                    if (!t.adj.items.empty()) {
+                        /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
+                        j += L",\"adj\":{\"kind\":";
+                        j += std::to_wstring(t.adj.kind);
+                        j += L",\"win\":";
+                        j += W8(JsonEscapeUtf8(t.adj.win).c_str());
+                        j += L",\"items\":[";
+                        for (size_t aj = 0; aj < t.adj.items.size(); aj++) {
+                            const AiAdjustItem& it = t.adj.items[aj];
+                            if (aj) j += L",";
+                            j += L"{\"key\":";
+                            j += W8(JsonEscapeUtf8(it.key).c_str());
+                            j += L",\"val\":";
+                            j += W8(JsonEscapeUtf8(it.val).c_str());
+                            j += L",\"json\":";
+                            j += W8(JsonEscapeUtf8(W8(it.json.c_str())).c_str());
+                            wchar_t sb[48];
+                            swprintf(sb, 48, L",\"st\":%d", it.state);
+                            j += sb;
+                            if (!it.err.empty()) {
+                                j += L",\"err\":";
+                                j += W8(JsonEscapeUtf8(it.err.substr(0, 200)).c_str());
+                            }
+                            j += L"}";
+                        }
+                        j += L"]}";
                     }
                     if (!t.top.empty()) {
                         j += L",\"top\":[";
@@ -286,12 +347,32 @@ void HistLoad() {
                             const Jv* vm = jst.Get(L"ms");
                             t.elapsedMs = (vm && vm->t == 2) ? (long long)vm->num : -1;
                             t.name = jst.S(L"name");
+                            t.argz = jst.S(L"argz");
                             t.mode = jst.S(L"mode");
                             t.query = jst.S(L"query");
                             t.err = jst.S(L"err");
                             const Jv* jtp = jst.Get(L"top");
                             if (jtp && jtp->t == 4)
                                 for (auto& jp : jtp->arr) if (jp.t == 3) t.top.push_back(jp.str);
+                            const Jv* ja = jst.Get(L"adj");
+                            if (ja && ja->t == 5) {
+                                const Jv* jk = ja->Get(L"kind");
+                                t.adj.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
+                                t.adj.win = ja->S(L"win");
+                                const Jv* ji = ja->Get(L"items");
+                                if (ji && ji->t == 4)
+                                    for (auto& jai : ji->arr) {
+                                        if (jai.t != 5) continue;
+                                        AiAdjustItem it;
+                                        it.key = jai.S(L"key");
+                                        it.val = jai.S(L"val");
+                                        it.json = U8(jai.S(L"json"));
+                                        const Jv* js2 = jai.Get(L"st");
+                                        it.state = (js2 && js2->t == 2) ? (int)js2->num : 0;
+                                        it.err = jai.S(L"err");
+                                        t.adj.items.push_back(std::move(it));
+                                    }
+                            }
                             if (t.state < 2) {   /* 存档时的在途步骤 = 进程已结束, 折算为已中止 */
                                 t.state = 3;
                                 if (t.err.empty()) t.err = L"已中止";

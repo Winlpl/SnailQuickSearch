@@ -79,7 +79,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
 
 /* ==================== 工具栏 (标题 + 连接状态 + 按钮) ==================== */
 .ai-toolbar{display:flex;align-items:center;gap:12px;flex:0 0 auto;padding:16px 20px;border-bottom:1px solid var(--glass-border)}
-.ai-toolbar-title{color:var(--text-primary);font-size:20px;font-weight:600;white-space:nowrap}
+.ai-toolbar-title{color:var(--text-primary);font-size:20px;font-weight:600;white-space:nowrap;
+        flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .ai-toolbar-status{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:11px;color:var(--text-secondary)}
 .ai-status-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--text-tertiary)}
 .ai-status-dot[data-state="ready"]{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
@@ -265,6 +266,9 @@ textarea,input{user-select:text;-webkit-user-select:text}
               font-size:10px;letter-spacing:.4px;text-transform:uppercase}
 .ai-chip-go{flex:0 0 auto;font-size:10px;color:var(--text-tertiary);transition:color 120ms ease}
 .ai-chip:hover .ai-chip-go{color:var(--accent-violet)}
+/* 点击已发命令的瞬时确认 (600ms): 区分"命令没发出"与"宿主侧没执行" */
+.ai-chip.sent{border-color:var(--accent-violet);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-violet) 28%,transparent)}
+.ai-chip.sent .ai-chip-go{color:var(--accent-violet)}
 /* ---- 文件路径链接 (气泡正文自动识别 + 工具卡片样本): 单击打开, 右键菜单 ---- */
 .ai-path{color:var(--accent-cyan);border-bottom:1px dashed color-mix(in srgb,var(--accent-cyan) 48%,transparent);
          cursor:pointer;transition:color 120ms ease,border-bottom-color 120ms ease}
@@ -346,6 +350,18 @@ textarea,input{user-select:text;-webkit-user-select:text}
         font-size:11px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
 /* 策略询问 (卡上确认): 上分隔线 + 说明文字 + 允许/拒绝按钮 */
 .sask{padding:7px 8px 8px;border-top:1px solid var(--divider);color:var(--text-tertiary);font-size:11px;line-height:1.5}
+/* 待应用的调整 (AI 提案, 用户逐项 应用/忽略; 源样式对齐 .sask 一族) */
+.sadj{padding:7px 8px 8px;border-top:1px solid var(--divider);font-size:11px;line-height:1.6}
+.sadj-head{color:var(--text-tertiary);margin-bottom:3px}
+.sadj-it{display:flex;align-items:center;gap:6px;padding:2px 0;min-width:0}
+.sadj-k{flex:0 0 auto;color:var(--text-secondary)}
+.sadj-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-weight:600}
+.sadj-st{flex:0 0 auto;margin-left:auto;color:var(--text-tertiary);white-space:nowrap}
+.sadj-it.done .sadj-st{color:var(--accent-emerald)}
+.sadj-it.bad .sadj-st{color:var(--accent-pink)}
+.sadj-btns{flex:0 0 auto;display:flex;gap:4px;margin-left:8px;white-space:nowrap}
+.sadj-foot{display:flex;align-items:center;gap:6px;margin-top:4px;color:var(--text-tertiary)}
+.sadj-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .abtn{display:inline-flex;align-items:center;height:22px;margin:6px 6px 0 0;padding:0 9px;border:1px solid var(--glass-border);
 )AIWEBUI"
            LR"AIWEBUI(      border-radius:4px;background:var(--surface-raised);color:var(--text-secondary);font-size:11px;cursor:default;
@@ -398,6 +414,17 @@ textarea,input{user-select:text;-webkit-user-select:text}
                transition:background-color 120ms ease,color 120ms ease,border-color 120ms ease}
 .ai-suggestion:hover{border-color:color-mix(in srgb,var(--accent-violet) 45%,var(--glass-border));
                      background:var(--btn-secondary-hover);color:var(--text-primary)}
+.ai-donate-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px}
+.ai-donate{padding:0 2px;background:none;border:none;color:var(--text-tertiary);
+           font:inherit;font-size:11px;cursor:default;text-decoration:underline dotted;
+           transition:color 120ms ease}
+.ai-donate:hover{color:var(--accent-violet)}
+.ai-donate-sep{color:var(--text-tertiary);font-size:11px}
+
+/* ---- 捐赠二维码 (AI 经 get_donate_qr 工具拿到引用语法, 回答里的 ![..](xjs://donate?kind=..)
+   由 C++ md 渲染层换成缓存真图; 这里只管样式: 块级竖排居中 (屏幕窄不并列), 白底保扫得动) ---- */
+.ai-donate-qr{display:block;margin:10px auto;width:min(220px,62%);object-fit:contain;
+              background:#fff;border-radius:8px;padding:6px;cursor:default}
 
 /* ==================== 输入区 ====================
    整个区域文本指针: 留白也是"点一下就能继续打字"的地方 */
@@ -532,6 +559,17 @@ textarea,input{user-select:text;-webkit-user-select:text}
           transition:background 120ms ease,color 120ms ease}
 .ai-history-item-delete:hover{background:color-mix(in srgb,#e81123 14%,transparent);color:#e81123}
 .ai-history-empty{flex:0 0 auto;padding:18px 4px;font-size:12px;color:var(--text-tertiary);text-align:center}
+/* 窄面板分级收缩: ≤640 先隐状态文字 (保留连接色点) → ≤520 工具条按钮只留图标
+   (与 .icononly 同款内边距, 动作语义由 title 悬停提示保留); 标题可截断兜底,
+   任何宽度下右侧按钮都不得挤出可视区 */
+@media (max-width:640px){
+  #stText{display:none}
+}
+@media (max-width:520px){
+  .ai-toolbar{padding:12px;gap:10px}
+  .ai-btn{padding:0 9px}
+  .ai-btn .ellipsis-text{display:none}
+}
 /* 窄窗口: 侧边栏悬浮在对话区之上, 不再挤压主列 */
 @media (max-width:760px){
   .ai-history-sidebar{position:absolute;z-index:40;width:260px;flex-basis:260px;top:0;bottom:0;right:0;
@@ -566,7 +604,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
         <button class="ai-reason-toggle" id="f-reason" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>深度思考 (reasoning.effort=high)</button></div>
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <span class="ai-config-hint">密钥经混淆后只存在本机配置文件里，不会上传到别处；接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
+        <span class="ai-config-hint">密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出；接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
       <div class="ai-config-actions">
         <button class="ai-btn" id="b-cancel" type="button">取消</button>
         <button class="ai-btn ai-btn-primary" id="b-save" type="button">保存</button>
@@ -657,6 +695,11 @@ const EMPTY_HTML='<div class="ai-empty" id="empty">'
   +'<span class="ai-empty-title">用对话来查找和整理文件</span>'
   +'<span class="ai-empty-desc">我可以读取索引库的全部实时数据（文件名、路径、大小、时间、分类），直接执行搜索并打开文件；每一步工具调用都会以卡片展示。</span>'
   +'<div class="ai-suggestions">'+SUGGS.map(q=>'<button class="ai-suggestion" type="button">'+esc(q)+'</button>').join('')+'</div>'
+  +'<span class="ai-donate-row">'
+  +'<button class="ai-donate" type="button" data-q="介绍一下作者和这个软件">👤 关于作者</button>'
+  +'<span class="ai-donate-sep">·</span>'
+  +'<button class="ai-donate" type="button" data-q="我是土豪，我要捐赠">💛 我是土豪，我要捐赠</button>'
+  +'</span>'
   +'</div>';
 /* 文件操作权限四档 (对话级; 档位名 + 各档含义 — 权限必须能看懂每档会做什么) */
 const POLICY=[
@@ -805,15 +848,17 @@ function toolGroupHtml(k0,e2){
     else if(st.state===4)ask++;
     else done++;
   }
-  const open=S.toolGrp[key]!==undefined?S.toolGrp[key]:ask>0;
-  let sum=ask?('等待确认 × '+ask):(running?('执行中… × '+running)
-    :(failed?(failed+' 次失败'+(done?' · 完成 '+done:'')):('完成 '+done+' 次')));
   let cards='';
   for(let k=k0;k<e2;k++) cards+=S.msgs[k].html||'';
+  /* 含待确认卡/待应用调整卡的组默认展开 (按钮必须可达); 其余默认折叠 */
+  const wait=(cards.match(/data-act="adjApply"/g)||[]).length;
+  const open=S.toolGrp[key]!==undefined?S.toolGrp[key]:(ask>0||wait>0);
+  let sum=wait?('待应用 × '+wait):ask?('等待确认 × '+ask):(running?('执行中… × '+running)
+    :(failed?(failed+' 次失败'+(done?' · 完成 '+done:'')):('完成 '+done+' 次')));
   return '<div class="ai-toolgrp'+(open?' open':'')+'" data-k0="'+k0+'">'
     +'<button class="ai-toolgrp-head" type="button" data-act="toolgrp" aria-expanded="'+(open?'true':'false')+'">'
     +'<span class="ai-toolgrp-label">工具调用 · '+(e2-k0)+' 次</span>'
-    +'<span class="ai-toolgrp-sum'+(failed?' bad':(ask?' wait':''))+'">'+sum+'</span>'
+    +'<span class="ai-toolgrp-sum'+(failed?' bad':(ask||wait?' wait':''))+'">'+sum+'</span>'
     +'<span class="ai-toolgrp-arr glyph" aria-hidden="true">&#xE70D;</span>'
     +'</button><div class="ai-toolgrp-body">'+cards+'</div></div>';
 }
@@ -991,7 +1036,7 @@ function jumpTo(round){
  * [..](xjs://open|reveal?path=..) = 文件动作链接; 正文/样本里的绝对路径 = 自动文件链接
  * (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
  * enhance() 挂在每次消息 HTML 落地之后 (innerHTML 重建后节点全新, 幂等无需去重)。 */
-const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua'};
+const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua过滤','lua-exec':'Lua执行',lua_exec:'Lua执行'};
 /* 路径字符边界: 停在 空格/引号/尖括号/管道/星号/冒号/问号/正斜杠 + 全角标点与中文句读,
    其余 (含括号、逗号、点、&、汉字) 都是合法文件名字符, 种子照吞 —
    "美人鱼 (2016)\美人鱼 (2016).mkv"、"a, b & c.mkv" 才切得完整 */
@@ -1045,14 +1090,16 @@ function transformActionLinks(root){
     if(u.kind==='search'){
       const q=(u.p.text||'').trim()||a.textContent.trim();
       if(!q)return;
+      let mode=(u.p.mode||'').toLowerCase();
+      if(mode==='lua_exec')mode='lua-exec';   /* run_search 枚举变体归一: lua=过滤脚本, lua_exec=执行模式 (链接名 lua-exec) */
       const chip=document.createElement('div');
       chip.className='ai-chip';chip.setAttribute('role','button');
       chip.setAttribute('data-text',q);
-      if(u.p.mode)chip.setAttribute('data-mode',u.p.mode.toLowerCase());
+      if(mode)chip.setAttribute('data-mode',mode);
       chip.title='点击执行搜索: '+q+' · 右键更多操作';
       chip.innerHTML='<span class="ai-chip-ic glyph" aria-hidden="true">&#xE721;</span>'
         +'<span class="ai-chip-text">'+esc(a.textContent.trim()||q)+'</span>'
-        +(u.p.mode?'<span class="ai-chip-mode">'+esc(modeLabel(u.p.mode))+'</span>':'')
+        +(mode?'<span class="ai-chip-mode">'+esc(modeLabel(mode))+'</span>':'')
         +'<span class="ai-chip-go glyph" aria-hidden="true">&#xE768;</span>';
       a.replaceWith(chip);
     }else if(u.kind==='open'||u.kind==='reveal'){
@@ -1184,8 +1231,8 @@ function decodeHtml(s){const t=document.createElement('textarea');t.innerHTML=s;
 function copyTurn(mi){
   const m=S.msgs[mi];
   if(!m)return;
-  let text='';
-  if(m.html){const d=document.createElement('div');d.innerHTML=m.html;text=(d.textContent||'').trim();}
+  let text=String(m.t||'').trim();   /* 原始 Markdown = 事实源, 换行/列表/代码块结构全保留 */
+  if(!text&&m.html){const d=document.createElement('div');d.innerHTML=m.html;text=(d.textContent||'').trim();}
   if(!text&&m.reason)text=String(m.reason).trim();
   if(text)post({c:'copy',text});
 }
@@ -1194,10 +1241,17 @@ function bindThread(){
   inner.addEventListener('click',e=>{
     const sug=e.target.closest('.ai-suggestion');
     if(sug){if(!S.sending)post({c:'send',text:sug.textContent});return;}
-    /* 有非折叠选区 = 用户在拖选复制, 不当作点击 (路径/卡片误开防线) */
-    const hasSel=window.getSelection&&!window.getSelection().isCollapsed;
+    const dnt=e.target.closest('.ai-donate');
+    if(dnt){if(!S.sending)post({c:'send',text:dnt.getAttribute('data-q')||'关于作者'});return;}
+    /* 有非折叠选区 = 用户在拖选复制, 不当作点击 (路径误开防线)。
+       卡片不走此判定: .ai-chip 是 user-select:none, 点它不折叠既有选区 —
+       挂着选区(拖选/双击过正文后)的正常点击会被这里吞掉 = "点了没反应";
+       且卡片本身拖不出选区, mousedown/mouseup 异目标的拖选也不会派发 click 到卡片。 */
     const chip=e.target.closest('.ai-chip');
-    if(chip&&!hasSel){post({c:'search',text:chip.getAttribute('data-text')||'',mode:chip.getAttribute('data-mode')||''});return;}
+    if(chip){post({c:'search',text:chip.getAttribute('data-text')||'',mode:chip.getAttribute('data-mode')||''});
+      chip.classList.add('sent');setTimeout(function(){chip.classList.remove('sent');},600);
+      return;}
+    const hasSel=window.getSelection&&!window.getSelection().isCollapsed;
     const pth=e.target.closest('.ai-path');
     if(pth&&!hasSel){
       const act=pth.getAttribute('data-open')==='reveal'?'reveal':'open';
@@ -1222,6 +1276,11 @@ function bindThread(){
     if(ab){const act=ab.getAttribute('data-act');
       if(act==='authallow')post({c:'pallow'});
       else if(act==='authdeny')post({c:'pdeny'});
+      else if(act==='adjApply'||act==='adjIgnore'||act==='adjApplyAll'||act==='adjIgnoreAll'){
+        const box=ab.closest('.sadj'),it=ab.closest('.sadj-it');
+        if(box)post({c:'adj',act:act.slice(3).toLowerCase(),
+          mi:+box.getAttribute('data-mi'),si:+box.getAttribute('data-si'),
+          ii:it?(+it.getAttribute('data-ii')):-1});}
       return;}
     const st=e.target.closest('.step .shead');
     if(st){const card=st.closest('.step');const gi=+card.getAttribute('data-gi');const key=S.cur+':'+gi;
@@ -1314,6 +1373,9 @@ function sideToggle(open){
            LR"AIWEBUI(  if(!open)hideJumpTip();
   renderSide();
 }
+/* 侧栏悬浮模式 = 窄面板 (阈值与样式表 @media 同一口径 760px): 悬浮盖住对话区,
+   点外/失焦要收; 宽面板时停靠成布局列, 属常驻模式不随点外/失焦收 */
+function sideFloating(){return !!(window.matchMedia&&window.matchMedia('(max-width: 760px)').matches);}
 
 /* ==================== 输入区 ==================== */
 function autoSize(){
@@ -1369,6 +1431,7 @@ function renderPolicy(){
   });
 }
 function policySetOpen(open){
+  S.policyOpen=open;   /* 状态标志必须先落账: 点外收起/Escape/按钮切换全读它 (曾漏赋值=开关视觉正常但标志恒 false, 弹层永远关不掉) */
   const btn=$('policyBtn'),menu=$('policyMenu');
   btn.setAttribute('aria-expanded',open?'true':'false');
   clearTimeout(S.policyTimer);
@@ -1441,6 +1504,7 @@ function positionUsagePanel(){
   panel.style.top=Math.round(top)+'px';
 }
 function usageSetOpen(open){
+  S.usageOpen=open;   /* 同 policySetOpen: 状态标志先落账 */
   if(open){renderUsagePanel();positionUsagePanel();
     $('usagePanel').classList.add('visible');
     policySetOpen(false);   /* 互斥 */
@@ -1478,6 +1542,15 @@ function handle(m){
     case 'status':
       S.sending=!!m.sending;S.net=m.net;S.phase=m.phase||0;
       renderStatus();renderThread(true);renderComposer();renderSide();break;
+    case 'blur':
+      /* 浏览器焦点离开面板 (点击宿主/切走窗口): 收起瞬态弹层与悬浮侧栏。
+         面板外的点击 WebView2 收不到, 页面自己的点外关闭够不着, 由 C++ 补发;
+         停靠侧栏 (宽面板) 与设置面板是常驻模式, 不随焦点收 */
+      if(S.ctxOpen)hideCtx();
+      if(S.policyOpen)policySetOpen(false);
+      if(S.usageOpen)usageSetOpen(false);
+      if(S.sideOpen&&sideFloating())sideToggle(false);
+      break;
   }
 }
 function renderAll(){
@@ -1527,7 +1600,7 @@ function bind(){
     const row=e.target.closest('.ai-history-item');
     if(row){
       /* 窄窗口 (悬浮模式) 选中后收起侧栏, 露出对话区 */
-      if(window.matchMedia&&window.matchMedia('(max-width: 760px)').matches)sideToggle(false);
+      if(sideFloating())sideToggle(false);
       post({c:'load',id:+row.getAttribute('data-id')});
       try{ta.focus();}catch(err){}
     }
@@ -1536,6 +1609,8 @@ function bind(){
     if(S.ctxOpen&&!e.target.closest('#ctxMenu'))hideCtx();
     if(S.policyOpen&&!e.target.closest('#policy')&&!e.target.closest('#policyMenu'))policySetOpen(false);
     if(S.usageOpen&&!e.target.closest('#usagePanel')&&!e.target.closest('#usageBtn'))usageSetOpen(false);
+    /* 悬浮侧栏点外收起 (排除 #b-hist: 按钮自己的 click 负责开关, mousedown 先收会把它再弹开) */
+    if(S.sideOpen&&sideFloating()&&!e.target.closest('#side')&&!e.target.closest('#b-hist'))sideToggle(false);
   });
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){

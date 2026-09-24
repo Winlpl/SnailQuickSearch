@@ -282,10 +282,9 @@ void XjsSearchNow(bool commitHistory) {
     /* 防抖: 提交前快照已显示行ID; 上一场搜索未结束时不重采样 (此刻数组是过渡态, 保留旧快照) */
     if (!g_searching.load()) XjsDebounceSnapshot();
     int fingerprint = -1;
-    if (g_mode == XMODE_LUA)   /* -4 执行模式经 Query 提交 (引擎已移除专用入口) */
-        fingerprint = xjs_result_Query(g_result, kw.c_str(), XJS_KEYWORD_LUA_EXEC, FALSE);
-    else
-        fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], FALSE);
+    /* g_modeToKeyword 直接映射: Lua 过滤档=-3 谓词 / Lua 执行档=-4 执行 (引擎已移除专用入口,
+       两种 Lua 均经 Query 以类型提交) */
+    fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], FALSE);
     if (fingerprint != -1) {
         g_searching.store(true);   /* 重绘转用快照画, 完成/失败回调解除 */
         g_searchFingerprint = fingerprint;
@@ -310,6 +309,10 @@ void XjsSearchNow(bool commitHistory) {
         }
         SetWindowTextW(g_hWnd, text.empty() ? XjsT(L"应用.名称") : (text + L" - " + XjsT(L"应用.名称")).c_str());
         XjsPreviewUpdateSelection();
+    }
+    else {
+        /* 引擎拒绝提交 (fingerprint=-1): 不显示就等于"点了没反应", 用户无从排查 */
+        g_errText = XjsT(L"错误.查询提交失败");
     }
     XjsSearchWindow::Cur()->Invalidate();
 }
@@ -724,6 +727,29 @@ const wchar_t* XjsLangLabel(int lang) {
 }
 
 const wchar_t* XjsLangAutoLabel() { return XjsT(L"通用词.自动跟随系统"); }
+
+int XjsLangIndexFromCode(const wchar_t* code) { return code ? XjsLangFromCode(code) : XLANG_AUTO; }
+
+const char* XjsLangCodeUtf8(int lang) { return XjsLangToCode(lang); }
+
+/* 语言应用唯一入口 (设置页下拉与插件扩展 API 同落点): 写 owner 窗字段 → 落盘;
+   各搜索窗标题按**各自语言**刷新 (回调内 XjsWindowScope 切换), 托盘提示随主窗语言。
+   设置行模型重建/设置窗重绘是设置窗自身行为, 归调用方 (见 xjs_settings ACT_LANG 结果分支)。 */
+void XjsApplyUiLang(XjsSearchWindow* w, int lang) {
+    if (!w) return;
+    w->lang = lang;
+    XjsSaveConfig();
+    struct LangRefresh { static void Run(XjsSearchWindow* x) {
+        XjsWindowScope ws(x);   /* XjsT 解析到 x 自己的语言 */
+        const std::wstring& st = x->searchEd.text;
+        SetWindowTextW(x->hWnd, st.empty() ? XjsT(L"应用.名称")
+                                           : (st + L" - " + XjsT(L"应用.名称")).c_str());
+        x->Invalidate();
+    }};
+    XjsSearchWindow::ForEach(&LangRefresh::Run);
+    if (w->isMain)
+        XjsTrayAdd(XjsSearchWindow::MainHwnd());   /* 已入托盘时 = NIM_MODIFY 刷新提示 */
+}
 
 static void XjsCmToJson(const XjsCustomMode& cm, picojson::object& o) {
     o[K_M_ID] = picojson::value(Utf16ToUtf8(cm.id.c_str()));
@@ -1400,12 +1426,14 @@ static int XjsCmKeyword(const std::wstring& type) {
     if (type == L"regex") return XJS_KEYWORD_REGEX;
     if (type == L"sql") return XJS_KEYWORD_SQL;
     if (type == L"lua") return XJS_KEYWORD_LUA;
+    if (type == L"lua-exec") return XJS_KEYWORD_LUA_EXEC;   /* 单发路径; 不入标签链 (见 XjsHostedWordAsTag) */
     return XJS_KEYWORD_WILDCARD;
 }
 
-static const wchar_t* XjsCmStageModeByG(int mode) {   /* 当前全局模式 → 阶段"搜索模式"串 */
-    static const wchar_t* const N[4] = { L"通配符", L"正则", L"SQL", L"Lua" };
-    return (mode >= 0 && mode < 4) ? N[mode] : L"通配符";
+static const wchar_t* XjsCmStageModeByG(int mode) {   /* 当前全局模式 → 阶段"搜索模式"串
+   (Lua 执行是"脚本即整个搜索", 不是谓词, 进不了多重搜索链 — 链尾阶段归一 Lua 过滤) */
+    static const wchar_t* const N[5] = { L"通配符", L"正则", L"SQL", L"Lua", L"Lua" };
+    return (mode >= 0 && mode < 5) ? N[mode] : L"通配符";
 }
 
 /* ==================== 搜索框托管标签链 (源样式 26-hosted-search.js 一比一) ====================
@@ -1624,13 +1652,21 @@ bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput) {
     std::wstring keyLower = key;
     _wcslwr_s(&keyLower[0], keyLower.size() + 1);
     std::vector<std::wstring> srcIds;
+    XjsCustomMode execMode;                       /* Lua 执行类型 (type="lua-exec"): 不入链, 命中即单发 */
+    bool hasExec = false;
     const std::wstring win = XjsSearchWindow::Cur()->name;   /* 窗口专属模式仅其所属窗命中 (作用范围) */
     for (auto& cm : g_customModes) {
         if (!XjsCmApplies(cm, win)) continue;
         std::wstring n = XjsTrimWs(cm.name);
         if (n.empty()) continue;
         _wcslwr_s(&n[0], n.size() + 1);
-        if (n == keyLower) srcIds.push_back(cm.id);
+        if (n == keyLower) {
+            if (cm.type == L"lua-exec") {
+                if (!hasExec) { execMode = cm; hasExec = true; }   /* 同名多条取第一条 */
+                continue;   /* 执行型来源不参与标签链; 同名混有普通模式时标签只收普通来源 */
+            }
+            srcIds.push_back(cm.id);
+        }
     }
     /* 插件模板型模式并入来源 (同名合并一个标签多来源, 与用户模式同链; 接管型不入链) */
     for (int pm = 0; pm < XjsPluginModeCount(); pm++) {
@@ -1642,9 +1678,32 @@ bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput) {
         if (n.empty()) continue;
         _wcslwr_s(&n[0], n.size() + 1);
         if (n != keyLower) continue;
+        if (d->type == L"lua-exec") continue;   /* 执行型不入链 (与用户模式同口径; 指南约束外类型的防御) */
         XjsPluginBrief b;
         if (XjsPluginBriefAt(r.plugin, &b))
             srcIds.push_back(XjsPluginModeSrcId(b.id, r.modeIdx));
+    }
+    if (srcIds.empty() && hasExec) {
+        /* Lua 执行类型: "脚本即整个搜索", 引擎一期不进多重搜索链 — 不转标签, 命中即单发。
+           输入命中 (clearInput) = 模式名已被消费, 清框后模板按空词展开 (占位符等后续输入);
+           菜单点击 = 框内词交给模板 <keyword> 占位符 (模板无占位符则词无处安放, 不组链尾, 忽略)。
+           与普通搜索同口径: 单发前静默清掉残留标签链 */
+        XjsHostedClearTags();
+        std::wstring boxWord;
+        if (clearInput) {
+            XjsLineEdit& ed = XjsSearchWindow::Cur()->searchEd;
+            ed.text.clear();
+            ed.caret = 0; ed.anchor = -1; ed.scroll = 0; ed.dragging = false; ed.dirty = false;
+            g_errText.clear();
+        } else {
+            boxWord = XjsTrimWs(XjsSearchGetText());
+        }
+        bool found = false;
+        std::wstring q = XjsCmExpandTpl(execMode.tpl, boxWord, &found);
+        std::wstring titleWord = boxWord.empty() ? XjsTrimWs(execMode.name) : boxWord;
+        XjsHostedCommit(Utf16ToUtf8(q.c_str()), XjsCmKeyword(execMode.type), titleWord);
+        XjsSearchWindow::Cur()->Invalidate();
+        return true;
     }
     if (srcIds.empty()) return false;
     int idx = -1;
@@ -1739,10 +1798,10 @@ static int XjsViewIndexFromName(const std::wstring& s) {
     return VM_LIST;   /* 未知名回落列表视图 (原口径) */
 }
 
-/* 搜索模式名 ↔ 枚举 (每窗持久化口径 = g_modeIni 的 wildcard/regex/sql/lua, 与 XMODE_* 序一致):
+/* 搜索模式名 ↔ 枚举 (每窗持久化口径 = g_modeIni 的 wildcard/regex/sql/lua/lua-exec, 与 XMODE_* 序一致):
    载入两处 (顶层迁移种子 + 各窗口条目) 共用, 未知名回落通配符 */
 static int XjsModeIndexFromName(const std::wstring& s) {
-    for (int m = 0; m < 4; m++)
+    for (int m = 0; m < 5; m++)
         if (s == g_modeIni[m]) return m;
     return XMODE_WILDCARD;
 }

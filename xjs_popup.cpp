@@ -91,6 +91,26 @@ static float XjsPopupRowTail(const XjsPopupItem& it) {
     return it.editBtn ? XSF(62) : (it.delBtn ? XSF(34) : (it.children.empty() ? XSF(10) : XSF(22)));
 }
 
+/* sub(快捷键/模式描述)同行右对齐的让位宽度上限 (DIP, 使用处过 XSF): 超宽描述截尾画 "…",
+   保标题不被挤没 —— 菜单宽由调用方拍板不做内容测量, sub 曾按实测全宽让位,
+   长描述 (Lua 执行/自定义模式) 把标题矩形压成 0 宽 → 标题整行消失 (2026-09-24 实锤) */
+static const float XJS_POPUP_SUB_MAX = 190;
+
+/* sub 超宽的截尾省略 (按测量预截断文本, 两后端同源): tfKb 是 TRAILING 贴右的快捷键格式,
+   布局级 trimming 在该对齐下会掐头 (省略号打在开头), 故不裁矩形裁文本 */
+static std::wstring XjsPopupSubFit(const std::wstring& s, XjsFormat* fmt, float maxW) {
+    if (!fmt || s.empty() || XjsMeasureText(s.c_str(), fmt) <= maxW) return s;
+    std::wstring t = s;
+    while (!t.empty()) {
+        if (t.back() >= 0xD800 && t.back() <= 0xDBFF) t.pop_back();   /* 低半已去后尾悬高代理, 补去成对 */
+        if (t.empty()) break;
+        std::wstring probe = t + L"…";
+        if (XjsMeasureText(probe.c_str(), fmt) <= maxW) return probe;
+        t.pop_back();
+    }
+    return L"…";
+}
+
 /* 子面板行布局 + 宽度 (按内容实测, 夹在 140~320 逻辑 px; tfTitle 未建时取下限) */
 static void XjsPopupLayoutSub(XjsPopupState* p) {
     const std::vector<XjsPopupItem>& ch = *p->subItems;
@@ -105,11 +125,12 @@ static void XjsPopupLayoutSub(XjsPopupState* p) {
         for (auto& it : ch) {
             if (it.title.empty()) continue;
             /* 行内容宽 = 左缩进 + 标题 + 快捷键段 + 右让位 (与 drawRow 几何同源);
-               漏算快捷键 = 标题省略号右缘正好压在快捷键上 (窗口启动器子菜单"新建空白窗口 Ctrl+N"实锤) */
+               漏算快捷键 = 标题省略号右缘正好压在快捷键上 (窗口启动器子菜单"新建空白窗口 Ctrl+N"实锤);
+               sub 让位与绘制侧同钳 XJS_POPUP_SUB_MAX, 超宽描述不把子面板白白撑到上限 */
             float need = pad * 2 + XjsPopupRowIndent(it)
                        + XjsMeasureText(it.title.c_str(), p->tfTitle) + XjsPopupRowTail(it);
             if (!it.sub.empty() && it.children.empty() && p->tfKb)
-                need += XjsMeasureText(it.sub.c_str(), p->tfKb) + XSF(12);
+                need += xf_min(XjsMeasureText(it.sub.c_str(), p->tfKb), XSF(XJS_POPUP_SUB_MAX)) + XSF(12);
             if (need > tw) tw = need;
         }
     }
@@ -480,12 +501,21 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 /* 单行: 标题 + 快捷键同行右对齐 (同源样式 .ctx-kb margin-left:auto; 原先画成第二行=换行);
                    尾部让位: ✎✕ 双按钮 (右缩 62) / 仅 ✎ (34) / 子菜单父项 (▸ 箭头 22) */
                 float trR = x1 - XjsPopupRowTail(it);
-                /* 标题矩形右缘给快捷键让位: 两者同矩形时省略号打满的行会让标题末字压在快捷键下 */
-                float kbW = hasKb ? XjsMeasureText(it.sub.c_str(), p->tfKb) : 0;
+                /* 标题矩形右缘给快捷键让位: 两者同矩形时省略号打满的行会让标题末字压在快捷键下;
+                   超宽 sub 钳上限 (再按行内宽 60% 兜底, 窄菜单标题至少留 40%) 并截尾 "…" —
+                   全宽让位曾把标题矩形压成 0 宽 → 标题整行消失 (Lua 执行/自定义模式长描述实锤) */
+                float kbW = 0;
+                std::wstring subFit;
+                if (hasKb) {
+                    kbW = xf_min(XjsMeasureText(it.sub.c_str(), p->tfKb), XSF(XJS_POPUP_SUB_MAX));
+                    float rowW = trR - tx;
+                    if (kbW > rowW * 0.6f) kbW = rowW * 0.6f;
+                    subFit = XjsPopupSubFit(it.sub, p->tfKb, kbW);
+                }
                 XjsRect tr = XjsRectF(tx, y0, trR - (hasKb ? kbW + XSF(12) : 0), y1);
                 p->rt->DrawText(it.title.c_str(), (UINT32)it.title.length(), p->tfTitle, tr, tb);
                 if (hasKb)
-                    p->rt->DrawText(it.sub.c_str(), (UINT32)it.sub.length(), p->tfKb,
+                    p->rt->DrawText(subFit.c_str(), (UINT32)subFit.length(), p->tfKb,
                                     XjsRectF(tx, y0, trR, y1), p->brDim);
                 if (hasChildren) {
                     /* 右缘 ▸ 子菜单指示 (两段折线, 悬停行随文字同色系) */

@@ -366,7 +366,8 @@ static const XjsCustomMode* XjsHostedCmById(const std::wstring& id) {
 static const wchar_t* XjsHostedTypeName(const std::wstring& type) {
     if (type == L"regex") return XjsT(L"搜索模式.正则表达式");
     if (type == L"sql") return L"SQL";
-    if (type == L"lua") return XjsT(L"搜索模式.Lua脚本");
+    if (type == L"lua") return XjsT(L"搜索模式.Lua过滤");
+    if (type == L"lua-exec") return XjsT(L"搜索模式.Lua执行");
     return XjsT(L"搜索模式.通配符");
 }
 /* × 圆钮矩形 (右缘内缩 padR: 多来源 4 / 单来源 3, 源样式 .multi-src padding-right) */
@@ -1027,7 +1028,7 @@ bool XjsChromeMouseUp(POINT pt) {
             XjsSearchYieldKeys();   /* 弹下拉菜单: 键交列表, 光标不灭 (菜单非输入框) */
             std::vector<XjsPopupItem> items;
             items.push_back({ 0, XjsT(L"菜单.搜索模式"), L"", false, false, true, false });
-            for (int m = 0; m < 4; m++)
+            for (int m = 0; m < 5; m++)
                 items.push_back({ IDM_MODE_BASE + m, g_modeName[m], g_modeDesc[m], m == g_mode, false, false, false });
             /* 用户自定义模式 (点击=模板提交, <keyword> 换搜索框输入; 有未被占位符消费的输入词=模板+输入词
                多重搜索; 尾部✎编辑 ✕删除, 源样式同款)
@@ -1241,7 +1242,7 @@ void XjsShowToolboxMenu() {
  * 状态 g_modeDlg 归所属窗口类 (XjsSearchWindow::modeDlg) — 状态绑窗不落全局 (用户红线)。 */
 
 struct XjsModeDlgRects {
-    XjsRect card{}, name{}, desc{}, tpl{}, type[4]{}, scope[2]{}, ok{}, cancel{}, del{};
+    XjsRect card{}, name{}, desc{}, tpl{}, type[5]{}, scope[2]{}, ok{}, cancel{}, del{};
 };
 
 static void XjsMdlgLayout(float W, float H, XjsModeDlgRects* R) {
@@ -1261,10 +1262,10 @@ static void XjsMdlgLayout(float W, float H, XjsModeDlgRects* R) {
     };
     fieldRow(R->name);
     fieldRow(R->desc);
-    y += labelH + 4 * s;                              /* 类型段 */
+    y += labelH + 4 * s;                              /* 类型段 (通配符/正则/SQL/Lua 过滤/Lua 执行) */
     {
-        float segW = (rx - lx - 3 * 6 * s) / 4;
-        for (int i = 0; i < 4; i++)
+        float segW = (rx - lx - 4 * 6 * s) / 5;
+        for (int i = 0; i < 5; i++)
             R->type[i] = XjsRectF(lx + i * (segW + 6 * s), y, lx + i * (segW + 6 * s) + segW, y + 28 * s);
     }
     y = R->type[0].bottom + gap;
@@ -1295,13 +1296,14 @@ static const wchar_t* XjsMdlgTip(int type) {
         case 0: return XjsT(L"搜索框.提示通配符");
         case 1: return XjsT(L"搜索框.提示正则");
         case 3: return XjsT(L"搜索框.提示Lua");
+        case 4: return XjsT(L"搜索框.提示LuaExec");
         default: return XjsT(L"搜索框.提示SQL");
     }
 }
 
 static const wchar_t* XjsMdlgTypeName(int type) {
     /* 译文指针每次现取: static 数组会冻结首调时的表内指针, 换语言重装表后即悬垂 */
-    const wchar_t* N[4] = { XjsT(L"搜索模式.通配符"), XjsT(L"搜索模式.正则"), L"SQL", L"Lua" };
+    const wchar_t* N[5] = { XjsT(L"搜索模式.通配符"), XjsT(L"搜索模式.正则"), L"SQL", L"Lua", XjsT(L"搜索模式.Lua执行") };
     return N[type];
 }
 
@@ -1309,6 +1311,7 @@ static int XjsMdlgTypeIndex(const std::wstring& t) {   /* 类型串 → 段下�
     if (t == L"regex") return 1;
     if (t == L"sql") return 2;
     if (t == L"lua") return 3;
+    if (t == L"lua-exec") return 4;
     return 0;
 }
 
@@ -1338,7 +1341,7 @@ static void XjsMdlgSave(HWND hwnd) {
         d.tplEd.SetFocused(hwnd, true);
         return;
     }
-    static const wchar_t* const TYPES[4] = { L"wildcard", L"regex", L"sql", L"lua" };
+    static const wchar_t* const TYPES[5] = { L"wildcard", L"regex", L"sql", L"lua", L"lua-exec" };
     if (d.edit) {
         for (auto& cm : g_customModes) {
             if (cm.id == d.editId) {
@@ -1426,14 +1429,15 @@ bool XjsModeDlgMouseDown(POINT pt) {
     XjsModeDlgRects R;
     XjsMdlgLayout((float)crc.right, (float)crc.bottom, &R);
     if (XjsEditFieldMouseDown(g_hWnd, pt)) return true;   /* 三个字段 (点外自动失焦) */
-    /* 命令控件: 按下只记待定 (松开触发口径), 松开仍命中同一控件才执行 */
-    for (int i = 0; i < 4; i++)
+    /* 命令控件: 按下只记待定 (松开触发口径), 松开仍命中同一控件才执行
+       (pressCmd 编码: 1..5=类型段 6..7=作用范围段 8=取消 9=保存 10=删除) */
+    for (int i = 0; i < 5; i++)
         if (XjsPtIn(R.type[i], pt)) { d.pressCmd = 1 + i; return true; }
     for (int i = 0; i < 2; i++)
-        if (XjsPtIn(R.scope[i], pt)) { d.pressCmd = 5 + i; return true; }
-    if (XjsPtIn(R.cancel, pt)) { d.pressCmd = 7; return true; }
-    if (XjsPtIn(R.ok, pt)) { d.pressCmd = 8; return true; }
-    if (d.edit && XjsPtIn(R.del, pt)) { d.pressCmd = 9; return true; }
+        if (XjsPtIn(R.scope[i], pt)) { d.pressCmd = 6 + i; return true; }
+    if (XjsPtIn(R.cancel, pt)) { d.pressCmd = 8; return true; }
+    if (XjsPtIn(R.ok, pt)) { d.pressCmd = 9; return true; }
+    if (d.edit && XjsPtIn(R.del, pt)) { d.pressCmd = 10; return true; }
     if (!XjsPtIn(R.card, pt)) { XjsMdlgClose(); XjsSearchWindow::Cur()->Invalidate(); return true; }   /* 点遮罩空白关闭 */
     d.delConfirm = false;   /* 点卡片其它区域: 重置删除确认态 (源样式 resetModeDel) */
     XjsSearchWindow::Cur()->Invalidate();
@@ -1451,23 +1455,23 @@ bool XjsModeDlgMouseUp(POINT pt) {
     XjsModeDlgRects R;
     XjsMdlgLayout((float)crc.right, (float)crc.bottom, &R);
     bool hit = false;
-    if (cmd >= 1 && cmd < 5) hit = XjsPtIn(R.type[cmd - 1], pt);
-    else if (cmd >= 5 && cmd < 7) hit = XjsPtIn(R.scope[cmd - 5], pt);
-    else if (cmd == 7) hit = XjsPtIn(R.cancel, pt);
-    else if (cmd == 8) hit = XjsPtIn(R.ok, pt);
-    else if (cmd == 9 && d.edit) hit = XjsPtIn(R.del, pt);
+    if (cmd >= 1 && cmd < 6) hit = XjsPtIn(R.type[cmd - 1], pt);
+    else if (cmd >= 6 && cmd < 8) hit = XjsPtIn(R.scope[cmd - 6], pt);
+    else if (cmd == 8) hit = XjsPtIn(R.cancel, pt);
+    else if (cmd == 9) hit = XjsPtIn(R.ok, pt);
+    else if (cmd == 10 && d.edit) hit = XjsPtIn(R.del, pt);
     if (!hit) return true;   /* 拖离原控件 = 取消 */
-    if (cmd >= 1 && cmd < 5) {
+    if (cmd >= 1 && cmd < 6) {
         d.type = cmd - 1;
         d.delConfirm = false;
-    } else if (cmd >= 5 && cmd < 7) {
-        d.scope = cmd - 5;
+    } else if (cmd >= 6 && cmd < 8) {
+        d.scope = cmd - 6;
         d.delConfirm = false;
-    } else if (cmd == 7) {
-        XjsMdlgClose();
     } else if (cmd == 8) {
-        XjsMdlgSave(g_hWnd);
+        XjsMdlgClose();
     } else if (cmd == 9) {
+        XjsMdlgSave(g_hWnd);
+    } else if (cmd == 10) {
         if (!d.delConfirm) {
             d.delConfirm = true;   /* 首击: 变红"确定删除" (源样式 toggleModeDel) */
         } else {
@@ -1578,7 +1582,7 @@ void XjsModeDlgRender(XjsRt* rt, float w, float h) {
     fieldRow(XjsT(L"模式对话框.简介"), R.desc, d.descEd);
     /* 类型段 */
     label(XjsT(L"模式对话框.类型"), R.card.left + pad, R.type[0].top - XSF(22));
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         bool act = d.type == i;
         rt->FillRoundedRectangle(XjsRoundedRectF(R.type[i], XSF(8), XSF(8)), act ? g_br[XTH_ACCENT_SOFT] : g_br[XTH_PANEL2]);
         rt->DrawRoundedRectangle(XjsRoundedRectF(R.type[i], XSF(8), XSF(8)), act ? g_br[XTH_ACCENT] : g_br[XTH_BORDER], 1.0f);

@@ -393,7 +393,7 @@ static void XjsBackdropEndBlur(XjsRt* rt, const RECT& cr) {
 }
 
 void XjsOnPopupResult(int id) {
-    if (id >= IDM_MODE_BASE && id < IDM_MODE_BASE + 4) {
+    if (id >= IDM_MODE_BASE && id < IDM_MODE_BASE + 5) {
         g_mode = id - IDM_MODE_BASE;
         XjsSaveConfig();
         XjsSearchNow(false);
@@ -1408,7 +1408,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 /* 错误串解析 (JSON "错误信息" 键 / 原文) 收口在 XjsEngineErrText */
                 std::wstring errMsg = XjsEngineErrText(*err);
                 /* 源样式错误状态文案按模式区分 (LuaErrorStatus/SqlErrorStatus/RegexErrorStatus) */
-                if (g_mode == XMODE_LUA) g_errText = XjsFmt(XjsT(L"错误.Lua前缀"), errMsg);
+                if (g_mode == XMODE_LUA || g_mode == XMODE_LUA_EXEC) g_errText = XjsFmt(XjsT(L"错误.Lua前缀"), errMsg);
                 else if (g_mode == XMODE_SQL) g_errText = XjsFmt(XjsT(L"错误.SQL前缀"), errMsg);
                 else if (g_mode == XMODE_REGEX) g_errText = XjsFmt(XjsT(L"错误.正则前缀"), errMsg);
                 else g_errText = XjsFmt(XjsT(L"错误.搜索失败前缀"), errMsg);

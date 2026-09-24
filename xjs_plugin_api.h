@@ -52,7 +52,8 @@ void PluginJsonEscape(const std::string& s, std::string* out);
 std::string PluginJsonStr(const std::string& s);
 
 /* ---- 关键词模式名↔值 (xjs_plugin.cpp 接线 SearchSetText 的 mode 参数用) ----
-   名串与 settings.set "搜索模式"/配置文件同源 ("wildcard|regex|sql|lua"); 非法名 = -1。
+   名串与 settings.set "搜索模式"/配置文件同源 ("wildcard|regex|sql|lua|lua-exec",
+   与 XMODE_* 序一致); 非法名 = -1。
    应用口径在 xjs_plugin.cpp 侧与设置页同款: 写 w->mode + XjsSaveConfig, 重搜时机按 execute。 */
 int XjsPluginApiKeyModeIndexFromUtf8(const std::wstring& s);
 

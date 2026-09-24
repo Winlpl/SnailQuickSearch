@@ -102,6 +102,7 @@ struct HCtx {
     std::wstring codeRaw;      /* 代码块原文 (data-code 属性, 复制按钮用) */
     int codeIdx = 0;           /* 代码块占位序号 (leave 时回填原文) */
     size_t pStart = 0;         /* 当前 <p> 的写出位置 (小标题改写用) */
+    int imgSkip = 0;           /* >0 = 正在渲染捐赠二维码 img, alt 文本不重复输出 */
 };
 
 static std::wstring MdUtf8(const char* s, MD_SIZE n) {
@@ -290,7 +291,28 @@ static int HEnterSpan(MD_SPANTYPE type, void* detail, void* ud) {
             c->out += L"\">";
             break;
         }
-        case MD_SPAN_IMG: break;   /* 图片降级为 alt 文本 (内层文本照常进正文) */
+        case MD_SPAN_IMG: {
+            /* 模型输出里的 ![捐赠码](xjs://donate?kind=..) = get_donate_qr 工具教它的引用语法:
+               渲染层在此把引用换成缓存的 data URL 真图 (图片本体从不进对话通道)。
+               其它图片维持降级为 alt 文本 */
+            MD_SPAN_A_DETAIL* d = (MD_SPAN_A_DETAIL*)detail;   /* IMG detail 前两个字段与 A 同构 (href/title) */
+            std::wstring href = MdUtf8((const char*)d->href.text, (MD_SIZE)d->href.size);
+            if (href.rfind(L"xjs://donate?kind=", 0) == 0) {
+                std::wstring kind = href.substr(18);
+                bool wechat = kind == L"wechat";
+                if (wechat || kind == L"alipay") {
+                    std::wstring url = DonateQrDataUrl(wechat ? 0 : 1);
+                    if (!url.empty()) {
+                        c->out += L"<img class=\"ai-donate-qr\" src=\"";
+                        HtmlEscape(&c->out, url);
+                        c->out += wechat ? L"\" alt=\"微信捐赠码\">" : L"\" alt=\"支付宝捐赠码\">";
+                        c->imgSkip++;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
         default: break;
     }
     return 0;
@@ -303,6 +325,7 @@ static int HLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* ud) {
         case MD_SPAN_CODE: c->out += L"</code>"; break;
         case MD_SPAN_DEL: c->out += L"</del>"; break;
         case MD_SPAN_A: c->out += L"</a>"; break;
+        case MD_SPAN_IMG: if (c->imgSkip) c->imgSkip--; break;   /* 捐赠二维码 img 已写完, 恢复 alt 文本输出 */
         default: break;
     }
     return 0;
@@ -319,6 +342,7 @@ static int HText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) 
             HtmlEscape(&c->out, w);
             break;
         case MD_TEXT_NORMAL:
+            if (c->imgSkip) break;   /* 捐赠二维码 img 的 alt 内文不重复渲染 (图已带 alt 属性) */
             if (c->inCode) c->codeRaw += w;
             HtmlEscape(&c->out, w);
             break;
@@ -328,6 +352,68 @@ static int HText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) 
         default: break;   /* HTML/NULLCHAR 丢弃 (不渲染模型输出里的裸 HTML) */
     }
     return 0;
+}
+
+/* ---- 解析前归一化: 表头行前补空行 ----
+ * md4c 的表格判定要求表头行是"恰好 1 行的段落"(md4c.c: 分隔行只在当前块仅 1 行时生效)。
+ * 模型高频把加粗引导行直接贴着表头写 — 表头成了该段落的懒续行, 轮到 |---| 分隔行时
+ * 段落已有 2 行, 表格判定短路, 整表退化成带竖线的纯文本。只在
+ * "非空非表格行 / | 表头 | / |---|" 三行相邻时插入一个空行, 代码围栏内不动。 */
+static bool MdLineIsTableRow(const std::wstring& s) {
+    size_t b = s.find_first_not_of(L" \t");
+    return b != std::wstring::npos && b <= 3 && s[b] == L'|';
+}
+static bool MdLineIsTableDelimiter(const std::wstring& s) {
+    size_t b = s.find_first_not_of(L" \t"), e = s.find_last_not_of(L" \t");
+    if (b == std::wstring::npos) return false;
+    bool bar = false, dash = false;
+    for (size_t i = b; i <= e; i++) {
+        wchar_t c = s[i];
+        if (c == L'|') bar = true;
+        else if (c == L'-') dash = true;
+        else if (c != L':' && c != L' ' && c != L'\t') return false;   /* 分隔行只许 | - : 与空白 */
+    }
+    return bar && dash;
+}
+static std::wstring MdNormalizeTables(const std::wstring& text) {
+    if (text.find(L'|') == std::wstring::npos) return text;
+    std::vector<std::wstring> lines;   /* 切行 (吃 \r; 重建时统一 \n, 只喂解析器无妨) */
+    size_t pos = 0;
+    for (;;) {
+        size_t nl = text.find(L'\n', pos);
+        std::wstring ln = (nl == std::wstring::npos) ? text.substr(pos)
+                                                     : text.substr(pos, nl - pos);
+        if (!ln.empty() && ln.back() == L'\r') ln.pop_back();
+        lines.push_back(ln);
+        if (nl == std::wstring::npos) break;
+        pos = nl + 1;
+    }
+    std::vector<char> fenced(lines.size(), 0);   /* 该行之前是否处于 ``` / ~~~ 围栏内 */
+    wchar_t fence = 0;
+    for (size_t i = 0; i < lines.size(); i++) {
+        fenced[i] = fence != 0;
+        size_t b = lines[i].find_first_not_of(L" \t");
+        if (b == std::wstring::npos || lines[i].size() - b < 3) continue;
+        wchar_t c = lines[i][b];
+        if ((c == L'`' || c == L'~') && lines[i][b + 1] == c && lines[i][b + 2] == c)
+            fence = (fence == 0) ? c : (c == fence ? (wchar_t)0 : fence);
+    }
+    std::wstring out;
+    out.reserve(text.size() + 16);
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (i >= 1 && i + 1 < lines.size() &&
+            !fenced[i] && !fenced[i - 1] && !fenced[i + 1] &&
+            MdLineIsTableRow(lines[i]) && MdLineIsTableDelimiter(lines[i + 1]) &&
+            !MdLineIsTableRow(lines[i - 1]) &&
+            !lines[i - 1].empty() &&
+            lines[i - 1].find_first_not_of(L" \t") != std::wstring::npos)
+        {
+            out += L'\n';
+        }
+        out += lines[i];
+        out += L'\n';
+    }
+    return out;
 }
 
 /* md4c 解析失败返回 false (调用方兜底: 原文按代码块呈现, 内容不丢) */
@@ -342,7 +428,7 @@ bool MdToHtml(const std::wstring& text, std::wstring* out) {
     p.enter_span = HEnterSpan;
     p.leave_span = HLeaveSpan;
     p.text = HText;
-    std::string u8 = U8(text);
+    std::string u8 = U8(MdNormalizeTables(text));
     if (md_parse(u8.c_str(), (MD_SIZE)u8.size(), &p, &ctx) != 0) return false;
     *out = ctx.out;
     return true;
@@ -364,6 +450,24 @@ static std::wstring StepStatText(const AiToolStep& st) {
     return L"✕ 失败";
 }
 
+/* 工具卡片徽标 (kind 与 ai_assistant.h AiToolStep 注释一致) */
+static const wchar_t* StepBadge(int kind) {
+    switch (kind) {
+        case 0: return L"搜索";
+        case 1: return L"打开";
+        case 2: return L"复制";
+        case 3: return L"设置";
+        case 4: return L"窗口";
+        case 5: return L"搜索框";
+        case 6: return L"模式";
+        case 7: return L"插件";
+        case 8: return L"皮肤";
+        case 9: return L"规范";
+        case 10: return L"关于";
+    }
+    return L"工具";
+}
+
 /* role==2 工具卡片组 (旧 .ai-cmd-entry 口径; 查询展示截 200 字符 — 浏览器端折行,
    卡头不因超长脚本无限增高); state==4 带确认按钮; 样本列表默认收起 (JS 按展开态回放) */
 static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
@@ -373,11 +477,11 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
         swprintf(b, 64, L"<div class=\"step%s\" data-gi=\"%d\">", st.state == 3 ? L" failed" : L"", mi);
         *out += b;
         *out += L"<div class=\"shead\"><span class=\"sbadge\">";
-        std::wstring badge = st.kind == 0 ? L"搜索" : st.kind == 1 ? L"打开" : st.kind == 2 ? L"复制" : L"工具";
-        HtmlEscape(out, badge);
+        HtmlEscape(out, StepBadge(st.kind));
         *out += L"</span><span class=\"scmd\">";
         std::wstring cmd = (st.kind == 0 && !st.query.empty()) ? st.query
-                         : (st.name.empty() ? L"工具" : st.name);
+                         : (!st.argz.empty() ? (st.name.empty() ? st.argz : st.name + L" " + st.argz)
+                                             : (st.name.empty() ? L"工具" : st.name));
         if (cmd.size() > 200) { cmd.resize(200); cmd += L"…"; }
         HtmlEscape(out, cmd);
         *out += L"</span><span class=\"sst";
@@ -396,6 +500,55 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             *out += L"<div class=\"sout\">";
             HtmlEscape(out, st.err);
             *out += L"</div>";
+        }
+        if (!st.adj.items.empty()) {
+            /* 待应用的调整: AI 提案逐项列出, 用户点 应用/忽略 才执行 (WebCommand "adj")。
+               只渲染会话份步骤的状态 — 泵不比对 adj 字段, 用户裁决不会被 worker 镜像回写 */
+            int pend = 0, okn = 0, ign = 0, bad = 0;
+            for (auto& it : st.adj.items) {
+                if (it.state == 0) pend++;
+                else if (it.state == 1) okn++;
+                else if (it.state == 2) ign++;
+                else bad++;
+            }
+            swprintf(b, 64, L"<div class=\"sadj\" data-mi=\"%d\" data-si=\"%d\">", mi, (int)si);
+            *out += b;
+            *out += L"<div class=\"sadj-head\">";
+            *out += pend ? L"⏳ 待应用的调整 — 点「应用」才会生效" : L"待应用的调整 — 已处理完";
+            *out += L"</div>";
+            for (size_t ai = 0; ai < st.adj.items.size(); ai++) {
+                const AiAdjustItem& it = st.adj.items[ai];
+                *out += L"<div class=\"sadj-it";
+                if (it.state == 1) *out += L" done";
+                else if (it.state == 3) *out += L" bad";
+                *out += L"\" data-ii=\"";
+                swprintf(b, 32, L"%d", (int)ai);
+                *out += b;
+                *out += L"\"><span class=\"sadj-k\">";
+                HtmlEscape(out, it.key);
+                *out += L" → </span><span class=\"sadj-v\">";
+                HtmlEscape(out, it.val);
+                *out += L"</span><span class=\"sadj-st\">";
+                if (it.state == 1) *out += L"✓ 已应用";
+                else if (it.state == 2) *out += L"已忽略";
+                else if (it.state == 3) { *out += L"✕ "; HtmlEscape(out, it.err); }
+                *out += L"</span>";
+                if (it.state == 0) {
+                    *out += L"<span class=\"sadj-btns\"><span class=\"abtn\" data-act=\"adjIgnore\">忽略</span>"
+                            L"<span class=\"abtn primary\" data-act=\"adjApply\">应用</span></span>";
+                }
+                *out += L"</div>";
+            }
+            *out += L"<div class=\"sadj-foot\">";
+            wchar_t sum[80];
+            swprintf(sum, 80, L"<span class=\"sadj-sum\">共 %d 项 · 待应用 %d · 已应用 %d · 已忽略 %d</span>",
+                     (int)st.adj.items.size(), pend, okn, ign);
+            *out += sum;
+            if (pend) {
+                *out += L"<span class=\"sadj-btns\"><span class=\"abtn\" data-act=\"adjIgnoreAll\">全部忽略</span>"
+                        L"<span class=\"abtn primary\" data-act=\"adjApplyAll\">全部应用</span></span>";
+            }
+            *out += L"</div></div>";
         }
         if (!st.top.empty()) {
             *out += L"<div class=\"ssamples\" style=\"display:none\">";
@@ -582,13 +735,46 @@ static void WebCreateControllersPending() {
 
 /* ---- 子窗口 (面板内容区大小; WebView2 控制器的父) ---- */
 
+/* 焦点对账心跳 (250ms, WM_TIMER 驱动): 控制器 GotFocus/LostFocus 之外的自愈网 —
+   plugPanelKey (双光标防线/键盘路由闸) 必须与浏览器真实焦点强同步, 事件竞态丢失时
+   按 GetFocus 实测归位 (浏览器持焦 = 搜索框光标让位; 焦点在宿主 = 归还键盘) */
+static void WebPost(AiSess* s, const std::string& jsonUtf8);   /* 前置 (实现在"推送"节) */
+
+/* 焦点借出/归还的统一落点 (LostFocus 事件与心跳两路都汇到这里):
+   同步宿主键盘路由之外, 归还时给页面推一条 blur — 面板外的宿主点击 (文件列表/
+   搜索框/状态栏) WebView2 根本收不到, JS 的 document mousedown 点外收起够不着,
+   不推这条, 权限下拉/用量浮层/右键菜单在点击面板外后就一直挂着 */
+static void WebFocusApply(AiSess* s, bool has) {
+    AiWebCtx* w = (AiWebCtx*)s->web;
+    if (!w || !HOST_PANEL_OK || !g_host) return;
+    if (has == w->focusBorrowed) return;   /* 值不变不重发 */
+    w->focusBorrowed = has;
+    g_host->PanelSetFocus(g_ctx, s->tok, has ? 1 : 0);
+    if (!has) WebPost(s, "{\"t\":\"blur\"}");
+}
+
+static void WebFocusTick(AiSess* s) {
+    if (!s || !s->inUse || !s->web || !HOST_PANEL_OK || !g_host) return;
+    AiWebCtx* w = (AiWebCtx*)s->web;
+    if (!w || !w->hwnd) return;
+    HWND f = GetFocus();
+    WebFocusApply(s, f && IsChild(w->hwnd, f));
+}
+
 static LRESULT CALLBACK AiWebChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ERASEBKGND:
             return 1;   /* 底色由 WebView2 DefaultBackgroundColor 出, 免白闪 */
+        case WM_TIMER:
+            if (wParam == 1) { WebFocusTick((AiSess*)GetWindowLongPtrW(hwnd, GWLP_USERDATA)); return 0; }
+            break;
+        case WM_DESTROY:
+            KillTimer(hwnd, 1);
+            break;
         default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            break;
     }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 void WebInit() {
@@ -690,14 +876,11 @@ struct WebFocusHandler : ICoreWebView2FocusChangedEventHandler {
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2Controller* sender, IUnknown* args) override {
         (void)sender; (void)args;
         /* 浏览器真实焦点 ↔ 宿主键盘路由/双光标防线 (plugPanelKey) 同步:
-           聚焦 = 借键盘 (搜索框让路), 失焦 = 归还 — 值不变不重发 */
+           聚焦 = 借键盘 (搜索框让路), 失焦 = 归还 + 通知 JS 收瞬态弹层 */
         AiWebCtx* w = (AiWebCtx*)s->web;
-        if (!w || !HOST_PANEL_OK || !g_host) return S_OK;
+        if (!w || !w->hwnd) return S_OK;
         bool has = w->hwnd && GetFocus() && IsChild(w->hwnd, GetFocus());
-        if (has != w->focusBorrowed) {
-            w->focusBorrowed = has;
-            g_host->PanelSetFocus(g_ctx, s->tok, has ? 1 : 0);
-        }
+        WebFocusApply(s, has);
         return S_OK;
     }
 };
@@ -815,6 +998,8 @@ void WebSessionCreate(AiSess* s) {
         return;
     }
     s->web = w;   /* 建好即挂 (环境在途时由 WebCreateControllersPending 补建控制器) */
+    SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)s);
+    SetTimer(w->hwnd, 1, 250, NULL);   /* 焦点对账心跳 (WebFocusTick) */
     if (g_webEnv) WebCreateControllerFor(s);
 }
 
@@ -872,7 +1057,8 @@ static void WebStatusObj(AiSess* s, std::string* out) {
     *out += b;
 }
 
-/* 单条消息 → JSON 对象 (msgs/last 共用; html=气泡, reason=原始推理文本由前端渲染折叠块) */
+/* 单条消息 → JSON 对象 (msgs/last 共用; html=气泡, t=原始 Markdown 供"复制",
+   reason=原始推理文本由前端渲染折叠块) */
 void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, std::string* out) {
     (void)s;
     (void)mi;
@@ -885,6 +1071,10 @@ void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, 
         MsgHtmlOf(s, m, mi, false, &html);
         *out += ",\"html\":";
         *out += JsonEscapeUtf8(html);
+    }
+    if (m.role == 1 && !m.text.empty()) {   /* 原始 Markdown: 复制按钮的事实源 (渲染 HTML 抽文本会丢块级换行) */
+        *out += ",\"t\":";
+        *out += JsonEscapeUtf8(m.text);
     }
     if (!m.reason.empty()) {
         *out += ",\"reason\":";
@@ -1113,6 +1303,91 @@ static void CfgBroadcast() {   /* 配置全进程生效: 推给全部活跃会�
     }
 }
 
+/* ==================== 捐赠二维码 (get_donate_qr 工具 + 对话页渲染) ====================
+ * 二维码图片随包发布在 exe 根目录 (donate-alipay.jpg / donate-wechat.png); 插件 DLL 在
+ * plugins\ai-assistant\ 下, 从自身模块路径回推 exe 根 (大小写不敏感找 "\plugins\" 段)。
+ * 读取走宿主表 ReadFile (file.read 权限, 任意线程)。图片本体从不进对话通道: 工具只把
+ * 引用语法教给模型, md 渲染层 (MD_SPAN_IMG 拦截 xjs://donate?kind=..) 在此取缓存 data URL
+ * 换成真图 — base64 进程内缓存一次, 工作者(工具)与 UI(渲染)两线程都会摸 → SRWLOCK 护。 */
+
+static std::wstring DonateB64(const std::string& raw) {
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::wstring out;
+    out.reserve((raw.size() + 2) / 3 * 4 + 4);
+    size_t i = 0;
+    for (; i + 2 < raw.size(); i += 3) {
+        unsigned v = ((unsigned char)raw[i] << 16) | ((unsigned char)raw[i + 1] << 8) | (unsigned char)raw[i + 2];
+        out += T[(v >> 18) & 63];
+        out += T[(v >> 12) & 63];
+        out += T[(v >> 6) & 63];
+        out += T[v & 63];
+    }
+    if (i + 1 == raw.size()) {   /* 剩 1 字节: 2 码 + "==" */
+        unsigned v = (unsigned char)raw[i] << 16;
+        out += T[(v >> 18) & 63];
+        out += T[(v >> 12) & 63];
+        out += L"==";
+    } else if (i + 2 == raw.size()) {   /* 剩 2 字节: 3 码 + "=" */
+        unsigned v = ((unsigned char)raw[i] << 16) | ((unsigned char)raw[i + 1] << 8);
+        out += T[(v >> 18) & 63];
+        out += T[(v >> 12) & 63];
+        out += T[(v >> 6) & 63];
+        out += L'=';
+    }
+    return out;
+}
+
+/* 整文件读入 → data URL; 失败 = false (文件缺失/超限) */
+static bool DonateReadDataUrl(const std::wstring& path, const wchar_t* mime, std::wstring* out) {
+    if (!g_host) return false;
+    std::string raw;
+    char chunk[65536];
+    long long off = 0;
+    for (;;) {
+        int eof = 0;
+        int n = g_host->ReadFile(g_ctx, U8(path).c_str(), off, (int)sizeof(chunk),
+                                 chunk, (int)sizeof(chunk), &eof);
+        if (n <= 0) break;
+        raw.append(chunk, (size_t)n);
+        off += n;
+        if (eof) break;
+        if (raw.size() > 8u * 1024 * 1024) return false;   /* 8MB 兜底防失控 */
+    }
+    if (raw.empty()) return false;
+    *out = L"data:";
+    *out += mime;
+    *out += L";base64,";
+    *out += DonateB64(raw);
+    return true;
+}
+
+std::wstring DonateQrDataUrl(int kind) {   /* 0=微信 1=支付宝; 空串 = 不可用 (含文件缺失, 负缓存) */
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::wstring urls[2];
+    static bool tried[2] = { false, false };
+    AcquireSRWLockExclusive(&lock);
+    if (!tried[kind]) {
+        tried[kind] = true;
+        HMODULE hm = NULL;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)&DonateQrDataUrl, &hm);
+        wchar_t dll[MAX_PATH] = {};
+        if (hm && GetModuleFileNameW(hm, dll, MAX_PATH)) {
+            std::wstring p = dll;
+            std::wstring low = p;
+            for (auto& ch : low) ch = (wchar_t)towlower(ch);
+            size_t plug = low.rfind(L"\\plugins\\");
+            if (plug != std::wstring::npos) {
+                DonateReadDataUrl(p.substr(0, plug) + (kind == 0 ? L"\\donate-wechat.png" : L"\\donate-alipay.jpg"),
+                                  kind == 0 ? L"image/png" : L"image/jpeg", &urls[kind]);
+            }
+        }
+    }
+    std::wstring r = urls[kind];
+    ReleaseSRWLockExclusive(&lock);
+    return r;
+}
+
 void WebCommand(AiSess* s, const Jv& msg) {
     std::wstring c = msg.S(L"c");
     if (c == L"ready") {
@@ -1174,6 +1449,65 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         WebTouch(s);
         WebSyncSession(s);
+        return;
+    }
+    if (c == L"adj") {
+        /* 待应用的调整: 用户逐项/全部 应用|忽略 (卡片按钮 → 这里 UI 线程执行宿主调用)。
+         * 状态改在会话份步骤上 — 泵的步骤比对不含 adj 字段, 不会被 worker 镜像回写。
+         * 窗口令牌应用时才解析 (提案只存名): 目标窗已关 = 该项 ✕ 失败, 不悬垂。 */
+        const Jv* mv = msg.Get(L"mi");
+        const Jv* sv = msg.Get(L"si");
+        const Jv* iv = msg.Get(L"ii");
+        std::wstring act = msg.S(L"act");
+        if (!mv || mv->t != 2 || !sv || sv->t != 2 || !iv || iv->t != 2) return;
+        int mi = (int)mv->num, si = (int)sv->num, ii = (int)iv->num;
+        bool all = (act == L"applyAll" || act == L"ignoreAll");
+        bool doApply = (act == L"apply" || act == L"applyAll");
+        if (mi < 0 || mi >= (int)s->msgs.size()) return;
+        AiMsg& cm = s->msgs[mi];
+        if (cm.role != 2 || si < 0 || si >= (int)cm.steps.size()) return;
+        AiToolStep& st = cm.steps[si];
+        if (st.adj.items.empty()) return;
+        for (int i = 0; i < (int)st.adj.items.size(); i++) {
+            if (!all && i != ii) continue;
+            AiAdjustItem& it = st.adj.items[i];
+            if (it.state != 0) continue;   /* 已处理的项点旧按钮 = 无操作 (幂等防线) */
+            if (!doApply) { it.state = 2; it.err.clear(); continue; }
+            if (!g_host) { it.state = 3; it.err = L"宿主不可用"; continue; }
+            std::wstring errw;
+            int rc = XJS_PLUGIN_OK;
+            if (st.adj.kind == 0) {
+                if (!g_api.settingsSet) { it.state = 3; it.err = L"宿主不支持该操作"; continue; }
+                long long tok = AgentUiWindowToken(st.adj.win, (long long)s->tok, &errw);
+                if (!errw.empty()) { it.state = 3; it.err = errw; continue; }
+                rc = g_api.settingsSet(g_ctx, (XjsWindowToken)tok, it.json.c_str());
+            } else if (st.adj.kind == 1) {
+                if (!g_api.globalSet) { it.state = 3; it.err = L"宿主不支持该操作"; continue; }
+                rc = g_api.globalSet(g_ctx, it.json.c_str());
+            } else if (st.adj.kind == 2) {
+                if (!g_api.windowCmd) { it.state = 3; it.err = L"宿主不支持该操作"; continue; }
+                long long tok = AgentUiWindowToken(st.adj.win, (long long)s->tok, &errw);
+                if (!errw.empty()) { it.state = 3; it.err = errw; continue; }
+                rc = g_api.windowCmd(g_ctx, (XjsWindowToken)tok, it.json.c_str());
+            } else {   /* kind 3: 新建窗口 (json = "档案名|继承窗名") */
+                if (!g_api.windowCreate) { it.state = 3; it.err = L"宿主不支持该操作"; continue; }
+                std::wstring pj = W8(it.json.c_str());
+                std::wstring profile = pj, inherit;
+                size_t bar = pj.find(L'|');
+                if (bar != std::wstring::npos) { profile = pj.substr(0, bar); inherit = pj.substr(bar + 1); }
+                long long inh = AgentUiWindowToken(inherit, 0, &errw);
+                if (!errw.empty()) { it.state = 3; it.err = errw; continue; }
+                XjsWindowToken tokOut = 0;
+                rc = g_api.windowCreate(g_ctx, (XjsWindowToken)inh,
+                                        profile.empty() ? NULL : U8(profile).c_str(), &tokOut);
+            }
+            if (rc == XJS_PLUGIN_OK) { it.state = 1; it.err.clear(); }
+            else { it.state = 3; it.err = AgentApiErrText(rc); }
+        }
+        WebTouch(s);
+        WebSyncSession(s);   /* 即时重推 msgs (卡片按钮态刷新); 同 pallow 口径 */
+        SessSaveConv(s);     /* 当前会话先 upsert 进 g_hist (否则 HistSave 落的是旧副本) */
+        HistSave();
         return;
     }
     if (c == L"retry") {   /* 重试本轮: 截断到该轮提问之前再重发 (提问由 SendCurrent 重挂;
@@ -1283,8 +1617,10 @@ void WebCommand(AiSess* s, const Jv& msg) {
         int rc = g_host->SearchSetText(g_ctx, s->tok, U8(text).c_str(),
                                        mode.empty() ? NULL : U8(mode).c_str(),
                                        c == L"search" ? 1 : 0);
-        if (rc == XJS_PLUGIN_ERR_ARG)
-            g_host->Toast(g_ctx, s->tok, "未知搜索模式, 已忽略", XJS_PLUGIN_TOAST_WARN);
+        if (rc == XJS_PLUGIN_ERR_ARG) {
+            std::wstring tip = L"未知搜索模式 (" + mode + L"), 已忽略";
+            g_host->Toast(g_ctx, s->tok, U8(tip).c_str(), XJS_PLUGIN_TOAST_WARN);
+        }
         else if (rc != XJS_PLUGIN_OK)
             g_host->Toast(g_ctx, s->tok, "搜索窗口不可用 (已关闭?)", XJS_PLUGIN_TOAST_WARN);
         return;

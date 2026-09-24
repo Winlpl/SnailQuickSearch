@@ -307,6 +307,9 @@ static LRESULT CALLBACK AiMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         case XJS_AI_STREAM:
             PumpStreams();
             return 0;
+        case XJS_AI_UIJOB:
+            AgentUiDispatch((AiUiJob*)lParam);   /* 工具编组: agent 工作线程投递的宿主扩展 API 调用 */
+            return 0;
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

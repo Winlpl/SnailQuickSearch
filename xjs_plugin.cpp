@@ -1104,8 +1104,12 @@ static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {
     XjsSearchWindow* win = PluginWindowOfToken(window);
     if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
     XjsWindowScope scope(win);
-    win->plugPanelKey = (want != 0);
-    if (win->plugPanelKey) XjsSearchYieldKeys();   /* 键盘让给面板: 搜索框先交出路由/选区 */
+    bool now = (want != 0);
+    if (win->plugPanelKey != now) {
+        win->plugPanelKey = now;
+        if (now) XjsSearchYieldKeys();   /* 键盘让给面板: 搜索框先交出路由/选区 */
+        win->Invalidate();               /* 搜索框光标闸随帧同步 (双光标即帧消失, 不等闪烁相位重绘) */
+    }
     return XJS_PLUGIN_OK;
 }
 

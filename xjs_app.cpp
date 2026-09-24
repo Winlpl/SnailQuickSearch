@@ -490,19 +490,21 @@ void XjsUiOwnedStringsDropHwnd(HWND hwnd) {
         if (s_ownedStrings[i].first == hwnd) { delete s_ownedStrings[i].second; s_ownedStrings.erase(s_ownedStrings.begin() + i); }
 }
 
-const int g_modeToKeyword[4] = { XJS_KEYWORD_WILDCARD, XJS_KEYWORD_REGEX, XJS_KEYWORD_SQL, XJS_KEYWORD_LUA };
-const wchar_t* g_modeName[4] = { L"通配符", L"正则表达式", L"SQL", L"Lua 脚本" };
-const wchar_t* g_modeDesc[4] = {
+const int g_modeToKeyword[5] = { XJS_KEYWORD_WILDCARD, XJS_KEYWORD_REGEX, XJS_KEYWORD_SQL, XJS_KEYWORD_LUA, XJS_KEYWORD_LUA_EXEC };
+const wchar_t* g_modeName[5] = { L"通配符", L"正则表达式", L"SQL", L"Lua 过滤", L"Lua 执行" };
+const wchar_t* g_modeDesc[5] = {
     L"支持 * ? 通配与拼音/首拼搜索",
     L"按正则语法匹配文件名",
     L"执行 SQL 语句查询 (SELECT ...)",
-    L"用 Lua 表达式过滤每个文件 (f 为文件信息)" };
-const wchar_t* g_modeHint[4] = {
+    L"用 Lua 表达式过滤每个文件 (f 为文件信息)",
+    L"脚本即程序: 自己遍历数据库、自己排序 (return ID 数组)" };
+const wchar_t* g_modeHint[5] = {
     L"输入文件名关键词，支持 * 和 ? 通配符，输入即搜…",
     L"输入正则表达式，输入即搜…",
     L"输入 SQL 语句 (SELECT ... FROM alltable WHERE ...)，输入即搜…",
-    L"输入 Lua 过滤表达式 (f 为文件信息)，输入即搜…" };   /* 源样式各模式 SearchPlaceholder 同文案 */
-const wchar_t* g_modeIni[4] = { L"wildcard", L"regex", L"sql", L"lua" };
+    L"输入 Lua 过滤表达式 (f 为文件信息)，输入即搜…",   /* 源样式各模式 SearchPlaceholder 同文案 */
+    L"输入完整 Lua 程序 (可遍历 db 表)，return ID 数组即结果，输入即搜…" };
+const wchar_t* g_modeIni[5] = { L"wildcard", L"regex", L"sql", L"lua", L"lua-exec" };
 
 /* 列表数据 */
 std::vector<XjsFilterCat> g_filters;   /* 搜索历史已每窗化 (XjsSearchWindow::history) */

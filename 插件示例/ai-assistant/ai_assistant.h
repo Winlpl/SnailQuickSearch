@@ -50,9 +50,62 @@ static bool HostHas(unsigned need) {   /* 宿主表按"只追加"扩字段: 取�
 }
 #define HOST_PANEL_OK   (HostHas(offsetof(XjsPluginHost, PanelSetCaret) + sizeof(void*)))
 #define HOST_RECT_OK    (HostHas(offsetof(XjsPluginHost, PanelGetRect) + sizeof(void*)))
+#define HOST_QAPI_OK    (HostHas(offsetof(XjsPluginHost, QueryApi) + sizeof(void*)))
 
 static const UINT XJS_AI_STREAM = WM_APP + 40;  /* 流式增量到达 (wParam=0, lParam=Job*) */
 static const UINT XJS_AI_SWEEP  = WM_APP + 41;  /* 孤儿作业清扫 */
+static const UINT XJS_AI_UIJOB  = WM_APP + 42;  /* 工具编组: worker → UI 线程执行宿主扩展 API (lParam=AiUiJob*) */
+
+/* ==================== 宿主扩展 API (QueryApi 按名解析; 全部仅 UI 线程) ====================
+ * Init 时解析一次 (ApiResolveAll; host->size 先验), 存函数指针 — 未知名/旧宿主 = NULL,
+ * 对应工具报"宿主不支持"干净降级。这些 API 摸窗口/设置状态, agent 工作线程**禁直调**:
+ * 一律经 AiUiJob 编组到 g_msgwnd 的 UI 线程执行 (错线程宿主回 ERR_THREAD)。
+ * 各指针类型/JSON 键/权限见 xjs_plugin_sdk.h 的名称式扩展 API 节。 */
+struct HostApi {
+    XjsApiSettingsGet   settingsGet;
+    XjsApiSettingsSet   settingsSet;
+    XjsApiGlobalGet     globalGet;
+    XjsApiGlobalSet     globalSet;
+    XjsApiWindowsEnum   windowsEnum;
+    XjsApiWindowState   windowState;
+    XjsApiWindowCmd     windowCmd;
+    XjsApiWindowCreate  windowCreate;
+    XjsApiModesList     modesList;
+    XjsApiModesAdd      modesAdd;
+    XjsApiModesRemove   modesRemove;
+    XjsApiModesApply    modesApply;
+    XjsApiPluginsList   pluginsList;
+    XjsApiPluginsState  pluginsState;
+    XjsApiMsgSend       msgSend;
+    XjsApiSkinsList     skinsList;
+    XjsApiWindowSelection windowSel;
+    XjsApiLangsList     langsList;
+};
+extern HostApi g_api;
+void ApiResolveAll();   /* UI 线程 (Init) 解析全部名字; 旧宿主全 NULL */
+
+/* ---- 工具的 UI 编组作业 (worker 堆分配 → PostMessage(XJS_AI_UIJOB) → UI 执行 → 事件回告) ----
+ * 所有权: 正常路径 worker 等 done 后读结果并 delete; worker 超时/被停止放弃时登记进
+ * 在飞表 (orphan=1), UI 执行完发现 orphan 自行 delete — 两侧都不悬垂 (实现 ai_agent.cpp)。 */
+struct AiUiJob {
+    int kind = 0;                  /* UIW_* 分派码 (ai_agent.cpp) */
+    std::wstring s1, s2, s3;       /* 字符串参数 (窗口名/mode/json/…) */
+    long long n1 = 0, n2 = 0;      /* 数值参数 (execute/reveal/fileId) */
+    long long tok = 0;             /* 默认目标窗口令牌 (window 名留空时 = 对话所在窗) */
+    std::string out8;              /* 成功: 结果 JSON (UTF-8) */
+    std::wstring err;              /* 失败: 错误描述 (空 = 成功) */
+    volatile LONG orphan = 0;      /* worker 已放弃 (UI 执行完代为 delete, 不再 SetEvent) */
+    int doneSignaled = 0;          /* UI 已执行完 (s_uiCs 内读写; worker 放弃判定用) */
+    HANDLE done = NULL;            /* 一次性信号 */
+};
+struct AiJob;   /* 会话层作业 (下文定义; AgentUiCall 挂起等待期间要读它的 abort) */
+void AgentUiDispatch(AiUiJob* jb);        /* UI 线程执行 (g_msgwnd wndproc 调; 内部 delete jb) */
+std::wstring AgentUiCall(AiJob* j, AiUiJob* jb, std::string* out8);
+                                          /* worker 侧: 投递+等完成; 返回错误描述 (空=成功, *out8=结果) */
+long long AgentUiWindowToken(const std::wstring& name, long long defTok, std::wstring* err);
+                                          /* 窗口名 → 令牌 (仅 UI 线程; 空=defTok, 查无=设 *err 返 0)。
+                                             WebCommand "adj" 应用调整卡时用 (提案时只存名, 应用时才解析) */
+std::wstring AgentApiErrText(int rc);     /* 扩展 API 错误码 → 短描述 (调整卡失败项展示用) */
 
 /* ==================== 基础工具 (实现 ai_core.cpp) ==================== */
 
@@ -213,17 +266,36 @@ void CfgLoad();
 
 /* ==================== 多对话历史 (存储键 "历史"; 定义 ai_core.cpp) ==================== */
 
+/* 待应用的调整 (AI 提案 → 用户逐项裁决, 不直接生效):
+   worker 只生成提案挂进步骤; 用户点卡片按钮 → WebCommand "adj" 在 UI 线程应用。
+   状态活在会话份步骤上 — 泵的步骤比对不含 adj 字段, UI 裁决不会被 worker 镜像回写。 */
+struct AiAdjustItem {
+    std::wstring key;           /* 显示名 (设置键名 / 动作名) */
+    std::wstring val;           /* 显示值 (用户视角文案, 如 "详情"/"150%"/"简体中文") */
+    std::string json;           /* 应用参数 (UTF-8): kind 0/1=单成员 JSON; 2=动作串; 3="档案名|继承窗名" */
+    int state = 0;              /* 0=待确认 1=已应用 2=已忽略 3=失败 (err 带原因) */
+    std::wstring err;
+};
+struct AiAdjust {
+    int kind = 0;               /* 0=settings.set 1=settings.global.set 2=window.cmd 3=window.create */
+    std::wstring win;           /* 目标窗口名 (空 = 当前对话所在窗; 应用时再解析令牌 — 关窗后应用报错不悬垂) */
+    std::vector<AiAdjustItem> items;
+};
 struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
-    int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths (未知工具照显 name) */
+    int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths 3=设置 4=窗口 5=搜索框
+                                   6=模式 7=插件 8=皮肤 9=规范 10=捐赠 (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
+    std::wstring argz;          /* 代办类工具的参数摘要 (卡片头展示; 随历史落库) */
+    std::string res8;           /* 代办类工具回喂模型的 JSON (瞬时; 不渲染不落库) */
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
     std::wstring emit;          /* lua 两模式 ai.print 过程/统计输出 (并入工具结果 output 回喂模型; 不渲染不落库) */
     std::wstring err;           /* 失败原因 */
     std::vector<std::wstring> top;   /* 结果样本路径 (≤20; 展开显示) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
+    AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
 struct AiMsg {
     int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 不重发给模型) */
@@ -384,6 +456,10 @@ void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, 
 
 /* markdown → HTML (md4c; 表格/任务列表/删除线; 模型裸 HTML 不渲染 — 实现收口本文件) */
 bool MdToHtml(const std::wstring& text, std::wstring* out);
+
+/* 捐赠二维码 data URL (0=微信 1=支付宝; 空串=不可用; get_donate_qr 工具与 md 渲染层共用;
+ * 进程内缓存一次, SRWLOCK 护双线程 — 实现 ai_web.cpp) */
+std::wstring DonateQrDataUrl(int kind);
 
 /* 嵌入式前端整文档 (实现 ai_web_ui.cpp; 两段宽字面量拼接 — MSVC 单字面量 32767 字符上限) */
 const wchar_t* AiWebUiHtml();

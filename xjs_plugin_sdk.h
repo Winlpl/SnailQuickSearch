@@ -253,7 +253,8 @@ struct XjsPluginHost {
  *   if (settingsGet) { char j[2048]; settingsGet(ctx, 0, j, sizeof(j)); }   // 0 = 默认窗口
  *
  * 权限 (清单 "权限"; 未声明调用 = ERR_PERM):
- *   免权限    = settings.get / settings.global.get / windows.enum / window.state / modes.list
+ *   免权限    = settings.get / settings.global.get / windows.enum / window.state /
+ *               modes.list / skins.list / window.selection / langs.list
  *   "ui"      = window.cmd / window.create / modes.apply
  *   "settings"= settings.set / settings.global.set / modes.add / modes.remove
  * JSON 键为中文主键 (与 manifest/配置文件口径一致); 输出 = 调用方缓冲约定; 窗口令牌照旧
@@ -275,7 +276,8 @@ struct XjsPluginHost {
 
 typedef int (XJS_PLUGIN_CALL *XjsApiSettingsGet)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
 /* settings.set: membersJson = {"视图":"details","页面缩放":150,"皮肤":"dark","预览":true,
-   "预览宽度":400,"置顶":false,"失焦行为":0,"显示控制按钮":true,"显示筛选框":true,
+   "预览宽度":400,"置顶":false,"语言":"zh|zh-TW|en|ko|th|ms|auto",
+   "失焦行为":0,"显示控制按钮":true,"显示筛选框":true,
    "显示状态栏":true,"任务栏图标":true,"鼠标打开":0,"默认选中":1,
    "搜索模式":"wildcard|regex|sql|lua"} (子集随意; 全部键都要合法, 一个未知即整体拒绝) */
 typedef int (XJS_PLUGIN_CALL *XjsApiSettingsSet)(XjsPluginCtx*, XjsWindowToken window, const char* membersJsonUtf8);
@@ -336,6 +338,29 @@ typedef int (XJS_PLUGIN_CALL *XjsApiMsgSend)(XjsPluginCtx*, const char* targetId
                                              const char* jsonUtf8, char* buf, int cap);
 /* msg.broadcast: 送达全部"启用且已加载且导出 OnPluginMessage"的插件 (不含自己), 不收集回复 */
 typedef int (XJS_PLUGIN_CALL *XjsApiMsgBroadcast)(XjsPluginCtx*, const char* jsonUtf8);
+
+/* skins.list: 可用皮肤名清单 (免权限, 仅 UI 线程; 2026-09-24 表尾追加的名字式扩展 API)
+   → ["名称",…] (扫描 skin 目录)。换肤走 settings.set 的 "皮肤" 键, 名字必须取自这里
+   (未知名 = ERR_NOTFOUND 整体拒绝), 插件先查清单再写 */
+#define XJS_API_SKINS_LIST      "skins.list"
+typedef int (XJS_PLUGIN_CALL *XjsApiSkinsList)(XjsPluginCtx*, char* buf, int cap);
+
+/* window.selection: 某窗口当前选中集 (免权限, 仅 UI 线程; 2026-09-24 表尾追加)
+   → {"窗口名称":"..","选中数":n,"文件ID":[id,…]}
+   选中按 FileId 记在引擎结果对象里 (与列表顺序无关), 引擎数据即事实源 —
+   路径/名称/大小插件经 xjs_db_GetPath/GetName 自取 (照 OnCommand 的 FileId 口径)。
+   maxIds ≤0 = 不限量; 传正数只回传前 maxIds 个 ID (选中数仍是全量, 防巨选区撑爆缓冲) */
+#define XJS_API_WINDOW_SELECTION "window.selection"
+typedef int (XJS_PLUGIN_CALL *XjsApiWindowSelection)(XjsPluginCtx*, XjsWindowToken window,
+                                                     int maxIds, char* buf, int cap);
+
+/* langs.list: 可用界面语言清单 (免权限, 仅 UI 线程; 2026-09-24 表尾追加)
+   → [{"代码":"zh","名称":"简体中文"},…] (名称恒母语显示; 代码 = settings.set
+   "语言" 键的合法值; "auto"=跟随系统不在此列但任何时刻可写)。
+   查询当前值/切换走 settings.get / settings.set 的 "语言" 键 — 与换肤 (skins.list
+   + settings.set "皮肤") 同一套分工: 清单查有效值, 写入走设置白名单 */
+#define XJS_API_LANGS_LIST      "langs.list"
+typedef int (XJS_PLUGIN_CALL *XjsApiLangsList)(XjsPluginCtx*, char* buf, int cap);
 
 /* ==================== 插件导出面 ==================== */
 

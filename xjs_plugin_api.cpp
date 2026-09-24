@@ -75,7 +75,7 @@ void XjsPluginApiPruneOwners() {
 /* ==================== 名称↔值映射 (视图 / 关键词模式, 与配置文件取值同串) ==================== */
 
 static const char* const XJS_VIEW_NAMES[4] = { "list", "details", "medium", "large" };
-static const wchar_t* const XJS_MODE_NAMES[4] = { L"wildcard", L"regex", L"sql", L"lua" };
+static const wchar_t* const XJS_MODE_NAMES[5] = { L"wildcard", L"regex", L"sql", L"lua", L"lua-exec" };
 
 static std::string ViewNameUtf8(int vm) {
     return (vm >= 0 && vm < 4) ? XJS_VIEW_NAMES[vm] : XJS_VIEW_NAMES[0];
@@ -86,11 +86,11 @@ static int ViewIndexFromUtf8(const std::wstring& s) {
     return -1;
 }
 static std::string KeyModeNameUtf8(int m) {
-    std::wstring n = (m >= 0 && m < 4) ? XJS_MODE_NAMES[m] : XJS_MODE_NAMES[0];
+    std::wstring n = (m >= 0 && m < 5) ? XJS_MODE_NAMES[m] : XJS_MODE_NAMES[0];
     return Utf16ToUtf8(n.c_str());
 }
 static int KeyModeIndexFromUtf8(const std::wstring& s) {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         if (s == XJS_MODE_NAMES[i]) return i;
     return -1;
 }
@@ -136,6 +136,7 @@ static int ApiSettingsGet(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, i
     j += ",\"任务栏图标\":" + JBool(w->taskbarIcon);
     j += ",\"鼠标打开\":" + JNum(w->mouseOpen);
     j += ",\"默认选中\":" + JNum(w->defaultSel);
+    j += ",\"语言\":\"" + std::string(XjsLangCodeUtf8(w->lang)) + "\"";
     j += ",\"搜索模式\":\"" + KeyModeNameUtf8(w->mode) + "\"";
     j += "}";
     return PluginBufOut(buf, cap, j);
@@ -194,6 +195,11 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
         }
         else if (m.key == L"任务栏图标") { if (!MemberBool(m, &b)) return XJS_PLUGIN_ERR_ARG; }
         else if (m.key == L"鼠标打开" || m.key == L"默认选中") { if (!MemberInt(m, &n) || n < 0 || n > 1) return XJS_PLUGIN_ERR_ARG; }
+        else if (m.key == L"语言") {
+            if (!MemberStr(m, &s)) return XJS_PLUGIN_ERR_ARG;
+            if (s != L"auto" && XjsLangIndexFromCode(s.c_str()) == XLANG_AUTO)
+                return XJS_PLUGIN_ERR_NOTFOUND;   // 未知代码 (有效值 = langs.list; auto 恒合法)
+        }
         else if (m.key == L"搜索模式") { if (!MemberStr(m, &s) || KeyModeIndexFromUtf8(s) < 0) return XJS_PLUGIN_ERR_ARG; }
         else return XJS_PLUGIN_ERR_ARG;   /* 未知键显式拒绝 (不静默) */
     }
@@ -246,6 +252,9 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
             MemberInt(m, &n); w->mouseOpen = n; XjsSaveConfig();
         } else if (m.key == L"默认选中") {
             MemberInt(m, &n); w->defaultSel = n; XjsSaveConfig();
+        } else if (m.key == L"语言") {
+            MemberStr(m, &s);
+            XjsApplyUiLang(w, (s == L"auto") ? XLANG_AUTO : XjsLangIndexFromCode(s.c_str()));
         } else if (m.key == L"搜索模式") {
             MemberStr(m, &s);
             w->mode = KeyModeIndexFromUtf8(s);
@@ -606,6 +615,72 @@ static int ApiMsgBroadcast(XjsPluginCtx* ctx, const char* jsonUtf8) {
     return XjsPluginApiMsgBroadcast(ctx, jsonUtf8);
 }
 
+/* ==================== skins.list ====================
+ * 可用皮肤名清单 (XjsSkinEnumerate 扫描结果原样透出)。换肤本身走 settings.set 的
+ * "皮肤" 键 (写窗字段+全局镜像+落盘+插件换肤事件, 设置页同落点); 插件先经这里查
+ * 有效名再写, 免得对未知名盲试 (settings.set 对未知名整体拒绝 ERR_NOTFOUND)。 */
+
+static int ApiSkinsList(XjsPluginCtx* ctx, char* buf, int cap) {
+    int e = XjsPluginApiGate(ctx, 0);
+    if (e != XJS_PLUGIN_OK) return e;
+    std::string j = "[";
+    for (auto& k : XjsSkinEnumerate()) {
+        if (j.size() > 1) j += ",";
+        j += PluginJsonStr(Utf16ToUtf8(k.c_str()));
+    }
+    j += "]";
+    return PluginBufOut(buf, cap, j);
+}
+
+/* ==================== window.selection ====================
+ * 某窗口当前选中集 (免权限读面)。FileId 直出 (引擎为事实源, 照 OnCommand 的 FileId
+ * 口径 — 路径/名称插件自取), maxIds 截断防巨选区 (全选 451 万时全量拼 JSON 必爆缓冲);
+ * "选中数" 恒为全量, 调用方按它与 len(文件ID) 自知是否截断。 */
+static int ApiWindowSelection(XjsPluginCtx* ctx, XjsWindowToken window, int maxIds, char* buf, int cap) {
+    int e;
+    XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
+    if (!w) return e;
+    XjsWindowScope scope(w);
+    std::vector<int> ids;
+    int total = g_result ? xjs_result_GetSelectedCount(g_result) : 0;
+    if (g_result && (maxIds <= 0 || maxIds > total)) {
+        if (maxIds <= 0) maxIds = total;
+        ids.reserve((size_t)maxIds);
+        int n = xjs_result_GetCount(g_result);
+        for (int i = 0; i < n && (int)ids.size() < maxIds; i++) {
+            if (!xjs_result_IsSelectedByIndex(g_result, i)) continue;
+            int fid = xjs_result_GetFileId(g_result, i);
+            if (fid >= 0) ids.push_back(fid);
+        }
+    }
+    std::string j = "{";
+    j += "\"窗口名称\":" + PluginJsonStr(Utf16ToUtf8(w->name.c_str()));
+    j += ",\"选中数\":" + JNum(total);
+    j += ",\"文件ID\":[";
+    for (size_t i = 0; i < ids.size(); i++) {
+        if (i) j += ",";
+        j += JNum(ids[i]);
+    }
+    j += "]}";
+    return PluginBufOut(buf, cap, j);
+}
+
+/* ==================== langs.list ====================
+ * 可用界面语言清单 (免权限读面; 名称恒母语)。与 skins.list 同分工: 这里查有效代码,
+ * 读写走 settings.get / settings.set 的 "语言" 键 ("auto"=跟随系统, 恒合法不在此列)。 */
+static int ApiLangsList(XjsPluginCtx* ctx, char* buf, int cap) {
+    int e = XjsPluginApiGate(ctx, 0);
+    if (e != XJS_PLUGIN_OK) return e;
+    std::string j = "[";
+    for (int l = XLANG_ZH; l < XLANG_N; l++) {
+        if (j.size() > 1) j += ",";
+        j += "{\"代码\":\"" + std::string(XjsLangCodeUtf8(l)) + "\"";
+        j += ",\"名称\":" + PluginJsonStr(Utf16ToUtf8(XjsLangLabel(l))) + "}";
+    }
+    j += "]";
+    return PluginBufOut(buf, cap, j);
+}
+
 /* ==================== 名称解析器 (宿主表尾 QueryApi 的落点) ==================== */
 
 void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
@@ -627,6 +702,9 @@ void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
         { XJS_API_PLUGINS_STATE, (void*)&ApiPluginsState },
         { XJS_API_MSG_SEND,      (void*)&ApiMsgSend },
         { XJS_API_MSG_BROADCAST, (void*)&ApiMsgBroadcast },
+        { XJS_API_SKINS_LIST,    (void*)&ApiSkinsList },
+        { XJS_API_WINDOW_SELECTION, (void*)&ApiWindowSelection },
+        { XJS_API_LANGS_LIST,    (void*)&ApiLangsList },
     };
     for (auto& t : T)
         if (!strcmp(t.name, name)) return t.fn;

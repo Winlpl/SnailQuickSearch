@@ -1120,7 +1120,7 @@ static void XjsRenderEmptyState() {
         else
             sub = XjsT(L"列表.空态换个关键词");
     } else {
-        tip = (g_mode == XMODE_SQL || g_mode == XMODE_LUA) ? XjsT(L"列表.空态输入语句") : XjsT(L"列表.空态输入关键词");
+        tip = (g_mode == XMODE_SQL || g_mode == XMODE_LUA || g_mode == XMODE_LUA_EXEC) ? XjsT(L"列表.空态输入语句") : XjsT(L"列表.空态输入关键词");
         sub = XjsT(L"列表.空态欢迎语");
     }
     g_rt->DrawText(tip.c_str(), (UINT32)tip.length(), g_tfTip,
