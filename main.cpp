@@ -1688,9 +1688,10 @@ static HWND XjsFindInstanceWindow(const wchar_t* cls) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int nCmdShow) {
     AddVectoredExceptionHandler(1, XjsVecStackLogger);   /* 排最前: 抢在任何处理器之前拿到崩溃栈 */
-    /* 暂禁用 xjs_EnableException (2026-09-15 白屏闪退根因: DLL 的 VEH 处理器在异常分发时
-       做哈希表/写文件/弹框, 与驱动线程并发破坏堆)。DLL 侧 87cf4a4+2f884be 已重构异常流程,
-       待验证稳定后恢复: xjs_EnableException(TRUE, NULL); */
+    xjs_EnableException(TRUE, NULL);   /* DLL 的 VEH (2026-09-24 按口径恢复: DLL 侧 87cf4a4+2f884be
+       已重构异常流程 — 旧版处理器在异常分发时做哈希表/写文件/弹框, 与驱动线程并发破坏堆致白屏
+       闪退, 曾临时禁用; enableTry=TRUE 才真正启用内部 try-catch 保护, 回调 NULL=内置默认处理,
+       抓全部线程首轮异常写 xunjieso_捕获崩溃N.txt) */
 
     /* 单实例守卫: 已有实例(含托盘隐藏中)时唤起它并退出 —— 双进程并发初始化引擎、
        抢 xjs_db.dat、重复托盘图标与双击 Ctrl 钩子 = 启动期堆破坏, 白屏闪退 (初始化冲突)

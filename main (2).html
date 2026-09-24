@@ -2035,6 +2035,155 @@
             margin-left: auto;
         }
 
+        /* ---- 模型切换下拉 (工具栏) ----
+           收起时只显示当前模型的名字, 需要换时才展开 —— 档案名是用户自己取的,
+           平铺成多个按钮会长期霸占工具栏 (与命令行权限下拉同一考量)。
+           菜单向**下**展开: 工具栏在页面顶部, 向上会被窗口裁掉 */
+        .ai-model-picker {
+            position: relative;
+            display: flex;
+            flex: 0 1 auto;
+            min-width: 0;
+        }
+
+        .ai-model-picker-button {
+            max-width: 190px;
+        }
+
+        .ai-model-caret {
+            flex: 0 0 auto;
+            font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets', sans-serif;
+            font-size: 9px;
+            line-height: 1;
+            transition: transform 120ms ease;
+        }
+
+        .ai-model-picker-button[aria-expanded="true"] .ai-model-caret {
+            transform: rotate(180deg);
+        }
+
+        .ai-model-menu {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 6px);
+            z-index: 17;
+            display: grid;
+            gap: 2px;
+            width: max-content;
+            min-width: 190px;
+            max-width: 300px;
+            max-height: 320px;
+            overflow-y: auto;
+            cursor: default;
+            padding: 4px;
+            border-radius: 7px;
+            background: linear-gradient(135deg, var(--toast-highlight), transparent 55%), var(--menu-glass);
+            box-shadow: inset 0 0 0 1px var(--overlay-border), 0 8px 24px var(--glass-shadow);
+            backdrop-filter: blur(32px) saturate(1.55);
+            -webkit-backdrop-filter: blur(32px) saturate(1.55);
+            opacity: 1;
+            transform: translateY(0) scale(1);
+            transform-origin: right top;
+            transition: opacity 120ms ease, transform 140ms cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        .ai-model-menu[hidden] {
+            display: none;
+        }
+
+        .ai-model-menu.opening,
+        .ai-model-menu.closing {
+            opacity: 0;
+            transform: translateY(-5px) scale(0.98);
+            pointer-events: none;
+        }
+
+        .ai-model-menu.closing {
+            transition-duration: 90ms;
+        }
+
+        :root[data-motion="off"] .ai-model-menu {
+            transition-duration: 0ms;
+        }
+
+        .ai-model-option {
+            display: grid;
+            grid-template-columns: 16px minmax(0, 1fr);
+            align-items: start;
+            gap: 6px;
+            width: 100%;
+            padding: 5px 8px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--text-secondary);
+            font: inherit;
+            font-size: 12px;
+            line-height: 1.5;
+            text-align: left;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .ai-model-option:hover,
+        .ai-model-option:focus,
+        .ai-model-option:focus-visible {
+            background: var(--btn-secondary-hover);
+            color: var(--text-primary);
+        }
+
+        .ai-model-option[aria-checked="true"] {
+            background: var(--process-row-selected);
+            color: var(--text-primary);
+        }
+
+        .ai-model-option-check {
+            color: transparent;
+            font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets', sans-serif;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .ai-model-option[aria-checked="true"] .ai-model-option-check {
+            color: var(--accent-violet);
+        }
+
+        /* 档案名与其模型名: 两条档案显示名撞车时, 靠第二行才分得清 */
+        .ai-model-option-text {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .ai-model-option-name {
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .ai-model-option-hint {
+            overflow: hidden;
+            color: var(--text-tertiary);
+            font-size: 10.5px;
+            line-height: 1.4;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .ai-model-option[aria-checked="true"] .ai-model-option-hint {
+            color: var(--text-secondary);
+        }
+
+        /* 管理入口不是"一个可选模型", 用一条分隔线划开 */
+        .ai-model-option-manage {
+            display: block;
+            margin-top: 4px;
+            padding-top: 8px;
+            border-top: 1px solid var(--divider);
+            border-radius: 0 0 4px 4px;
+            color: var(--text-tertiary);
+        }
+
         .ai-btn {
             display: inline-flex;
             align-items: center;
@@ -2126,6 +2275,29 @@
             font-size: 11px;
             line-height: 1.6;
             color: var(--text-tertiary);
+        }
+
+        /* 档案下拉与"新建/复制/删除"并排: 下拉吞掉剩余宽度, 按钮各自保持内容宽 */
+        .ai-config-profile-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto auto;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ai-config-profile-row .ai-btn {
+            height: 28px;
+            padding: 0 10px;
+        }
+
+        .ai-config-profile-row select {
+            cursor: default;
+        }
+
+        /* 待确认删除: 与历史对话的删除按钮同一套两步确认语言 */
+        .ai-config-profile-row .ai-btn[data-armed="true"] {
+            border-color: color-mix(in srgb, var(--accent-pink) 55%, transparent);
+            color: var(--accent-pink);
         }
 
         .ai-config-actions {
@@ -2653,6 +2825,11 @@
         .ai-meta-item {
             white-space: nowrap;
             font-variant-numeric: tabular-nums;
+        }
+
+        /* 输出被长度上限截断: 这是"需要用户处理"的状态, 不能与普通数字同色 */
+        .ai-meta-item[data-warn="true"] {
+            color: var(--accent-amber);
         }
 
         /* 项与项之间用 · 分隔; 第一个文字项前面若紧跟按钮也补一个分隔点 */
@@ -8359,6 +8536,17 @@
                             <span class="ellipsis-text" id="aiStatusText">未配置接口</span>
                         </span>
                         <div class="ai-toolbar-actions">
+                            <!-- 模型切换: 点开列出全部档案, 选中即生效 (文字由脚本按语言填,
+                                 静态翻译器跳过 .ai-model-picker) -->
+                            <div class="ai-model-picker" id="aiModelPicker">
+                                <button class="ai-btn ai-model-picker-button" id="aiModelButton" type="button"
+                                    aria-haspopup="listbox" aria-expanded="false" aria-controls="aiModelMenu">
+                                    <span class="glyph" aria-hidden="true">&#xE99A;</span>
+                                    <span class="ellipsis-text" id="aiModelButtonLabel"></span>
+                                    <span class="ai-model-caret" aria-hidden="true">&#xE70D;</span>
+                                </button>
+                                <div class="ai-model-menu" id="aiModelMenu" role="listbox" hidden></div>
+                            </div>
                             <button class="ai-btn" id="aiConfigButton" type="button" aria-expanded="false"
                                 aria-controls="aiConfigPanel" title="接口设置">
                                 <span class="glyph" aria-hidden="true">&#xE713;</span>
@@ -8376,8 +8564,25 @@
                         </div>
                     </div>
 
-                    <!-- 接口设置: 任何兼容 OpenAI /chat/completions 的服务均可填入 -->
+                    <!-- 接口设置: 管理模型档案 (每个模型一条完整配置)。
+                         任何兼容 OpenAI /chat/completions 的服务均可填入 -->
                     <div class="ai-config-panel" id="aiConfigPanel" hidden>
+                        <!-- 档案下拉: 切换即切换当前使用的模型。旁边的"新建/复制/删除"是管理操作 ——
+                             "复制"用于同一服务商再加一个模型时免于重填地址与密钥 -->
+                        <div class="ai-config-row">
+                            <label class="ai-config-label" for="aiProfileSelect">模型</label>
+                            <div class="ai-config-profile-row">
+                                <select class="ai-config-input" id="aiProfileSelect"></select>
+                                <button class="ai-btn" id="aiProfileAddButton" type="button">新建</button>
+                                <button class="ai-btn" id="aiProfileDuplicateButton" type="button">复制</button>
+                                <button class="ai-btn" id="aiProfileDeleteButton" type="button">删除</button>
+                            </div>
+                        </div>
+                        <div class="ai-config-row">
+                            <label class="ai-config-label" for="aiProfileNameInput">名称</label>
+                            <input class="ai-config-input" id="aiProfileNameInput" type="text" spellcheck="false"
+                                autocomplete="off" placeholder="例如：DeepSeek 官方" />
+                        </div>
                         <div class="ai-config-row">
                             <label class="ai-config-label" for="aiBaseUrlInput">接口地址</label>
                             <input class="ai-config-input" id="aiBaseUrlInput" type="text" spellcheck="false"
@@ -8392,6 +8597,22 @@
                             <label class="ai-config-label" for="aiModelInput">模型</label>
                             <input class="ai-config-input" id="aiModelInput" type="text" spellcheck="false"
                                 autocomplete="off" placeholder="gpt-4o-mini" />
+                        </div>
+                        <div class="ai-config-row">
+                            <label class="ai-config-label" for="aiContextWindowInput">上下文长度</label>
+                            <input class="ai-config-input" id="aiContextWindowInput" type="text"
+                                inputmode="numeric" spellcheck="false" autocomplete="off"
+                                placeholder="留空则自动推断" />
+                        </div>
+                        <div class="ai-config-row">
+                            <label class="ai-config-label" for="aiMaxOutputInput">最大输出</label>
+                            <input class="ai-config-input" id="aiMaxOutputInput" type="text"
+                                inputmode="numeric" spellcheck="false" autocomplete="off"
+                                placeholder="留空则用服务端默认" />
+                        </div>
+                        <div class="ai-config-row">
+                            <span class="ai-config-label" aria-hidden="true"></span>
+                            <span class="ai-config-hint">两个长度都填 token 数，支持 128K、1M 这类写法。上下文长度只影响用量的“剩余”显示（留空则按模型名推断）；最大输出留空时不发送该参数。</span>
                         </div>
                         <div class="ai-config-row">
                             <span class="ai-config-label" aria-hidden="true"></span>
@@ -8625,7 +8846,9 @@
                     // (只跳过列表本身 —— 侧边栏的标题/空态/清空按钮是静态文本, 仍需翻译)
                     // .ai-jump-tip: 轮次跳转条的悬停预览, 文案由脚本即时生成
                     // .ai-usage: 用量简况由脚本生成 (词条 + 数字拼接), 静态翻译器会把数字当文本处理
-                    if (textNode.parentElement && textNode.parentElement.closest('script, style, .process-row, .ai-msg, .ai-history-list, .ai-jump-tip, .ai-usage, .ai-usage-panel, .ai-cmd-policy, .ai-web-toggle, .ai-auth-item')) continue;
+                    // ⚠️ #aiProfileSelect 必须跳过: 它的选项文字是**用户起的档案名**,
+                    //    被翻译器按词条改写就变成了别的名字 (新建/复制/删除按钮是静态文本, 仍需翻译)
+                    if (textNode.parentElement && textNode.parentElement.closest('script, style, .process-row, .ai-msg, .ai-history-list, .ai-jump-tip, .ai-usage, .ai-usage-panel, .ai-cmd-policy, .ai-web-toggle, .ai-auth-item, .ai-model-picker, #aiProfileSelect')) continue;
                     var entry = originalTextNodes.get(textNode);
                     if (typeof entry === 'undefined') {
                         var trimmed = textNode.nodeValue.trim();
@@ -9134,10 +9357,11 @@
                                 initialWorkspacePage = data.workspacePage;
                                 selectWorkspacePage(initialWorkspacePage, false);
                             }
-                            // AI 助手接口配置 (存 ini, 由宿主随窗口状态一并下发)
-                            if (typeof data.aiBaseUrl === 'string' || typeof data.aiApiKey === 'string'
-                                || typeof data.aiModel === 'string') {
-                                applyAiConfig(data.aiBaseUrl, data.aiApiKey, data.aiModel);
+                            // AI 模型档案 (存 ini, 由宿主随窗口状态一并下发):
+                            // 整包列表 + 当前使用的档案 id
+                            if (Array.isArray(data.aiProfiles)
+                                || typeof data.aiActiveProfile === 'string') {
+                                applyAiProfilesLoaded(data.aiProfiles, data.aiActiveProfile);
                             }
                             // AI 历史侧边栏开关状态 (存 ini, 由宿主随窗口状态一并下发)
                             if (typeof data.aiHistoryVisible !== 'undefined') {
@@ -14152,9 +14376,17 @@
             var AI_MAX_READ_ROUNDS = 12;   // 单次提问内取数轮数的安全阀 (防模型无限要数据)
             var AI_TREND_SAMPLES = 300;    // 每进程趋势保留的采样点 (1 点/秒, 即最近 5 分钟)
 
+            // 模型档案 (多模型切换)。每条档案是一套完整接口配置 ——
+            // 需要各种模型时往往跨服务商, 所以地址与密钥也随档案走, 而不只是模型名
+            var aiProfiles = [];
+            var aiActiveProfileId = '';
+            // 以下四项是**活动档案的派生值**: 请求构造与用量显示都读它们,
+            // 于是"切换模型"只需重算这四项, 不用改任何请求代码
             var aiBaseUrl = '';
             var aiApiKey = '';
             var aiModel = '';
+            var aiContextWindowOverride = 0;   // 0 = 未指定, 按模型名推断 (只影响用量显示)
+            var aiMaxOutputTokens = 0;         // 0 = 未指定, 不发送 max_tokens 参数
             var aiHistory = [];           // [{ role: 'user'|'assistant', content: string }]
             var aiStreaming = false;
             var aiRequestAbort = null;
@@ -14290,8 +14522,37 @@
                 { match: 'mistral', window: 131072 }
             ];
             var AI_CONTEXT_WINDOW_DEFAULT = 128000;
-            // 用户显式配置的窗口大小 (token 数); 0 = 按模型名自动推断
-            var aiContextWindowOverride = 0;
+            // 长度上限 (上下文长度 / 最大输出长度) 的合法区间; 0 单独表示"未指定"。
+            // 区间只用来挡住明显无意义的输入, 不是对数据的限制 (与宿主侧同值)
+            var AI_TOKEN_LIMIT_MIN = 1;
+            var AI_TOKEN_LIMIT_MAX = 100000000;
+
+            // 解析用户填写的长度上限: 空 = 0 (未指定), 支持 128K / 1M 简写。
+            // 非法输入返回 null —— 调用方据此提示用户, 而不是静默改成别的值
+            function parseAiTokenLimitInput(text) {
+                var raw = String(text == null ? '' : text).trim().replace(/[,，\s]/g, '');
+                if (!raw) return 0;
+                var matched = /^(\d+(?:\.\d+)?)([kKmM])?$/.exec(raw);
+                if (!matched) return null;
+                var unit = (matched[2] || '').toLowerCase();
+                var scale = unit === 'm' ? 1000000 : (unit === 'k' ? 1000 : 1);
+                var value = Number(matched[1]) * scale;
+                if (!Number.isFinite(value) || value <= 0) return null;
+                return Math.round(Math.max(AI_TOKEN_LIMIT_MIN,
+                    Math.min(AI_TOKEN_LIMIT_MAX, value)));
+            }
+
+            // 回填输入框: 0 (未指定) 显示为空, 由 placeholder 说明"留空表示什么"
+            function formatAiTokenLimitInput(value) {
+                var n = Number(value) || 0;
+                return n > 0 ? String(n) : '';
+            }
+
+            // 宿主下发的值可能是数值或字符串; 解析不了就当"未指定" (宿主侧已夹过区间)
+            function aiTokenLimitFromHost(value) {
+                var parsed = parseAiTokenLimitInput(value);
+                return parsed === null ? 0 : parsed;
+            }
 
             function aiContextWindowForModel(model) {
                 if (Number(aiContextWindowOverride) > 0) {
@@ -14498,10 +14759,19 @@
                         + '>' + escapeAiHtml(entry.value) + '</span>'
                         + '</div>';
                 }).join('');
-                // 窗口大小是按模型名推断的, 说清楚免得用户当成精确值
+                // 上限的来源要说清楚: 用户自己填过就是"手动设定", 否则是按模型名推断的
+                // 估算值 (两种都不该被当成精确值)。最大输出设了也要说明 ——
+                // 它是用户主动设的闸, 被截断时用户才能对得上原因
+                var notes = [aiContextWindowOverride > 0
+                    ? tf('上下文上限已手动设为 {size}', { size: formatTokenCount(windowSize) })
+                    : tf('上下文上限按模型「{model}」推断为 {size}',
+                        { model: aiModel || '--', size: formatTokenCount(windowSize) })];
+                if (aiMaxOutputTokens > 0) {
+                    notes.push(tf('最大输出限制为 {size}',
+                        { size: formatTokenCount(aiMaxOutputTokens) }));
+                }
                 html += '<div class="ai-usage-note">'
-                    + escapeAiHtml(tf('上下文上限按模型「{model}」推断为 {size}',
-                        { model: aiModel || '--', size: formatTokenCount(windowSize) }))
+                    + notes.map(function (note) { return escapeAiHtml(note); }).join('<br>')
                     + '</div>';
                 aiUsagePanel.innerHTML = html;
             }
@@ -14589,11 +14859,22 @@
             var aiSendButton = document.getElementById('aiSendButton');
             var aiConfigPanel = document.getElementById('aiConfigPanel');
             var aiConfigButton = document.getElementById('aiConfigButton');
+            var aiProfileSelect = document.getElementById('aiProfileSelect');
+            var aiProfileNameInput = document.getElementById('aiProfileNameInput');
             var aiBaseUrlInput = document.getElementById('aiBaseUrlInput');
             var aiApiKeyInput = document.getElementById('aiApiKeyInput');
             var aiModelInput = document.getElementById('aiModelInput');
+            var aiContextWindowInput = document.getElementById('aiContextWindowInput');
+            var aiMaxOutputInput = document.getElementById('aiMaxOutputInput');
+            var aiProfileAddButton = document.getElementById('aiProfileAddButton');
+            var aiProfileDuplicateButton = document.getElementById('aiProfileDuplicateButton');
+            var aiProfileDeleteButton = document.getElementById('aiProfileDeleteButton');
             var aiConfigSaveButton = document.getElementById('aiConfigSaveButton');
             var aiConfigCancelButton = document.getElementById('aiConfigCancelButton');
+            var aiModelPicker = document.getElementById('aiModelPicker');
+            var aiModelButton = document.getElementById('aiModelButton');
+            var aiModelButtonLabel = document.getElementById('aiModelButtonLabel');
+            var aiModelMenu = document.getElementById('aiModelMenu');
             var aiHistoryButton = document.getElementById('aiHistoryButton');
             var aiHistoryPanel = document.getElementById('aiHistoryPanel');
             var aiHistoryList = document.getElementById('aiHistoryList');
@@ -14612,63 +14893,412 @@
             }
 
             function refreshAiStatus() {
+                // 状态里用**档案显示名**而不是裸模型名: 与工具栏下拉同一套取名,
+                // 切模型后用户才能把"正在对话的对象"与下拉里选的那条对上
+                var label = aiProfileDisplayName(activeAiProfile());
                 if (aiStreaming) {
-                    setAiStatus('busy', tf('正在与 {model} 对话', { model: aiModel }));
+                    setAiStatus('busy', tf('正在与 {model} 对话', { model: label }));
                     return;
                 }
                 if (!aiConfigComplete()) {
                     setAiStatus('missing', t('未配置接口'));
                     return;
                 }
-                setAiStatus('ready', tf('已连接 {model}', { model: aiModel }));
+                setAiStatus('ready', tf('已连接 {model}', { model: label }));
             }
 
-            // 宿主下发的配置: 仅覆盖传入的字段 (未配置时保持为空)
-            function applyAiConfig(baseUrl, apiKey, model) {
-                if (typeof baseUrl === 'string') aiBaseUrl = baseUrl.trim().replace(/\/+$/, '');
-                if (typeof apiKey === 'string') aiApiKey = apiKey.trim();
-                if (typeof model === 'string') aiModel = model.trim();
-                // 配置面板打开时不覆盖用户正在编辑的内容
-                if (aiConfigPanel && aiConfigPanel.hidden) {
-                    if (aiBaseUrlInput) aiBaseUrlInput.value = aiBaseUrl;
-                    if (aiApiKeyInput) aiApiKeyInput.value = aiApiKey;
-                    if (aiModelInput) aiModelInput.value = aiModel;
+            // ==================== 模型档案 (多模型切换) ====================
+            var AI_PROFILE_MAX = 50;              // 与宿主侧上限一致
+            var AI_PROFILE_DELETE_ARM_MS = 4000;  // 删除档案的两步确认窗口
+            var AI_MODEL_MENU_CLOSE_MS = 90;      // 下拉收起动画时长 (与命令行权限下拉一致)
+            var AI_MODEL_CHECK_ICON = '\uE73E';
+            // 表单里有未保存的编辑。有它时**不重填表单** ——
+            // 宿主会随窗口状态变化整包下发配置, 不挡住就会把用户正在敲的内容冲掉
+            var aiProfileFormDirty = false;
+            var aiProfileDeleteArmed = false;
+            var aiProfileDeleteTimer = 0;
+            var aiModelMenuTimer = 0;
+
+            function genAiProfileId() {
+                return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            }
+
+            function findAiProfile(id) {
+                for (var index = 0; index < aiProfiles.length; index += 1) {
+                    if (aiProfiles[index].id === id) return aiProfiles[index];
                 }
-                // 上下文上限按模型名推断, 模型变了要重新算用量展示
+                return null;
+            }
+
+            // 当前使用的档案。活动 id 失效 (档案被删) 时回落到第一条 —— 与宿主侧同一条规则
+            function activeAiProfile() {
+                return findAiProfile(aiActiveProfileId)
+                    || (aiProfiles.length ? aiProfiles[0] : null);
+            }
+
+            // 显示名: 用户没起名时用模型名兜底, 两者都没有才说"未命名"
+            function aiProfileDisplayName(profile) {
+                if (!profile) return t('未配置接口');
+                return profile.name || profile.model || t('未命名模型');
+            }
+
+            // 给模型的"我是谁 / 还有什么可选"一行。列出全部档案名 ——
+            // 模型只有这样才知道可以提议把对话切到哪一条
+            function aiModelProfileLine() {
+                var text = aiProfileDisplayName(activeAiProfile())
+                    + '（共 ' + aiProfiles.length + ' 条档案';
+                if (aiProfiles.length > 1) {
+                    text += '：' + aiProfiles.map(function (profile) {
+                        return aiProfileDisplayName(profile);
+                    }).join('、');
+                }
+                return text + '）';
+            }
+
+            // 按 id / 显示名 / 模型名找档案 (精确优先, 再模糊包含)。
+            // 供 AI 的 setActiveModel 指令用 —— 模型给的是"看得到的东西" (名字),
+            // 而不是内部 id
+            function aiFindProfileByHint(hint) {
+                var text = String(hint == null ? '' : hint).trim().toLowerCase();
+                if (!text) return null;
+                var exact = null;
+                var partial = null;
+                aiProfiles.forEach(function (profile) {
+                    var model = String(profile.model || '').toLowerCase();
+                    var name = String(profile.name || '').toLowerCase();
+                    if (profile.id.toLowerCase() === text || model === text || name === text) {
+                        if (!exact) exact = profile;
+                        return;
+                    }
+                    if (!partial && (model.indexOf(text) !== -1 || name.indexOf(text) !== -1)) {
+                        partial = profile;
+                    }
+                });
+                return exact || partial;
+            }
+
+            // 把活动档案派生成请求与用量读的那几个变量。
+            // 请求构造代码全都读派生值, 所以"切换模型"只需调这一个函数
+            function applyActiveAiProfile() {
+                var profile = activeAiProfile();
+                aiActiveProfileId = profile ? profile.id : '';
+                aiBaseUrl = profile ? String(profile.baseUrl || '').replace(/\/+$/, '') : '';
+                aiApiKey = profile ? String(profile.apiKey || '') : '';
+                aiModel = profile ? String(profile.model || '') : '';
+                aiContextWindowOverride = profile
+                    ? aiTokenLimitFromHost(profile.contextWindow) : 0;
+                aiMaxOutputTokens = profile
+                    ? aiTokenLimitFromHost(profile.maxOutputTokens) : 0;
+                // 表单里有未保存的编辑就不覆盖 (见 aiProfileFormDirty 的说明)
+                if (!aiProfileFormDirty) fillAiProfileForm();
+                renderAiProfileSelect();
+                renderAiModelPicker();
                 renderAiUsage();
                 refreshAiStatus();
             }
 
-            function setAiConfigPanelOpen(open) {
-                if (!aiConfigPanel) return;
-                if (open) {
-                    if (aiBaseUrlInput) aiBaseUrlInput.value = aiBaseUrl;
-                    if (aiApiKeyInput) aiApiKeyInput.value = aiApiKey;
-                    if (aiModelInput) aiModelInput.value = aiModel;
-                }
-                aiConfigPanel.hidden = !open;
-                if (aiConfigButton) aiConfigButton.setAttribute('aria-expanded', open ? 'true' : 'false');
-                if (open && aiBaseUrlInput) aiBaseUrlInput.focus();
+            // 宿主下发的档案列表 (整包)。宿主是权威副本 —— 页面的增删改都会立刻回传,
+            // 所以这里整体覆盖即可
+            function applyAiProfilesLoaded(list, activeId) {
+                aiProfiles = (Array.isArray(list) ? list : []).filter(function (profile) {
+                    return profile && typeof profile.id === 'string' && profile.id;
+                }).map(function (profile) {
+                    return {
+                        id: profile.id,
+                        name: typeof profile.name === 'string' ? profile.name : '',
+                        baseUrl: typeof profile.baseUrl === 'string' ? profile.baseUrl : '',
+                        apiKey: typeof profile.apiKey === 'string' ? profile.apiKey : '',
+                        model: typeof profile.model === 'string' ? profile.model : '',
+                        contextWindow: aiTokenLimitFromHost(profile.contextWindow),
+                        maxOutputTokens: aiTokenLimitFromHost(profile.maxOutputTokens)
+                    };
+                });
+                if (typeof activeId === 'string') aiActiveProfileId = activeId;
+                applyActiveAiProfile();
             }
 
-            function saveAiConfigFromPanel() {
-                var baseUrl = aiBaseUrlInput ? aiBaseUrlInput.value.trim() : '';
-                var apiKey = aiApiKeyInput ? aiApiKeyInput.value.trim() : '';
-                var model = aiModelInput ? aiModelInput.value.trim() : '';
-                var complete = !!(baseUrl && apiKey && model);
-                applyAiConfig(baseUrl, apiKey, model);
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'windowControl',
-                        command: 'setAiConfig',
-                        baseUrl: aiBaseUrl,
-                        apiKey: aiApiKey,
-                        model: aiModel
-                    }));
+            function postAiProfileCommand(command, payload) {
+                if (!window.chrome || !window.chrome.webview) return;
+                var message = { type: 'windowControl', command: command };
+                Object.keys(payload || {}).forEach(function (key) { message[key] = payload[key]; });
+                try { window.chrome.webview.postMessage(JSON.stringify(message)); } catch (e) { }
+            }
+
+            function persistAiProfile(profile) {
+                if (!profile) return;
+                postAiProfileCommand('aiProfileUpsert', {
+                    id: profile.id,
+                    name: profile.name,
+                    baseUrl: profile.baseUrl,
+                    apiKey: profile.apiKey,
+                    model: profile.model,
+                    contextWindow: profile.contextWindow,
+                    maxOutputTokens: profile.maxOutputTokens
+                });
+            }
+
+            // 切换当前使用的模型。切换是离散动作, 所以立即生效并持久化,
+            // 不像表单那样需要先点保存
+            function selectAiProfile(id) {
+                if (!findAiProfile(id)) return;
+                aiProfileFormDirty = false;
+                if (id !== aiActiveProfileId) {
+                    aiActiveProfileId = id;
+                    postAiProfileCommand('aiActiveProfile', { id: id });
                 }
-                setAiConfigPanelOpen(false);
+                applyActiveAiProfile();
+            }
+
+            function fillAiProfileForm() {
+                var profile = activeAiProfile();
+                if (aiProfileNameInput) aiProfileNameInput.value = profile ? (profile.name || '') : '';
+                if (aiBaseUrlInput) aiBaseUrlInput.value = profile ? (profile.baseUrl || '') : '';
+                if (aiApiKeyInput) aiApiKeyInput.value = profile ? (profile.apiKey || '') : '';
+                if (aiModelInput) aiModelInput.value = profile ? (profile.model || '') : '';
+                if (aiContextWindowInput) {
+                    aiContextWindowInput.value = formatAiTokenLimitInput(
+                        profile ? profile.contextWindow : 0);
+                }
+                if (aiMaxOutputInput) {
+                    aiMaxOutputInput.value = formatAiTokenLimitInput(
+                        profile ? profile.maxOutputTokens : 0);
+                }
+            }
+
+            function renderAiProfileSelect() {
+                if (!aiProfileSelect) return;
+                aiProfileSelect.textContent = '';
+                if (!aiProfiles.length) {
+                    var placeholder = document.createElement('option');
+                    placeholder.value = '';
+                    placeholder.textContent = t('未配置接口');
+                    aiProfileSelect.appendChild(placeholder);
+                } else {
+                    aiProfiles.forEach(function (profile) {
+                        var option = document.createElement('option');
+                        option.value = profile.id;
+                        option.textContent = aiProfileDisplayName(profile);
+                        aiProfileSelect.appendChild(option);
+                    });
+                    aiProfileSelect.value = aiActiveProfileId;
+                }
+                // 没有档案时管理按钮没有作用对象
+                var hasProfile = aiProfiles.length > 0;
+                if (aiProfileDuplicateButton) aiProfileDuplicateButton.disabled = !hasProfile;
+                if (aiProfileDeleteButton) aiProfileDeleteButton.disabled = !hasProfile;
+                if (aiProfileAddButton) {
+                    aiProfileAddButton.disabled = aiProfiles.length >= AI_PROFILE_MAX;
+                }
+            }
+
+            function renderAiProfileDeleteButton() {
+                if (!aiProfileDeleteButton) return;
+                // 两步确认: 第一次点只是进入"待确认", 按钮文字随之变化
+                aiProfileDeleteButton.textContent = aiProfileDeleteArmed
+                    ? t('确认删除') : t('删除');
+                aiProfileDeleteButton.dataset.armed = aiProfileDeleteArmed ? 'true' : 'false';
+            }
+
+            // 新建 / 复制一条档案并切过去 —— 新建的目的就是要用它, 不切会让人以为没生效
+            function addAiProfile(duplicate) {
+                if (aiProfiles.length >= AI_PROFILE_MAX) {
+                    showToast('warning', t('AI 助手'),
+                        tf('最多只能保存 {count} 个模型', { count: AI_PROFILE_MAX }), 4000);
+                    return;
+                }
+                var template = duplicate ? activeAiProfile() : null;
+                var profile = {
+                    id: genAiProfileId(),
+                    name: template ? (aiProfileDisplayName(template) + ' ' + t('副本')) : '',
+                    baseUrl: template ? template.baseUrl : '',
+                    apiKey: template ? template.apiKey : '',
+                    model: template ? template.model : '',
+                    contextWindow: template ? template.contextWindow : 0,
+                    maxOutputTokens: template ? template.maxOutputTokens : 0
+                };
+                aiProfiles.push(profile);
+                aiActiveProfileId = profile.id;
+                aiProfileFormDirty = false;
+                persistAiProfile(profile);
+                postAiProfileCommand('aiActiveProfile', { id: profile.id });
+                applyActiveAiProfile();
+                if (aiProfileNameInput) aiProfileNameInput.focus();
+            }
+
+            function deleteActiveAiProfile() {
+                var profile = activeAiProfile();
+                if (!profile) return;
+                for (var index = 0; index < aiProfiles.length; index += 1) {
+                    if (aiProfiles[index].id !== profile.id) continue;
+                    aiProfiles.splice(index, 1);
+                    break;
+                }
+                // 本地先切到剩下的第一条; 宿主回推会给出同样的结果
+                aiActiveProfileId = aiProfiles.length ? aiProfiles[0].id : '';
+                aiProfileFormDirty = false;
+                postAiProfileCommand('aiProfileDelete', { id: profile.id });
+                applyActiveAiProfile();
+                showToast('success', t('AI 助手'), t('模型已删除'), 3000);
+            }
+
+            function toggleAiProfileDelete() {
+                if (!aiProfileDeleteArmed) {
+                    aiProfileDeleteArmed = true;
+                    renderAiProfileDeleteButton();
+                    clearTimeout(aiProfileDeleteTimer);
+                    aiProfileDeleteTimer = setTimeout(function () {
+                        aiProfileDeleteArmed = false;
+                        renderAiProfileDeleteButton();
+                    }, AI_PROFILE_DELETE_ARM_MS);
+                    return;
+                }
+                clearTimeout(aiProfileDeleteTimer);
+                aiProfileDeleteArmed = false;
+                renderAiProfileDeleteButton();
+                deleteActiveAiProfile();
+            }
+
+            // 保存表单到当前档案。**两个长度任一写法非法就整体不保存** ——
+            // 宁可让用户看到提示重填, 也不要静默把合法的那一半写进去
+            function saveAiProfileFromPanel() {
+                var contextWindow = parseAiTokenLimitInput(
+                    aiContextWindowInput ? aiContextWindowInput.value : '');
+                var maxOutputTokens = parseAiTokenLimitInput(
+                    aiMaxOutputInput ? aiMaxOutputInput.value : '');
+                if (contextWindow === null || maxOutputTokens === null) {
+                    showToast('warning', t('AI 助手'),
+                        t('长度需填写正整数 token 数（可写 128K、1M）'), 4000);
+                    return;
+                }
+                var profile = activeAiProfile();
+                if (!profile) {
+                    // 一条档案都没有时点保存 = 用当前填的内容直接建一条
+                    profile = {
+                        id: genAiProfileId(), name: '', baseUrl: '', apiKey: '',
+                        model: '', contextWindow: 0, maxOutputTokens: 0
+                    };
+                    aiProfiles.push(profile);
+                    aiActiveProfileId = profile.id;
+                }
+                profile.name = aiProfileNameInput ? aiProfileNameInput.value.trim() : '';
+                profile.baseUrl = aiBaseUrlInput ? aiBaseUrlInput.value.trim() : '';
+                profile.apiKey = aiApiKeyInput ? aiApiKeyInput.value.trim() : '';
+                profile.model = aiModelInput ? aiModelInput.value.trim() : '';
+                profile.contextWindow = contextWindow;
+                profile.maxOutputTokens = maxOutputTokens;
+                aiProfileFormDirty = false;
+                persistAiProfile(profile);
+                applyActiveAiProfile();
+                var complete = aiConfigComplete();
                 showToast(complete ? 'success' : 'warning', t('AI 助手'),
                     complete ? t('接口设置已保存') : t('请填写接口地址、API 密钥与模型'), 4000);
+            }
+
+            function setAiConfigPanelOpen(open) {
+                if (!aiConfigPanel) return;
+                aiConfigPanel.hidden = !open;
+                if (aiConfigButton) {
+                    aiConfigButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+                }
+                // 关闭面板 = 放弃未保存的编辑; 打开时从活动档案重填
+                aiProfileFormDirty = false;
+                aiProfileDeleteArmed = false;
+                clearTimeout(aiProfileDeleteTimer);
+                renderAiProfileDeleteButton();
+                if (!open) return;
+                renderAiProfileSelect();
+                fillAiProfileForm();
+                if (aiProfileSelect) aiProfileSelect.focus();
+            }
+
+            // ---- 工具栏模型下拉: 切换之外的管理动作都在接口设置面板里 ----
+            function renderAiModelPicker() {
+                var profile = activeAiProfile();
+                var label = aiProfileDisplayName(profile);
+                if (aiModelButtonLabel) aiModelButtonLabel.textContent = label;
+                if (aiModelButton) {
+                    // 触发器只有"图标 + 名字": 它是什么、当前用哪个, 读屏要能拿到, 所以补进名称
+                    var tip = t('模型') + '：' + label;
+                    aiModelButton.title = tip;
+                    aiModelButton.setAttribute('aria-label', tip);
+                }
+                if (!aiModelMenu) return;
+                aiModelMenu.textContent = '';
+                aiProfiles.forEach(function (entry) {
+                    var option = document.createElement('button');
+                    option.className = 'ai-model-option';
+                    option.type = 'button';
+                    option.dataset.profileId = entry.id;
+                    option.setAttribute('role', 'option');
+                    option.setAttribute('aria-checked',
+                        entry.id === aiActiveProfileId ? 'true' : 'false');
+                    var check = document.createElement('span');
+                    check.className = 'ai-model-option-check';
+                    check.setAttribute('aria-hidden', 'true');
+                    check.textContent = AI_MODEL_CHECK_ICON;
+                    var text = document.createElement('span');
+                    text.className = 'ai-model-option-text';
+                    var name = document.createElement('span');
+                    name.className = 'ai-model-option-name';
+                    name.textContent = aiProfileDisplayName(entry);
+                    // 第二行放模型名: 两条档案显示名撞车时, 靠它才分得清
+                    var hint = document.createElement('span');
+                    hint.className = 'ai-model-option-hint';
+                    hint.textContent = entry.model || t('未填写模型名');
+                    text.appendChild(name);
+                    text.appendChild(hint);
+                    option.appendChild(check);
+                    option.appendChild(text);
+                    aiModelMenu.appendChild(option);
+                });
+                // 末项固定是管理入口 (增删改都在接口设置面板里)
+                var manage = document.createElement('button');
+                manage.className = 'ai-model-option ai-model-option-manage';
+                manage.type = 'button';
+                manage.dataset.action = 'manage';
+                manage.textContent = t('管理模型…');
+                aiModelMenu.appendChild(manage);
+            }
+
+            // 展开/收起模型下拉 (动画与"点外部 / Esc 关闭"沿用命令行权限下拉的写法)
+            function setAiModelMenuOpen(open) {
+                if (!aiModelButton || !aiModelMenu) return;
+                aiModelButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+                clearTimeout(aiModelMenuTimer);
+                if (open) {
+                    // 互斥: 另外两个浮层也从工具条附近展开, 同时开会叠在一起
+                    setAiUsagePanelOpen(false);
+                    setAiCmdPolicyMenuOpen(false);
+                    aiModelMenu.classList.remove('closing');
+                    aiModelMenu.classList.add('opening');
+                    aiModelMenu.hidden = false;
+                    if (prefersReducedMotion()) {
+                        aiModelMenu.classList.remove('opening');
+                        return;
+                    }
+                    requestAnimationFrame(function () {
+                        requestAnimationFrame(function () {
+                            if (aiModelButton.getAttribute('aria-expanded') === 'true') {
+                                aiModelMenu.classList.remove('opening');
+                            }
+                        });
+                    });
+                    return;
+                }
+                aiModelMenu.classList.remove('opening');
+                if (aiModelMenu.hidden) return;
+                if (prefersReducedMotion()) {
+                    aiModelMenu.classList.remove('closing');
+                    aiModelMenu.hidden = true;
+                    return;
+                }
+                aiModelMenu.classList.add('closing');
+                aiModelMenuTimer = setTimeout(function () {
+                    if (aiModelButton.getAttribute('aria-expanded') !== 'true') {
+                        aiModelMenu.hidden = true;
+                        aiModelMenu.classList.remove('closing');
+                    }
+                }, AI_MODEL_MENU_CLOSE_MS);
             }
 
             // ==================== 对话记录 (持久化 / 打开 / 删除) ====================
@@ -14731,6 +15361,8 @@
                             // 结尾行数据: 逐个字段转成数字 (脏值归 0 = 该项不显示)
                             message.finishedAt = Number(message.finishedAt) || 0;
                             message.elapsedMs = Number(message.elapsedMs) || 0;
+                            message.model = typeof message.model === 'string' ? message.model : '';
+                            message.truncated = message.truncated === true;
                             if (!message.usage || typeof message.usage !== 'object') {
                                 delete message.usage;
                             } else {
@@ -14826,6 +15458,9 @@
                             if (message.finishedAt) clean.finishedAt = message.finishedAt;
                             if (message.elapsedMs) clean.elapsedMs = message.elapsedMs;
                             if (message.usage) clean.usage = message.usage;
+                            // 本轮使用的模型名与截断标记 (同上, 漏了就落盘丢失)
+                            if (message.model) clean.model = message.model;
+                            if (message.truncated) clean.truncated = true;
                             if (!stopped && message.live && budget > 0
                                 && message.live.length <= budget) {
                                 budget -= message.live.length;
@@ -15900,6 +16535,13 @@
                     meta.appendChild(button);
                 });
                 var items = [];
+                // 输出被截断是最需要一眼看到的信息, 所以放最前
+                if (record.truncated) {
+                    items.push({
+                        text: t('已达输出上限'), warn: true,
+                        title: t('输出被长度上限截断，可在接口设置里调大「最大输出」后重试')
+                    });
+                }
                 if (record.elapsedMs > 0) {
                     items.push({ text: aiFormatMetaDuration(record.elapsedMs),
                         title: t('本轮耗时') });
@@ -15914,6 +16556,10 @@
                         })
                     });
                 }
+                // 模型名: 切换过模型后回看旧对话, 这是唯一能区分"谁答的"的线索
+                if (record.model) {
+                    items.push({ text: record.model, title: t('本轮使用的模型') });
+                }
                 if (record.finishedAt > 0) {
                     items.push({ text: aiFormatMetaTime(record.finishedAt),
                         title: aiFormatMetaFullTime(record.finishedAt) });
@@ -15921,6 +16567,7 @@
                 items.forEach(function (item) {
                     var span = document.createElement('span');
                     span.className = 'ai-meta-item';
+                    if (item.warn) span.dataset.warn = 'true';
                     span.textContent = item.text;
                     if (item.title) span.title = item.title;
                     meta.appendChild(span);
@@ -16345,8 +16992,9 @@
                 aiCmdPolicyButton.setAttribute('aria-expanded', open ? 'true' : 'false');
                 clearTimeout(aiCmdPolicyMenuTimer);
                 if (open) {
-                    // 互斥: 用量浮层也从工具条向上展开, 同时开会叠在一起
+                    // 互斥: 用量浮层与模型下拉也从工具条附近展开, 同时开会叠在一起
                     setAiUsagePanelOpen(false);
+                    setAiModelMenuOpen(false);
                     aiCmdPolicyMenu.classList.remove('closing');
                     aiCmdPolicyMenu.classList.add('opening');
                     aiCmdPolicyMenu.hidden = false;
@@ -17138,8 +17786,15 @@
                             return false;
                         });
                         return [
+                            '模型档案：' + aiProfileDisplayName(activeAiProfile())
+                                + '（共 ' + aiProfiles.length + ' 个；切换模型可用 setActiveModel）',
                             '接口地址：' + (aiBaseUrl || '（未配置）'),
                             '模型：' + (aiModel || '（未配置）'),
+                            '上下文长度：' + formatTokenCount(aiContextWindowForModel(aiModel))
+                                + (aiContextWindowOverride > 0 ? '（由用户手动设定）' : '（按模型名推断）'),
+                            '最大输出长度：' + (aiMaxOutputTokens > 0
+                                ? formatTokenCount(aiMaxOutputTokens) + '（由用户设定）'
+                                : '未设定（用服务端默认）'),
                             'API 密钥：' + (!aiApiKey ? '（未配置）'
                                 : (aiApiKey.slice(0, 4) + '……' + aiApiKey.slice(-4)
                                     + '（共 ' + aiApiKey.length + ' 个字符）')),
@@ -17687,6 +18342,19 @@
             function describeAiAction(op) {
                 var target = aiActionTarget(op);
                 switch (op.op) {
+                    case 'setActiveModel': {
+                        // 找不到目标、或本来就是当前模型 → 丢弃 (没有可做的事)。
+                        // 把"已是该模型"当无操作而不是失败, 免得卡片里冒出一条空改动
+                        var nextProfile = aiFindProfileByHint(op.model || op.name || op.id);
+                        if (!nextProfile) return null;
+                        var currentProfile = activeAiProfile();
+                        if (currentProfile && currentProfile.id === nextProfile.id) return null;
+                        return {
+                            title: t('设置当前使用的模型'),
+                            detail: tf('切换到模型「{name}」',
+                                { name: aiProfileDisplayName(nextProfile) })
+                        };
+                    }
                     case 'setGlobalIntensity':
                         if (!Number.isFinite(Number(op.value))) return null;
                         return {
@@ -18003,6 +18671,15 @@
             function applyAiAction(op) {
                 var title = aiActionTarget(op);
                 switch (op.op) {
+                    case 'setActiveModel': {
+                        var nextProfile = aiFindProfileByHint(op.model || op.name || op.id);
+                        if (!nextProfile) {
+                            return { ok: false, detail: t('未找到匹配的模型') };
+                        }
+                        selectAiProfile(nextProfile.id);
+                        return { ok: true, detail: tf('已切换到 {name}',
+                            { name: aiProfileDisplayName(nextProfile) }) };
+                    }
                     case 'setGlobalIntensity': {
                         var globalValue = clampAiIntensity(op.value);
                         setOptimizationIntensity(globalValue, true);
@@ -19027,14 +19704,19 @@
                     '    过小或过大会被夹到允许范围',
                     '{"op":"copyToClipboard","target":"进程名或PID","field":"name|pid|title"}',
                     '    把进程名 / PID / 窗口标题复制到系统剪贴板（用户常用来粘贴到别处）',
+                    '{"op":"setActiveModel","model":"模型名或档案名"}                  切换当前使用的模型',
+                    '    切换到用户已配好的另一条模型档案。名字按实时数据里的「当前模型」与',
+                    '    getAiSelfState 现读，**不要凭空写一个不存在的名字**；找不到的指令会被丢弃。',
+                    '    用户问"换个模型试试"之类时才提议；与其它改动一样，需要他点"应用"才生效。',
                     '',
                     '## 你做不到的事（不要提议，也不要假装能做）',
                     '- 结束进程、改进程优先级、改 CPU 亲和性、注入或挂起进程 —— **本软件自身没有这些功能**，',
                     '  想做到只能走命令行（那会先请用户确认）；不要声称软件能一键完成。',
                     '- 开启轻量化模式、退出程序、关闭主窗口 —— 会让当前对话当场中断，不提供给你。',
                     '  （但**可以**用 setCloseAction 设定"用户点关闭时"的行为 —— 那是改设置，不是现在关闭。）',
-                    '- 修改你自己的接口配置与权限档位（API 密钥、命令行权限、联网开关）—— 这属于安全边界，',
+                    '- 修改**接口配置本身**（接口地址、API 密钥）与权限档位（命令行权限、联网开关）—— 这属于安全边界，',
                     '  只能由用户在界面上改。你可以读取它们（getAiSelfState）来判断自己此刻能做什么。',
+                    '  （**切换使用哪条已配好的模型**不属于此类 —— 那用 setActiveModel，见上。）',
                     '',
                     '## 指令块格式',
                     '需要动作时，在回复末尾输出一个代码块，语言标记写 action，内容是 JSON 数组：',
@@ -19087,6 +19769,9 @@
                     // 放在这里而不是 system prompt 里: system 必须完全固定才能命中缓存,
                     // 而语言是会话级信息 (切换到别的语言时, 只有当轮的快照会变)
                     '- 界面语言：' + describeAiInterfaceLanguage() + '（请用这个语言回答）',
+                    // 你此刻是哪个模型、还有哪些可选: 多档案下模型自己也要知道 ——
+                    // 否则被问"你是什么模型"会答错, 也不会想到可以提议 setActiveModel
+                    '- 当前模型：' + aiModelProfileLine(),
                     // 命令行权限: 模型需要知道自己此刻能做什么, 否则会反复尝试被禁用的能力。
                     // 同样放动态块 (权限可随时改), 不能进 system prompt
                     '- 命令行权限：' + (AI_COMMAND_POLICY_META[aiCommandPolicy]
@@ -19203,7 +19888,10 @@
                     usage: null,
                     startedAt: performance.now(),
                     firstTokenAt: 0,     // 第一个 token 到达的时刻 (速度按它到结束算, 不含建连等待)
-                    finishedAt: 0
+                    finishedAt: 0,
+                    // 'length' = 输出被长度上限截断 (不是模型自己写完的)。
+                    // 没这个信息的话, 截断看起来就只是"回答突然停住", 用户只会以为模型不行
+                    finishReason: ''
                 };
                 // 只在收到第一段内容时打点: 首字节延迟不该算进生成速度
                 function markFirstToken() {
@@ -19230,6 +19918,10 @@
                     // 老/精简的兼容服务可能不认它 (会 400), 下面有自动去掉重试的兜底
                     stream_options: { include_usage: true }
                 };
+                // 最大输出长度: **只在用户填了才发送** —— 留空代表"不干预, 用服务端默认",
+                // 与不填这项时的行为逐字节一致。
+                // 参数名不通用 (新推理模型只认 max_completion_tokens), 所以下面要能换名重试
+                if (aiMaxOutputTokens > 0) requestBody.max_tokens = aiMaxOutputTokens;
                 function send() {
                     return fetch(url, {
                         method: 'POST',
@@ -19239,15 +19931,26 @@
                     });
                 }
                 var response = await send();
-                if (!response.ok && response.status === 400) {
-                    // 有些兼容服务不认 stream_options 会直接 400: 去掉该参数重试一次。
-                    // 用 clone() 探读错误正文, 避免消费掉 body 导致后面读不到详情
+                // 兼容兜底: 有些服务不认 stream_options / max_tokens 会直接 400。
+                // 用 clone() 探读错误正文 (不消费原 body, 否则后面读不到详情),
+                // 命中哪个参数就改掉哪个再重试; 每项只试一次, 不认识的 400 直接交出去
+                for (var attempt = 0; attempt < 2 && !response.ok
+                    && response.status === 400; attempt += 1) {
                     var probe = '';
                     try { probe = await response.clone().text(); } catch (e) { }
-                    if (/stream_options/i.test(probe)) {
+                    if (requestBody.stream_options && /stream_options/i.test(probe)) {
                         delete requestBody.stream_options;
-                        response = await send();
+                    } else if (requestBody.max_tokens && /max_tokens/i.test(probe)) {
+                        requestBody.max_completion_tokens = requestBody.max_tokens;
+                        delete requestBody.max_tokens;
+                    } else if (requestBody.max_completion_tokens
+                        && /max_completion_tokens/i.test(probe)) {
+                        requestBody.max_tokens = requestBody.max_completion_tokens;
+                        delete requestBody.max_completion_tokens;
+                    } else {
+                        break;
                     }
+                    response = await send();
                 }
 
                 if (!response.ok) {
@@ -19271,6 +19974,9 @@
                     var choice = payload && payload.choices && payload.choices[0];
                     var message = choice ? (choice.message || choice) : null;
                     if (payload && payload.usage) stats.usage = payload.usage;
+                    if (choice && typeof choice.finish_reason === 'string') {
+                        stats.finishReason = choice.finish_reason;
+                    }
                     var wholeText = message && typeof message.content === 'string' ? message.content : '';
                     if (wholeText) { markFirstToken(); onDelta(wholeText); }
                     // 一次性响应也可能带推理内容 (reasoning_content)
@@ -19299,6 +20005,9 @@
                         // 末尾的 usage chunk 通常 choices 为空, 要先取 usage 再判断 delta
                         if (event && event.usage) stats.usage = event.usage;
                         var eventChoice = event && event.choices && event.choices[0];
+                        if (eventChoice && typeof eventChoice.finish_reason === 'string') {
+                            stats.finishReason = eventChoice.finish_reason;
+                        }
                         var delta = eventChoice ? (eventChoice.delta || eventChoice.message) : null;
                         var piece = delta && typeof delta.content === 'string' ? delta.content : '';
                         if (piece) { markFirstToken(); onDelta(piece); }
@@ -19428,12 +20137,17 @@
                 // commands: 本轮执行过的系统命令 (只读自动执行的那些), 用于在气泡里
                 // 展示"执行了什么、结果如何" —— 不记的话自动执行的命令对用户完全不可见
                 var assistantRecord = { role: 'assistant', content: '', reasoning: '',
-                    streaming: true, commands: [] };
+                    streaming: true, commands: [],
+                    // 本轮用的模型 (显示名快照): 切换模型后回看旧对话,
+                    // 这是"这条是谁答的"的唯一线索
+                    model: aiProfileDisplayName(activeAiProfile()) };
                 // 本轮 (= 这一次提问) 的时间与 token 统计, 供结尾行使用。
                 // 计时从**提问发出**开始 —— 用户感受到的等待包含建连与多轮取数
                 var turnStartedAt = Date.now();
                 // ⚠️ 多轮取数会有多次请求, 必须逐轮累加; 只记最后一次会严重低估本轮消耗
                 var turnUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+                // 最近一轮请求的结束原因 ('length' = 输出被长度上限截断)
+                var turnFinishReason = '';
                 historyRef.push(assistantRecord);
                 if (historyRef.length > AI_CHAT_MESSAGES_MAX) {
                     // 超上限时裁掉最旧的消息 (assistantRecord 在末尾, 不会被裁到)
@@ -19483,6 +20197,9 @@
                     assistantRecord.finishedAt = Date.now();
                     assistantRecord.elapsedMs = assistantRecord.finishedAt - turnStartedAt;
                     if (turnUsage.totalTokens > 0) assistantRecord.usage = turnUsage;
+                    // 输出被长度上限截断 (finish_reason = 'length') 记下来, 结尾行才能警示。
+                    // 不记的话用户只会看到回答莫名收尾, 误以为模型能力不行
+                    assistantRecord.truncated = turnFinishReason === 'length';
                     // 有命令记录时即使没正文也要留着: 命令执行过程本身就是内容
                     // (只执行了命令、模型还没输出结论就被中断的情形)
                     if (!String(content || '').trim() && !String(reasoning || '').trim()
@@ -19574,6 +20291,9 @@
                             turnUsage.completionTokens += roundUsage.completionTokens;
                             turnUsage.totalTokens += roundUsage.totalTokens;
                         }
+                        // 结束原因取最后一次非空: 多轮取数时只有真正收尾的那轮能说明终止原因
+                        turnFinishReason = (roundStats && roundStats.finishReason)
+                            || turnFinishReason;
 
                         flushPaint();
                         var parsedAnswer = parseAiActions(answer);
@@ -19772,6 +20492,12 @@
                 }
                 // 用量统计的标签是脚本拼的 (静态翻译器跳过 .ai-usage), 按新语言重建
                 renderAiUsage();
+                // 模型下拉里的档案名、"管理模型…"与无障碍名称都是脚本生成的
+                // (静态翻译器跳过 .ai-model-picker), 按新语言重建
+                renderAiModelPicker();
+                // 接口设置面板里的下拉选项、新建/复制/删除按钮文字同理
+                renderAiProfileSelect();
+                renderAiProfileDeleteButton();
                 // 权限控件的档位文字与提示是脚本生成 (静态翻译器跳过 .ai-cmd-policy)
                 renderAiCommandPolicy();
                 // 联网开关的文字与提示同样是脚本生成
@@ -19821,10 +20547,56 @@
                 });
             }
             if (aiConfigSaveButton) {
-                aiConfigSaveButton.addEventListener('click', saveAiConfigFromPanel);
+                aiConfigSaveButton.addEventListener('click', saveAiProfileFromPanel);
             }
             if (aiConfigCancelButton) {
                 aiConfigCancelButton.addEventListener('click', function () { setAiConfigPanelOpen(false); });
+            }
+            // 模型档案: 下拉切换 / 新建 / 复制 / 删除 (删除是两步确认)
+            if (aiProfileSelect) {
+                aiProfileSelect.addEventListener('change', function () {
+                    selectAiProfile(aiProfileSelect.value);
+                });
+            }
+            if (aiProfileAddButton) {
+                aiProfileAddButton.addEventListener('click', function () { addAiProfile(false); });
+            }
+            if (aiProfileDuplicateButton) {
+                aiProfileDuplicateButton.addEventListener('click', function () { addAiProfile(true); });
+            }
+            if (aiProfileDeleteButton) {
+                aiProfileDeleteButton.addEventListener('click', toggleAiProfileDelete);
+            }
+            // 表单里任何编辑都标脏 —— 挡住宿主整包下发把用户正在敲的内容冲掉
+            [aiProfileNameInput, aiBaseUrlInput, aiApiKeyInput, aiModelInput,
+                aiContextWindowInput, aiMaxOutputInput].forEach(function (input) {
+                if (!input) return;
+                input.addEventListener('input', function () { aiProfileFormDirty = true; });
+            });
+            // 模型下拉: 触发器开合 / 选中即切换 / 管理入口 / 点外部与 Esc 收起
+            if (aiModelButton && aiModelMenu) {
+                aiModelButton.addEventListener('click', function (event) {
+                    event.stopPropagation();   // 否则会被下面的"点外部关闭"立刻关掉
+                    setAiModelMenuOpen(aiModelButton.getAttribute('aria-expanded') !== 'true');
+                });
+                aiModelMenu.addEventListener('click', function (event) {
+                    var manage = event.target.closest('.ai-model-option-manage');
+                    if (manage) {
+                        setAiModelMenuOpen(false);
+                        setAiConfigPanelOpen(true);
+                        return;
+                    }
+                    var option = event.target.closest('.ai-model-option');
+                    if (option && option.dataset.profileId) {
+                        selectAiProfile(option.dataset.profileId);
+                        setAiModelMenuOpen(false);
+                    }
+                });
+                document.addEventListener('click', function () { setAiModelMenuOpen(false); });
+                document.addEventListener('keydown', function (event) {
+                    if (event.key === 'Escape') setAiModelMenuOpen(false);
+                });
+                window.addEventListener('blur', function () { setAiModelMenuOpen(false); });
             }
             // 命令行权限下拉: 触发器开合 / 菜单项选中 / 点外部与 Esc 收起
             if (aiCmdPolicyButton && aiCmdPolicyMenu) {
@@ -19917,6 +20689,8 @@
             renderAiUsage();   // 初始渲染: 即使还没数据也要占位显示 (不用 hidden)
             renderAiCommandPolicy();   // 权限控件: 先用默认档渲染 (宿主下发后会再同步)
             renderAiWebSearchToggle();   // 联网开关: 同上
+            // 模型档案: 先按空列表渲染, 宿主下发配置后会重建成真实内容
+            applyActiveAiProfile();
             refreshAiSendState();   // 初始输入框为空: 发送按钮应为灰色
             initAiThreadAutoFollow();   // 内容变高时自动跟到底部 (含三点动画撑高)
             if (aiInput) {

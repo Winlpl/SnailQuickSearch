@@ -292,6 +292,8 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
     std::wstring emit;          /* lua 两模式 ai.print 过程/统计输出 (并入工具结果 output 回喂模型; 不渲染不落库) */
+    std::wstring rows;          /* lua ai.row 数据行 (完整 JSON 数组文本 "[[..],..]"; 随工具结果 rows 字段回喂模型;
+                                    不渲染不落库 — 卡片只展示 count/路径样本) */
     std::wstring err;           /* 失败原因 */
     std::vector<std::wstring> top;   /* 结果样本路径 (≤20; 展开显示) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */

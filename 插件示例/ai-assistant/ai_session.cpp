@@ -268,6 +268,14 @@ static void PumpStreams() {
                 if (truncated) back.text += L"\n\n*(回答已截断)*";
             }
             s.sending = false;
+            /* 临时诊断 (空答复排查): 泵收尾时快照到的 out 长度与开头 */
+            if (g_host && g_host->StorageSet) {
+                std::wstring dbg = L"state=" + std::to_wstring(state) +
+                                   L" outLen=" + std::to_wstring(out.size()) +
+                                   L" msgs=" + std::to_wstring(s.msgs.size()) +
+                                   L"\noutHead=" + out.substr(0, 200);
+                g_host->StorageSet(g_ctx, "调试收尾", U8(dbg).c_str(), (int)U8(dbg).size());
+            }
             WebTouch(&s);
             s.curId = HistUpsert(s.curId, s.msgs);
             histChanged = true;

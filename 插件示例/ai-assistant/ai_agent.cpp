@@ -49,6 +49,8 @@ static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
 static CRITICAL_SECTION g_emitCs;
 static std::string g_emitBuf;
 static bool g_emitCut = false;
+static std::string g_rowBuf;     /* ai.row 数据行 (逗号衔接的 JSON 行, 完成后包成 [..] 回喂; 同锁同封顶) */
+static bool g_rowCut = false;
 static std::string g_srchSet8;   /* g_agentRes 搜索设置 JSON 快照 (创建时取一次, 注入系统提示词; 经 g_emitCs 护) */
 
 /* UI 编组在飞登记 (声明提前 — AgentToolInit/Shutdown 在此就触碰; 机制本体见下方"宿主扩展 API"节) */
@@ -90,6 +92,99 @@ static int AgentLuaPrint(void* L) {
     return 0;
 }
 
+/* ai.row 的 C 实现: 数据行通道 — 脚本压 id + 动态字段名, 名称/属性值由插件按 id 直取
+ * (xjs_db_Get* 只读查询, 引擎执行脚本期间可重入读 — 与脚本内 f.fpath() 同一性质)。
+ * 行 = 只含请求字段的 JSON 对象 ({"id":..,"大小":..}), 不固定列序不填 null —
+ * 没请求的字段一个 token 都不花; 索引未开启的字段整键省略, 完成回吐时 rows 首元素提示一次。
+ * 签名: ai.row(id, "字段名", ...) — 字段名 = 输出 JSON 的键, 一套名字两用 (名称/路径/大小/
+ * 修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分); 无字段实参 = id+名称 (最常用)。
+ * 回调在引擎搜索/执行线程 — 与 ai.print 同一把 g_emitCs 小锁, 禁止碰 g_agentCs;
+ * lua_filter 并发求值时行序不定 (数据行一律建议 lua_exec)。 */
+enum { ROWF_MT, ROWF_CT, ROWF_AT, ROWF_SZ, ROWF_ATTR, ROWF_ALIAS, ROWF_RATING, ROWF_COUNT };
+static bool g_rowMiss[ROWF_COUNT];   /* 本次运行被省略的未开启字段 (g_emitCs 护) */
+static const char* const ROW_MISS_NAME[ROWF_COUNT] = {
+    "修改时间", "创建时间", "访问时间", "大小", "属性", "别名", "评分",
+};
+
+static int AgentLuaRow(void* L) {
+    int n = xjs_lua_GetTop(L);
+    if (n < 1) return 0;
+    long long id = xjs_lua_ToInteger(L, 1);
+    if (id <= 0) return 0;
+    xjs_engine* eng = xjs_GetDefaultEngine();
+    if (!eng) return 0;
+    std::string row = "{\"id\":" + std::to_string(id);
+    bool miss[ROWF_COUNT] = { false };
+    int fn = n >= 2 ? n - 1 : 1;   /* 字段实参个数; 无实参 = 缺省"名称" */
+    for (int k = 0; k < fn; k++) {
+        const char* f = n >= 2 ? xjs_lua_ToString(L, k + 2) : "名称";
+        if (!f || !*f) continue;
+        const std::string s(f);
+        if (s == "名称") {
+            const char* v = xjs_db_GetName(eng, (int)id);
+            row += ",\"名称\":";
+            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+        } else if (s == "路径") {
+            const char* v = xjs_db_GetPath(eng, (int)id);
+            row += ",\"路径\":";
+            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+        } else if (s == "大小") {
+            if (xjs_db_IsFieldEnabled(eng, "文件大小"))
+                row += ",\"大小\":" + std::to_string(xjs_db_GetFileSize(eng, (int)id));
+            else miss[ROWF_SZ] = true;
+        } else if (s == "修改时间") {
+            if (xjs_db_IsFieldEnabled(eng, "修改时间"))
+                row += ",\"修改时间\":" + std::to_string(xjs_db_GetModifyTime(eng, (int)id) / 1000);
+            else miss[ROWF_MT] = true;
+        } else if (s == "创建时间") {
+            if (xjs_db_IsFieldEnabled(eng, "创建时间"))
+                row += ",\"创建时间\":" + std::to_string(xjs_db_GetCreateTime(eng, (int)id) / 1000);
+            else miss[ROWF_CT] = true;
+        } else if (s == "访问时间") {
+            if (xjs_db_IsFieldEnabled(eng, "访问时间"))
+                row += ",\"访问时间\":" + std::to_string(xjs_db_GetAccessTime(eng, (int)id) / 1000);
+            else miss[ROWF_AT] = true;
+        } else if (s == "扩展名") {
+            const char* v = xjs_db_GetFileExt(eng, (int)id);
+            row += ",\"扩展名\":";
+            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+        } else if (s == "目录") {
+            row += ",\"目录\":";
+            row += xjs_db_IsDir(eng, (int)id) ? "true" : "false";
+        } else if (s == "类型") {
+            const char* v = xjs_db_GetFileTypeStr(eng, (int)id);
+            row += ",\"类型\":";
+            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+        } else if (s == "属性") {
+            if (xjs_db_IsFieldEnabled(eng, "文件属性"))
+                row += ",\"属性\":" + std::to_string(xjs_db_GetFileAttributes(eng, (int)id));
+            else miss[ROWF_ATTR] = true;
+        } else if (s == "别名") {
+            if (xjs_db_IsFieldEnabled(eng, "别名")) {
+                const char* v = xjs_db_GetAlias(eng, (int)id);
+                row += ",\"别名\":";
+                row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+            } else miss[ROWF_ALIAS] = true;
+        } else if (s == "评分") {
+            if (xjs_db_IsFieldEnabled(eng, "文件评分"))
+                row += ",\"评分\":" + std::to_string(xjs_db_GetRating(eng, (int)id));
+            else miss[ROWF_RATING] = true;
+        }
+        /* 未识别的字段名静默忽略 (有效名单在提示词/描述里) */
+    }
+    row += '}';
+    EnterCriticalSection(&g_emitCs);
+    if (g_rowBuf.size() + row.size() <= 16384) {
+        if (!g_rowBuf.empty()) g_rowBuf += ',';
+        g_rowBuf += row;
+    } else {
+        g_rowCut = true;
+    }
+    for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = g_rowMiss[f] || miss[f];
+    LeaveCriticalSection(&g_emitCs);
+    return 0;
+}
+
 void AgentToolInit() {
     InitializeCriticalSectionAndSpinCount(&g_agentCs, 100);
     InitializeCriticalSectionAndSpinCount(&g_srchErrCs, 100);
@@ -101,6 +196,9 @@ void AgentToolShutdown() {
     g_agentTopIds.clear();
     g_emitBuf.clear();   /* 到此工作线程已全部 join, 无并发 */
     g_emitCut = false;
+    g_rowBuf.clear();
+    g_rowCut = false;
+    for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
     for (auto* jb : s_inflight) {   /* 投递后无人认领的编组作业 (消息窗口先没了) 代为回收 */
         if (jb->done) CloseHandle(jb->done);
         delete jb;
@@ -530,6 +628,15 @@ static std::wstring AgentToolUi(AiJob* j, int uiKind, XjsWindowToken defTok,
     return err;
 }
 
+/* ---- 临时调试观察口 (2026-09-25 用户口径): Lua 脚本执行前落盘 data\待运行.lua, 跑完即删 ----
+ * agent 工作线程在 Query 提交前经宿主 StorageSet 写入 (免权限/任意线程, 一键一文件,
+ * 落 plugins\ai-assistant\data\待运行.lua), 作用域守卫析构时 StorageRemove 删除 —
+ * 提交失败/停止/超时/执行失败/正常完成 全部退出路径都删 (RAII 无漏)。
+ * 工具串行锁保证同一时刻只有一份; 观察者盯这个文件即可看到模型即将执行的脚本。 */
+struct LuaDumpCleaner {
+    ~LuaDumpCleaner() { g_host->StorageRemove(g_ctx, "待运行.lua"); }
+};
+
 /* run_search 实体; 返回空串 = 成功, 否则 = 错误描述 (调用方持 g_agentCs) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query, AiToolStep* st) {
     xjs_engine* eng = xjs_GetDefaultEngine();
@@ -541,6 +648,7 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         if (!g_agentRes) return L"结果对象创建失败";
         xjs_result_SetCallback(g_agentRes, XJS_RESULT_EVENT_FAILED, (const void*)AgentOnSearchFailed, NULL);
         xjs_result_LuaRegisterFunction(g_agentRes, "ai", "print", AgentLuaPrint);
+        xjs_result_LuaRegisterFunction(g_agentRes, "ai", "row", AgentLuaRow);
         const char* ss = xjs_result_GetSearchSettings(g_agentRes);
         EnterCriticalSection(&g_emitCs);
         g_srchSet8 = ss ? ss : "";
@@ -552,11 +660,17 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     g_srchErrFp = -1;
     LeaveCriticalSection(&g_srchErrCs);
     bool luaMode = (mode == L"lua_filter" || mode == L"lua_exec");
-    if (luaMode) {   /* 清缓冲必须在发起前: Query 返回后 VM 可能立刻开跑并 ai.print */
+    LuaDumpCleaner dumpCleaner;   /* 作用域 = 本次工具执行, 返回时删 data\待运行.lua (非 lua 模式无文件, 空删无害) */
+    if (luaMode) {   /* 清缓冲必须在发起前: Query 返回后 VM 可能立刻开跑并 ai.print/ai.row */
         EnterCriticalSection(&g_emitCs);
         g_emitBuf.clear();
         g_emitCut = false;
+        g_rowBuf.clear();
+        g_rowCut = false;
+        for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
         LeaveCriticalSection(&g_emitCs);
+        /* 临时调试观察口: 先落盘再提交 (VM 可能 Query 返回即开跑) */
+        g_host->StorageSet(g_ctx, "待运行.lua", q8.c_str(), (int)q8.size());
     }
     int fp = -1;
     if (mode == L"wildcard")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 0, FALSE);
@@ -600,11 +714,31 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     }
     st->count = xjs_result_GetCount(g_agentRes);
     st->elapsedMs = xjs_result_GetElapsed(g_agentRes);
-    if (luaMode) {   /* 取走本次 ai.print 过程/统计输出 (整段并入工具结果) */
+    if (luaMode) {   /* 取走本次 ai.print 过程/统计输出 + ai.row 数据行 (整段并入工具结果) */
         EnterCriticalSection(&g_emitCs);
         st->emit = W8(g_emitBuf.c_str());
         g_emitBuf.clear();
         g_emitCut = false;
+        std::string missNote;
+        for (int f = 0; f < ROWF_COUNT; f++) {
+            if (!g_rowMiss[f]) continue;
+            if (!missNote.empty()) missNote += "、";
+            missNote += ROW_MISS_NAME[f];
+        }
+        if (!g_rowBuf.empty() || g_rowCut || !missNote.empty()) {
+            std::string wrapped = "[";
+            if (!missNote.empty()) wrapped += "\"(索引未开启字段, 已省略: " + missNote + ")\",";
+            wrapped += g_rowBuf;
+            if (g_rowCut) {
+                if (!g_rowBuf.empty()) wrapped += ',';
+                wrapped += "\"(行数过多, 后续已截断)\"";
+            }
+            wrapped += "]";
+            st->rows = W8(wrapped.c_str());   /* 插件自拼的合法 JSON, 回喂时直接拼接不再转义 */
+        }
+        for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
+        g_rowBuf.clear();
+        g_rowCut = false;
         LeaveCriticalSection(&g_emitCs);
     }
     /* 样本 TOP 20: fileId 留给 open_file, 路径给模型 (GetPath 指针为线程本地缓存, 必须立即拷贝) */
@@ -648,6 +782,70 @@ static std::wstring AgentToolCopyPaths() {
     if (!g_host || g_host->ClipboardSetText(g_ctx, U8(text).c_str()) != XJS_PLUGIN_OK)
         return L"剪贴板写入失败";
     return L"";
+}
+
+/* ==================== 工具结果省 token (向成熟 agent harness 口径看齐) ====================
+ * ① 路径清单不整条回喂: 样本先求"最长公共目录前缀"(目录边界对齐/大小写不敏感/斜杠归一),
+ *   够长才作 base — base 内条目只回相对路径, base 外条目保留绝对路径, 还原口径
+ *   (完整路径 = base + '\' + 条目) 写在工具 description 与系统提示词《路径是精确数据》节。
+ *   st->top 恒存完整路径 (卡片展开显示/历史落库用), 压缩只发生在喂模型这一步。
+ * ② 旧轮工具输出中段裁剪 (ToolOutputPrune): 一轮对话里早先回喂过的超长输出 (get_lua_spec
+ *   规范全文/大段 ai.print), 后续每轮重发时只留头尾+占位标记 — 原文已经送达过一次,
+ *   规范可随时 get_lua_spec 重取; 本轮刚产出的批次不裁 (模型正要用)。
+ * ③ 环境快照移到请求尾部 (AgentBuildBody): instructions/tools/历史前缀逐字节稳定,
+ *   provider 前缀缓存才命得到 — 快照带秒级时间, 拼在 instructions 里每请求必变 = 缓存全灭。 */
+
+static wchar_t AiWLower(wchar_t c) { return (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c; }
+
+/* a/b 的最长公共目录前缀长度 (含结尾分隔符; '/' 归一 '\\' 后比较, 大小写不敏感) */
+static size_t PathCommonDirPrefix(const std::wstring& a, const std::wstring& b) {
+    size_t n = a.size() < b.size() ? a.size() : b.size();
+    size_t last = 0;
+    for (size_t i = 0; i < n; i++) {
+        wchar_t ca = a[i] == L'/' ? L'\\' : AiWLower(a[i]);
+        wchar_t cb = b[i] == L'/' ? L'\\' : AiWLower(b[i]);
+        if (ca != cb) break;
+        if (ca == L'\\') last = i + 1;
+    }
+    return last;
+}
+
+/* top → (base, 压缩后条目)。base 空 = 不压缩 (样本不足/无公共目录/只有盘根级前缀)。 */
+static void PathCompressList(const std::vector<std::wstring>& top, std::wstring* baseOut,
+                             std::vector<std::wstring>* out) {
+    *baseOut = L"";
+    *out = top;
+    if (top.size() < 2) return;
+    size_t common = top[0].size();
+    for (size_t i = 1; i < top.size() && common > 0; i++) {
+        size_t c = PathCommonDirPrefix(top[0], top[i]);
+        if (c < common) common = c;
+    }
+    if (common < 6) return;
+    /* 发出的 base 剥掉尾分隔符: 模型侧还原公式恒为 base+'\\'+条目 (提示词/描述已写死),
+     * base 自带尾 '\\' 会照公式拼出双分隔符; 逐条判定/截取仍用带分隔符的原 common */
+    size_t emitLen = common;
+    while (emitLen > 0 && top[0][emitLen - 1] == L'\\') emitLen--;
+    if (emitLen < 6) return;   /* 剥完只剩盘符级前缀, 省不了几列, 不值得让模型多做一步拼接 */
+    baseOut->assign(top[0], 0, emitLen);
+    for (size_t i = 0; i < top.size(); i++) {
+        if (PathCommonDirPrefix(top[0], top[i]) < common) continue;   /* base 外 = 保留绝对路径 */
+        (*out)[i] = top[i].size() > common ? top[i].substr(common) : L".";   /* 恰为 base 目录自身 = "." */
+    }
+}
+
+/* 旧轮工具输出中段裁剪: 超过阈值只保留头尾, 断点回退 UTF-8 字符边界 (避免切碎多字节)。 */
+static const size_t PRUNE_THRESHOLD = 3600, PRUNE_HEAD = 2400, PRUNE_TAIL = 900;
+static size_t PruneUtf8Floor(const std::string& s, size_t pos) {
+    while (pos > 0 && (unsigned char)s[pos] >= 0x80 && (unsigned char)s[pos] < 0xC0) pos--;
+    return pos;
+}
+static std::string ToolOutputPrune(const std::string& s) {
+    if (s.size() <= PRUNE_THRESHOLD) return s;
+    std::string r = s.substr(0, PruneUtf8Floor(s, PRUNE_HEAD));
+    r += "\n…[中段已省略以节约上下文; 此前已完整回喂过, 需要时重新调用该工具]…\n";
+    r += s.substr(PruneUtf8Floor(s, s.size() - PRUNE_TAIL));
+    return r;
 }
 
 /* 参数小工具 */
@@ -821,23 +1019,33 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         long long total = 0;
         const Jv* tv = o.Get(L"选中数");
         if (tv && tv->t == 2) total = (long long)tv->num;
-        std::wstring out = L"{\"窗口名称\":\"" + W8(JsonEscapeUtf8(o.S(L"窗口名称")).c_str()) + L"\"";
-        out += L",\"选中数\":" + std::to_wstring(total);
-        out += L",\"说明\":\"选中数>返回数时只详列了前若干条, 其余未展开\"";
-        out += L",\"文件\":[";
-        bool first = true;
+        /* 紧凑回喂: files=[[FileId,路径],…] (路径经公共前缀压缩, 名称=路径最后一段不再单列;
+         * 键名/逐对象包装对 200 条上限的清单是白烧 token)。UI 不消费 res8, 随便压。 */
+        std::vector<std::wstring> paths;
+        std::vector<int> ids;
         for (auto& f : arr->arr) {
             if (f.t != 2) continue;
             int fid = (int)f.num;
             const char* p = xjs_db_GetPath(eng, fid);
-            const char* nm = xjs_db_GetName(eng, fid);
-            if (!first) out += L",";
-            first = false;
+            ids.push_back(fid);
+            paths.push_back(p ? W8(p) : L"");
+        }
+        std::vector<std::wstring> rel;
+        std::wstring base;
+        PathCompressList(paths, &base, &rel);
+        std::wstring out = L"{\"win\":\"" + W8(JsonEscapeUtf8(o.S(L"窗口名称")).c_str()) + L"\"";
+        out += L",\"total\":" + std::to_wstring(total);
+        if (!base.empty()) {
+            out += L",\"base\":";
+            out += W8(JsonEscapeUtf8(base).c_str());
+        }
+        out += L",\"files\":[";
+        for (size_t i = 0; i < ids.size(); i++) {
+            if (i) out += L",";
             wchar_t nb[32];
-            swprintf(nb, 32, L"%d", fid);
-            out += L"{\"ID\":" + std::wstring(nb);
-            out += L",\"路径\":" + W8(JsonEscapeUtf8(W8(p ? p : "")).c_str());
-            out += L",\"名称\":" + W8(JsonEscapeUtf8(W8(nm ? nm : "")).c_str()) + L"}";
+            swprintf(nb, 32, L"%d", ids[i]);
+            out += L"[" + std::wstring(nb) + L",";
+            out += W8(JsonEscapeUtf8(rel[i]).c_str()) + L"]";
         }
         out += L"]}";
         st->res8 = U8(out);
@@ -988,17 +1196,30 @@ static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st
         return U8(j);
     }
     if (st.kind == 0) {
+        std::vector<std::wstring> rel;
+        std::wstring base;
+        PathCompressList(st.top, &base, &rel);
         wchar_t head[128];
-        swprintf(head, 128, L"{\"count\":%d,\"elapsedMs\":%lld,\"top\":[", st.count, st.elapsedMs);
+        swprintf(head, 128, L"{\"count\":%d,\"elapsedMs\":%lld,", st.count, st.elapsedMs);
         j = head;
-        for (size_t i = 0; i < st.top.size(); i++) {
+        if (!base.empty()) {
+            j += L"\"base\":";
+            j += W8(JsonEscapeUtf8(base).c_str());
+            j += L",";
+        }
+        j += L"\"top\":[";
+        for (size_t i = 0; i < rel.size(); i++) {
             if (i) j += L",";
-            j += W8(JsonEscapeUtf8(st.top[i]).c_str());
+            j += W8(JsonEscapeUtf8(rel[i]).c_str());
         }
         j += L"]";
         if (!st.emit.empty()) {   /* lua 脚本 ai.print 的过程/统计输出 */
             j += L",\"output\":";
             j += W8(JsonEscapeUtf8(st.emit).c_str());
+        }
+        if (!st.rows.empty()) {   /* lua 脚本 ai.row 数据行 (插件拼好的 JSON 数组文本) */
+            j += L",\"rows\":";
+            j += st.rows;
         }
         j += L"}";
     } else if (!st.res8.empty()) {
@@ -1035,12 +1256,12 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"## 工具目录（只有名字与一句话；参数细节看各工具的 description，用前先读）\n"
     L"- get_lua_spec：取 Lua 脚本规范全文（默认返回合集，取一次即可写两种模式的脚本）——"
     L"**写 lua_filter/lua_exec 脚本前必须先取**，脚本报错后也先重读规范再改。\n"
-    L"- run_search：引擎内执行一次搜索（5 种模式，语法见《搜索语法速查》；Lua 统计数字经 ai.print 回传）。\n"
+    L"- run_search：引擎内执行一次搜索（5 种模式，语法见《搜索语法速查》；Lua 统计经 ai.print、数据行经 ai.row 回传）。\n"
     L"- open_file / copy_paths：把搜索样本中的文件打开/定位给用户看 / 复制路径清单到剪贴板。\n"
     L"- get_author_and_donate：关于作者/软件背景的权威介绍；用户想捐赠/赞赏时也用它取二维码引用（竖排显示在对话页）。\n"
     L"- list_windows / get_window_state / set_window_settings / control_window / create_window：窗口查看与代办（改动经\"待应用的调整\"卡片，用户点应用才生效）。\n"
     L"- get_global_settings / set_global_settings / list_skins：全局设置读写（改经卡片）/ 皮肤名清单。\n"
-    L"- get_window_selection：读某窗口当前选中的文件 (ID/路径/名称)。用户指\"选中的/这些文件\"要做判断、统计或批量操作建议时用它。\n"
+    L"- get_window_selection：读某窗口当前选中的文件 (FileId+路径, 压缩口径同 run_search)。用户指\"选中的/这些文件\"要做判断、统计或批量操作建议时用它。\n"
     L"- list_languages / get_language / set_language：界面语言清单 / 查询 / 切换（代码 auto|zh|zh-TW|en|ko|th|ms，切换经卡片，用户点应用才生效）。\n"
     L"- set_search：把关键词置入用户窗口的搜索框并执行（run_search 是你的私有搜索，不动用户界面）。\n"
     L"- list_modes / apply_mode / add_search_mode / remove_search_mode：搜索模式查看/执行/增删。\n"
@@ -1072,8 +1293,11 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"2. 文件动作：[打开 xxx](xjs://open?path=<完整路径>)、[在资源管理器中定位 xxx](xjs://reveal?path=<完整路径>)。\n"
     L"   path 的值同样要 URL 编码（空格=%20、&=%26、括号最好也编码=%28 %29）。表格清单里链接文字用文件名即可，\n"
     L"   完整路径放进 path（悬停可见），别把几百字符的整条路径铺在表格里。\n"
-    L"3. 路径是精确数据：必须**逐字复制 run_search 返回的原文**（盘符/空格/括号/间隔点/扩展名一个字符都不能变），\n"
-    L"   绝不凭印象改写、意译或补全——差一个字符，用户点击就打不开。链接文字照抄原文件名，不要自造名称。\n"
+    L"3. 路径是精确数据：必须**逐字符保真**（盘符/空格/括号/间隔点/扩展名一个字符都不能变），\n"
+    L"   绝不凭印象改写、意译或补全——差一个字符，用户点击就打不开。工具结果里的路径条目分两种：\n"
+    L"   以盘符（如 C:\\）开头 = 完整绝对路径，直接用；不带盘符 = 相对路径，结果 JSON 里有\n"
+    L"   \"base\":\"C:\\\\…\\\\目录\"，完整路径 = base + \\\\ + 条目（拼接时不增删任何字符）。\n"
+    L"   链接文字照抄原文件名（路径最后一段），不要自造名称。\n"
     L"4. 直接写出完整绝对路径（含盘符）也会自动渲染为可点击链接：单击=打开，右键=打开/定位/复制路径。\n"
     L"5. 网页链接照常 [标题](https://...)，点击用系统浏览器打开。\n"
     L"\n"
@@ -1110,7 +1334,12 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"取文件属性必须先 `local f = db.get(id)` 再 f.ext()/f.isdir()/f.size()/f.fpath()（虚构 API 脚本必报错）。\n"
     L"- 过程输出：引擎规范里\"数据走 print\"的说法对你不适用（print 进引擎调试输出，工具结果拿不到）；"
     L"你的工具环境注册了 **ai.print(...)**（与 print 同款多参数，可多次调用，参数可为字符串/数字/表），"
-    L"输出会作为本次工具结果 JSON 的 output 字段原样回传——统计数字/逐目录计数/过程日志一律经它；"
+    L"输出会作为本次工具结果 JSON 的 output 字段原样回传——统计数字/逐目录计数/过程日志一律经它；\n"
+    L"- 数据行：要把文件清单（含属性）给用户看时用 **ai.row(id, \"字段名\", ...)** 逐条压行。字段名可任意"
+    L"组合：名称 / 路径 / 大小 / 修改时间 / 创建时间 / 访问时间 / 扩展名 / 目录 / 类型 / 属性 / 别名 / 评分"
+    L"（不带字段实参 = id+名称；字段名就是输出 JSON 的键）。行进工具结果 JSON 的 rows 数组，"
+    L"**每行是只含请求字段的 JSON 对象**（如 {\"id\":123,\"大小\":1048576,\"名称\":\"a.docx\"}，时间=epoch 秒）；"
+    L"索引未开启的字段整键省略（rows 首元素有提示），行数过多会截断。清单展示优先 ai.row，别用 ai.print 手拼行。\n"
     L"return 仍按规范（执行模式=ID 数组，过滤模式=逐文件真值）。\n"
     L"- 脚本沙箱删除了 io/os 等库；API 全集以 get_lua_spec 返回的规范为准，绝不虚构函数。\n"
     L"- **交给用户运行的脚本**（写在回答里的代码块或 xjs://search 链接，不经你执行）：必须写 return ID 数组"
@@ -1120,7 +1349,7 @@ static const wchar_t* AI_INSTRUCTIONS =
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条路径样本。结果同时含文件与目录(文件夹), count/top 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先调 get_lua_spec 取规范。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条路径样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, top=样本路径数组, output=ai.print 输出 (仅 Lua 模式有)。top 压缩口径: 结果带 base 键时条目是相对 base 的路径, 完整路径=base+\\+条目; 条目以盘符开头即为绝对路径。结果同时含文件与目录(文件夹), count/top 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先调 get_lua_spec 取规范。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
   {"type":"function","name":"get_lua_spec","description":"获取引擎内嵌的 Lua 脚本规范全文 (纯文本)。写 lua_filter 或 lua_exec 脚本前必须先取, 脚本报错时也先重读规范再修改 — 规范里有全部可用 API 与硬性规则, 绝不虚构函数。默认返回合集 (两种模式合并去重版, 取一次即可写两种模式的脚本); 仅当引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"open_file","description":"打开最近一次 run_search 样本列表中的某个文件 (在用户屏幕上打开/定位), 用于让用户直接看到该文件。","parameters":{"type":"object","properties":{"index":{"type":"integer","description":"样本列表序号 (1 起)"},"reveal":{"type":"boolean","description":"true=只在资源管理器中定位, 不打开"}},"required":["index"]}},
@@ -1131,7 +1360,7 @@ static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"get_global_settings","description":"读取全局设置 (双击Ctrl目标/绘制引擎)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"set_global_settings","description":"提交对全局设置的修改。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才逐项执行。键: 双击Ctrl目标=\"\"(禁用)|\"默认窗口\"|档案名; 绘制引擎=\"d2d\"|\"gdiplus\"(应用后重启生效)。","parameters":{"type":"object","properties":{"settings":{"type":"object","description":"要修改的全局设置键值对"}},"required":["settings"]}},
   {"type":"function","name":"list_skins","description":"列出全部可用皮肤名 (set_window_settings 的\"皮肤\"键只接受这些名字)。","parameters":{"type":"object","properties":{},"required":[]}},
-  {"type":"function","name":"get_window_selection","description":"读取一个搜索窗口当前选中的文件清单 (引擎 FileId + 完整路径 + 文件名)。用户说\"我选中的这些/当前选中的文件\"要做判断、统计或给出批量操作建议时调用; 没有选中时选中数为 0。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"limit":{"type":"integer","description":"最多详列多少条 (默认 200; 选中数为全量, 超出部分不展开)"}},"required":[]}},
+  {"type":"function","name":"get_window_selection","description":"读取一个搜索窗口当前选中的文件清单。结果 JSON: win=窗口名称, total=选中总数, base?=公共目录前缀 (存在时 files 里的路径是相对它的, 完整路径=base+\\+条目; 条目以盘符开头即为绝对路径), files=[[引擎FileId,路径],…]; 名称=路径最后一段, 不再单列; files 长度<total 时仅详列了前若干条。用户说\"我选中的这些/当前选中的文件\"要做判断、统计或给出批量操作建议时调用; 没有选中时 total=0。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"limit":{"type":"integer","description":"最多详列多少条 (默认 200; 选中数为全量, 超出部分不展开)"}},"required":[]}},
   {"type":"function","name":"list_languages","description":"列出全部可用界面语言 (代码 + 母语名称)。set_language 的 language 参数只接受这些代码 (另加 auto=跟随系统)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"get_language","description":"查询一个搜索窗口当前的界面语言设置 (语言代码; auto=跟随系统)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"}},"required":[]}},
   {"type":"function","name":"set_language","description":"提交切换一个搜索窗口的界面语言。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才切换 (应用后所有窗口标题各自按新语言刷新并落盘)。语言代码先 list_languages 查 (用户说的是\"中文/英文/泰语\"这类母语名, 映射成代码再调)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"language":{"type":"string","enum":["auto","zh","zh-TW","en","ko","th","ms"],"description":"语言代码 (auto=跟随系统)"}},"required":["language"]}},
@@ -1153,10 +1382,11 @@ void BuildInstructions() {
     g_instrA = U8(AI_INSTRUCTIONS);
 }
 
-/* 运行环境快照 (每次请求实时采集, 拼在 instructions 尾部): 当前时间 / 索引规模与状态 /
- * 可选字段开关 / 搜索设置。引擎 7 个可选字段 (大小/时间×3/评分/别名/属性) 未必全开,
+/* 运行环境快照 (每次请求实时采集, 由 AgentBuildBody 作为注入型 user 项拼在 input 末尾):
+ * 当前时间 / 索引规模与状态 / 可选字段开关 / 搜索设置。引擎 7 个可选字段 (大小/时间×3/评分/别名/属性) 未必全开,
  * 不注入这份清单, 模型就会对未开启字段照常写 SQL/Lua —— 用户问"文件何时创建"而
- * 创建时间字段未开启 = 查询报错或空结果, 模型只能瞎猜。全部为引擎只读查询, 工作线程可调。 */
+ * 创建时间字段未开启 = 查询报错或空结果, 模型只能瞎猜。全部为引擎只读查询, 工作线程可调。
+ * 恒放请求尾部不放 instructions: 快照带秒级时间每请求必变, 混进前缀会灭掉 provider 前缀缓存。 */
 static std::wstring BuildEnvSnapshot() {
     std::wstring s = L"\n## 运行环境快照 (每次请求实时采集, 时间与字段口径以此为准)\n";
     SYSTEMTIME st;
@@ -1232,10 +1462,16 @@ static AiCall* AgentCallSlot(std::vector<AiCall>* v, const Jv* oi) {
     return &v->back();
 }
 
-/* 每轮请求体: input = 对话快照 + 已发生的工具往返 (call→output 交错) +
-   本轮模型产出; withTools=false = 收尾轮 (省略 tools 并明示直接回答) */
+/* 每轮请求体: input = 对话快照 + 已发生的工具往返 (call→output 交错) + 环境快照 +
+   循环护栏提醒 + 本轮模型产出; withTools=false = 收尾轮 (省略 tools 并明示直接回答)。
+   省两个大头的口径 (见"工具结果省 token"节):
+   - liveFrom 之后的输出 = 本轮刚产出, 原样回喂; 之前的 = 早先轮次已送达过, 中段裁剪;
+   - instructions 恒为静态骨架, 环境快照 (带秒级时间, 每请求必变) 挪到 input 末尾 —
+     instructions+tools+历史前缀逐字节稳定, provider 前缀缓存才命得到。
+   - inject (重复调用提醒等护栏注入) 恒排快照之后 = 全请求最末位, 对下一轮显著性最高。 */
 static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
-                                  const std::vector<std::string>& accOuts, bool withTools) {
+                                  const std::vector<std::string>& accOuts, size_t liveFrom,
+                                  const std::wstring& inject, bool withTools) {
     std::wstring body = L"{\"model\":";
     body += W8(JsonEscapeUtf8(g_cfg.model).c_str());
     body += L",\"input\":[";
@@ -1258,11 +1494,22 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
         body += W8(JsonEscapeUtf8(W8(accCalls[i].args.c_str())).c_str());
         body += L"}";
         sep();
+        std::string out8 = i < liveFrom ? ToolOutputPrune(accOuts[i]) : accOuts[i];
         body += L"{\"type\":\"function_call_output\",\"call_id\":";
         body += W8(JsonEscapeUtf8(W8(accCalls[i].callId.c_str())).c_str());
         body += L",\"output\":";
-        body += W8(JsonEscapeUtf8(W8(accOuts[i].c_str())).c_str());
+        body += W8(JsonEscapeUtf8(W8(out8.c_str())).c_str());
         body += L"}";
+    }
+    sep();   /* 环境快照 = 注入型 user 项, 恒在工具往返之后、一切提示之前 (缓存只伤最尾) */
+    body += L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
+    body += W8(JsonEscapeUtf8(L"(以下为系统自动注入的环境快照, 非用户发言)" + BuildEnvSnapshot()).c_str());
+    body += L"}]}";
+    if (!inject.empty()) {
+        sep();
+        body += L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
+        body += W8(JsonEscapeUtf8(inject).c_str());
+        body += L"}]}";
     }
     if (!withTools) {
         sep();
@@ -1271,8 +1518,7 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
         body += L"}]}";
     }
     body += L"],\"stream\":true,\"instructions\":";
-    std::wstring instr = W8(g_instrA.c_str()) + BuildEnvSnapshot();   /* 静态说明(UTF-8→宽) + 每轮实时环境快照 */
-    body += W8(JsonEscapeUtf8(instr).c_str());
+    body += W8(JsonEscapeUtf8(W8(g_instrA.c_str())).c_str());   /* 恒定字节 = 跨请求前缀缓存的事实源 */
     if (withTools) {
         body += L",\"tools\":";
         body += W8(AI_TOOLS_JSON);
@@ -1283,37 +1529,82 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
     return U8(body);
 }
 
+/* 退避等待: 500ms·2^attempt 封顶 4s, 期间响应"停止" (立即返回, 由重试环顶部判 abort) */
+static void HttpRetryWait(AiJob* j, int attempt) {
+    DWORD ms = 500u << (attempt > 3 ? 3 : attempt);
+    if (ms > 4000) ms = 4000;
+    ULONGLONG t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < ms) {
+        if (InterlockedCompareExchange(&j->abort, 0, 0)) return;
+        Sleep(40);
+    }
+}
+
 /* 一轮对话: 发请求 → SSE 读流 → 文本增量进 j->out/reason, function_call 攒进 turnCalls。
    返回 false = 网络/HTTP 失败 (errMsg 已设); *failed = 流内协议失败 */
 static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accCalls,
-                         const std::vector<std::string>& accOuts, bool withTools,
+                         const std::vector<std::string>& accOuts, size_t liveFrom,
+                         const std::wstring& repNote, bool withTools,
                          std::vector<AiCall>* turnCalls, bool* aborted, bool* truncated,
                          bool* failed, std::string* errMsg) {
     turnCalls->clear();
-    std::string body = AgentBuildBody(j, accCalls, accOuts, withTools);
+    std::string body = AgentBuildBody(j, accCalls, accOuts, liveFrom, repNote, withTools);
+    /* 临时诊断 (2026-09-25 空答复排查): 每轮请求体/响应原文落 data\调试请求/调试响应 (后者只留
+     * 最后一轮), 定位后连同 LuaDumpCleaner 一起拆掉 */
+    if (g_host->StorageSet)
+        g_host->StorageSet(g_ctx, "调试请求", body.c_str(), (int)body.size());
     wchar_t wpath[1024] = {};
     MultiByteToWideChar(CP_UTF8, 0, j->pathA.c_str(), -1, wpath, 1024);
-    HINTERNET hr = WinHttpOpenRequest(hc, L"POST", wpath, NULL, WINHTTP_NO_REFERER,
-                                      WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                      j->secure ? WINHTTP_FLAG_SECURE : 0);
-    if (!hr) { *errMsg = "open request failed"; return false; }
     bool ok = true;
-    EnterCriticalSection(&j->cs);
-    j->hReq = hr;   /* UI"停止"并发关句柄打断阻塞读 */
-    LeaveCriticalSection(&j->cs);
     std::wstring hdr = L"Content-Type: application/json\r\nAuthorization: Bearer ";
     hdr += W8(j->keyA.c_str());
-    do {
-        if (!WinHttpAddRequestHeaders(hr, hdr.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD) ||
-            !WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) ||
-            !WinHttpReceiveResponse(hr, NULL)) {
-            *errMsg = "send/receive failed";
-            ok = false;
-            break;
+    HINTERNET hr = NULL;
+    /* 瞬态失败重试 (dsh retry-policy 口径): 429/5xx/传输失败 = 500ms·2^n (封顶 4s) 退避重发,
+     * 最多 3 次; 4xx (鉴权/参数/配额) 是语义性失败, 立即放行不改写。退避期响应"停止"。 */
+    for (int attempt = 0;; attempt++) {
+        if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; ok = false; break; }
+        hr = WinHttpOpenRequest(hc, L"POST", wpath, NULL, WINHTTP_NO_REFERER,
+                                WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                j->secure ? WINHTTP_FLAG_SECURE : 0);
+        if (!hr) { *errMsg = "open request failed"; ok = false; break; }
+        EnterCriticalSection(&j->cs);
+        j->hReq = hr;   /* UI"停止"并发关句柄打断阻塞读 */
+        LeaveCriticalSection(&j->cs);
+        BOOL sent = WinHttpAddRequestHeaders(hr, hdr.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD) &&
+                    WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                       (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) &&
+                    WinHttpReceiveResponse(hr, NULL);
+        if (!sent) {
+            bool stopHit = InterlockedCompareExchange(&j->abort, 0, 0) != 0;
+            EnterCriticalSection(&j->cs);
+            if (j->hReq == hr) j->hReq = NULL;
+            LeaveCriticalSection(&j->cs);
+            WinHttpCloseHandle(hr);
+            hr = NULL;
+            if (stopHit) { *aborted = true; ok = false; break; }
+            if (attempt >= 3) { *errMsg = "send/receive failed"; ok = false; break; }
+            HttpRetryWait(j, attempt);
+            continue;
         }
         DWORD status = 0, sz = sizeof(status);
         WinHttpQueryHeaders(hr, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sz, NULL);
+        if (status == 429 || (status >= 500 && status <= 599)) {
+            EnterCriticalSection(&j->cs);
+            if (j->hReq == hr) j->hReq = NULL;
+            LeaveCriticalSection(&j->cs);
+            WinHttpCloseHandle(hr);
+            hr = NULL;
+            if (attempt >= 3) {
+                char mb[64];
+                _snprintf_s(mb, sizeof(mb), _TRUNCATE,
+                            "HTTP %lu (server/rate limit, retried 3 times)", (unsigned long)status);
+                *errMsg = mb;
+                ok = false;
+                break;
+            }
+            HttpRetryWait(j, attempt);
+            continue;
+        }
         if (status != 200) {
             char eb[8192] = {};
             DWORD erd = 0, eofc = 0;
@@ -1340,9 +1631,15 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
             ok = false;
             break;
         }
+        break;   /* 2xx: 锁定本次请求, 退出重试环进入读流 */
+    }
+    if (ok) {
         /* SSE 流式: 文本增量照旧; function_call 按 output_index 分组攒参 */
         std::string buf;
+        std::string sseLog;   /* 临时诊断: 原始 data 行 (封顶 256KB, 轮末落 data\调试响应) */
         ULONGLONG lastPost = 0;
+        int dbgAppend = 0, dbgFail = 0;   /* 临时诊断: delta 追加数 / 解析失败数 */
+        std::string dbgFailHead;          /* 临时诊断: 首个解析失败载荷前 200 字节 */
         for (;;) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; break; }
             DWORD avail = 0;
@@ -1363,13 +1660,18 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                 std::string payload = line.substr(5);
                 while (!payload.empty() && (payload[0] == ' ')) payload.erase(0, 1);
                 if (payload == "[DONE]") continue;
+                if (sseLog.size() < 262144) { sseLog += payload; sseLog += '\n'; }
                 Jv ev = JsonParseW(W8(payload.c_str()));
-                if (ev.t != 5) continue;
+                if (ev.t != 5) {
+                    dbgFail++;
+                    if (dbgFail == 1) dbgFailHead = payload.substr(0, 200);
+                    continue;
+                }
                 std::wstring type = ev.S(L"type");
                 EnterCriticalSection(&j->cs);
                 if (type == L"response.output_text.delta") {
                     const Jv* d = ev.Get(L"delta");
-                    if (d) j->out += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L""));
+                    if (d) { j->out += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L"")); dbgAppend++; }
                 } else if (type == L"response.reasoning_text.delta") {
                     const Jv* d = ev.Get(L"delta");
                     if (d) j->reason += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L""));
@@ -1446,12 +1748,45 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                 PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
             }
         }
-    } while (0);
+        /* 临时诊断: 本轮追加/解析失败统计 + 流结束时 out 长度 */
+        if (g_host->StorageSet) {
+            EnterCriticalSection(&j->cs);
+            size_t outNow = j->out.size();
+            LeaveCriticalSection(&j->cs);
+            std::string dbg = "appends=" + std::to_string(dbgAppend) +
+                              " parseFail=" + std::to_string(dbgFail) +
+                              " outLenAtStreamEnd=" + std::to_string(outNow) +
+                              " turnCalls=" + std::to_string(turnCalls->size()) +
+                              "\nfailHead=" + dbgFailHead;
+            g_host->StorageSet(g_ctx, "调试解析", dbg.c_str(), (int)dbg.size());
+        }
+        if (g_host->StorageSet)
+            g_host->StorageSet(g_ctx, "调试响应", sseLog.c_str(), (int)sseLog.size());
+    }
     EnterCriticalSection(&j->cs);
     if (j->hReq) { WinHttpCloseHandle(j->hReq); j->hReq = NULL; }
     LeaveCriticalSection(&j->cs);
-    WinHttpCloseHandle(hr);
+    if (hr) WinHttpCloseHandle(hr);
     return ok;
+}
+
+/* 重复调用护栏的链键: 工具名 + 键名字典序规范化后的参数 (键序无关, dsh repeat-tool-reminder
+ * 口径: {"a":1,"b":2} 与 {"b":2,"a":1} 视为同一次调用); 参数解析失败保留原文, 同文重复照样命中 */
+static std::string AgentCallKey(const std::string& name8, const std::string& args8) {
+    Jv v = JsonParseW(W8(args8.c_str()));
+    std::string canon;
+    if (v.t == 5) {
+        std::sort(v.obj.begin(), v.obj.end(),
+                  [](const std::pair<std::wstring, Jv>& a, const std::pair<std::wstring, Jv>& b) {
+                      return a.first < b.first;
+                  });
+        std::wstring can;
+        JvAppend(v, &can);
+        canon = U8(can);
+    } else {
+        canon = args8;
+    }
+    return name8 + "|" + canon;
 }
 
 void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果回填 → 下一轮, 直到最终答复 */
@@ -1470,26 +1805,62 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
     else {
         std::vector<AiCall> accCalls;       /* 已执行的工具往返 (input 回填; 与 accOuts 一一对应) */
         std::vector<std::string> accOuts;
+        size_t liveFrom = 0;                /* 本轮刚产出的输出起点 (这些不裁剪; 更早轮次的中段裁剪) */
+        std::string repKey;                 /* 重复调用链键 + 连击计数 (dsh repeat-tool-reminder 口径;
+                                               链随作业存活 = 每条用户消息自然重置) */
+        int repCount = 0;
+        std::wstring repNote;               /* 命中阈值 → 下一轮请求末尾注入的提醒 (随请求消费即清) */
+        int emptyRetry = 0;                 /* 空响应 (无工具调用也无文本) 原样重发次数 */
         for (int turn = 0; turn < AI_AGENT_MAX_TURNS; turn++) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { aborted = true; break; }
             bool lastTurn = turn == AI_AGENT_MAX_TURNS - 1;
             std::vector<AiCall> turnCalls;
             ULONGLONG turnT0 = GetTickCount64();
-            bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, !lastTurn, &turnCalls,
+            bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, liveFrom, repNote, !lastTurn, &turnCalls,
                                        &aborted, &truncated, &failed, &errMsg);
+            repNote.clear();   /* 已随请求消费 */
             EnterCriticalSection(&j->cs);
             j->turnOutMs = GetTickCount64() - turnT0;   /* 速度 = 本轮输出 / 本轮耗时 (含首 token 等待) */
             LeaveCriticalSection(&j->cs);
             if (!okTurn) failed = true;
             if (aborted || failed) break;
-            if (turnCalls.empty()) break;   /* 没有工具调用 = 最终答复完成 */
+            if (truncated) break;   /* 截断轮 (max-tokens): 半截 arguments 绝不执行 (dsh assembler 口径) */
+            if (turnCalls.empty()) {
+                /* 空响应防线 (dsh EMPTY_RESPONSE 口径): 流正常结束但无工具调用也无文本 = 退化完成,
+                 * 原样重发最多 2 次, 仍空才按完成收尾。
+                 * ⚠ 清空只允许发生在"确认重发"之后 — 曾无条件先清再判, 不重发的路径把刚流完的
+                 *   正文一起清掉, 泵收尾读到空 = "输出过程可见、完成后消失" (2026-09-25 实锤) */
+                std::wstring outNow;
+                EnterCriticalSection(&j->cs);
+                outNow = j->out;
+                LeaveCriticalSection(&j->cs);
+                if (TrimW(outNow).empty() && !lastTurn && emptyRetry < 2) {
+                    EnterCriticalSection(&j->cs);
+                    j->out.clear();
+                    j->reason.clear();
+                    LeaveCriticalSection(&j->cs);
+                    emptyRetry++;
+                    repNote = L"(系统提醒: 你上一条回复没有输出任何文字内容。若任务未完成请继续调用工具, "
+                              L"若已完成请直接给出面向用户的最终回答)";
+                    continue;
+                }
+                break;
+            }
             /* 工具执行 (仍在本线程, 串行; 步骤镜像实时推进给泵渲染) */
             EnterCriticalSection(&j->cs);
             j->phase = 1;   /* 泵冻结当前文本气泡 (下一轮答复另起新气泡) */
             LeaveCriticalSection(&j->cs);
             if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+            size_t batchStart = accOuts.size();   /* 本批输出起点 = 下一轮的 liveFrom (见循环尾) */
+            std::vector<std::string> batchKeys;   /* 本批已执行的调用键 (完全重复的调用去重) */
             for (auto& c : turnCalls) {
                 if (InterlockedCompareExchange(&j->abort, 0, 0)) break;
+                /* 链键先行: 同批去重与跨轮重复护栏共用 (键序无关的规范化参数) */
+                std::string k = AgentCallKey(c.name, c.args);
+                bool dup = false;
+                for (auto& pk : batchKeys)
+                    if (pk == k) { dup = true; break; }
+                if (!dup) batchKeys.push_back(k);
                 AiToolStep local;
                 local.state = 1;
                 local.name = W8(c.name.c_str());
@@ -1505,7 +1876,13 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 int pol = InterlockedCompareExchange(&j->policy, 0, 0);
                 bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
                 std::wstring err;
-                if (fileTool && pol == 0) {
+                std::string output;
+                if (dup) {
+                    /* 同批完全重复 (模型惊慌连发): 只执行首个, 其余回执指向前一次结果 —
+                       否则 N 份等量大结果原样回喂直接撑爆上下文 (get_lua_spec 9 连发实锤) */
+                    local.state = 2;
+                    output = "{\"duplicate\":true,\"note\":\"与本批次中前面一次调用完全相同, 已去重未重复执行; 以上一次的执行结果为准\"}";
+                } else if (fileTool && pol == 0) {
                     err = L"权限策略为「禁用」, 已拒绝文件操作";
                     local.state = 3;
                 } else if (fileTool && pol == 1) {
@@ -1519,7 +1896,7 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 }
                 local.err = err;
                 if (local.state == 1) local.state = err.empty() ? 2 : 3;
-                std::string output = AgentToolOutput(err, local);
+                if (output.empty()) output = AgentToolOutput(err, local);
                 EnterCriticalSection(&j->cs);
                 if (sidx >= 0 && sidx < (int)j->steps.size()) {
                     AiToolStep& dst = j->steps[sidx];
@@ -1543,8 +1920,24 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     accCalls.push_back(c);
                     accOuts.push_back(output);
                 }
+                /* 重复调用护栏 (dsh repeat-tool-reminder 口径): 同键连击 3/6 次各注入一次提醒,
+                 * 只提醒不阻断 (被权限闸拒绝/去重的调用同样计数 — 反复锤正是要打断的循环) */
+                if (k == repKey) repCount++;
+                else { repKey = k; repCount = 1; }
+                if (repCount == 3 || repCount == 6) {
+                    repNote = repCount == 3
+                        ? L"(系统提醒: 你正用完全相同的参数重复调用同一个工具, 这不会产生新信息 — "
+                          L"先仔细分析上一次结果, 换不同参数/不同口径再试; 若信息已足够就直接作答)"
+                        : (L"(系统提醒: 工具 " + W8(c.name.c_str()) + L" 已用完全相同的参数连续调用 " +
+                           std::to_wstring(repCount) + L" 次。这些重复调用没有进展, 不要再用这些参数调用它 — "
+                           L"检查最近一次结果, 改用不同参数/不同工具/不同搜索模式, 或基于已有信息直接作答)");
+                }
                 if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
             }
+            /* liveFrom = 本批输出起点: 最新一批在下一轮请求里保持原文 (模型此刻才第一次读到它,
+             * 裁掉它 = "刚取回的规范永远看不到全文"→反复重取→连发撑爆上下文, 2026-09-25 实锤);
+             * 更早批次那时起进入中段裁剪范围 */
+            liveFrom = batchStart;
             EnterCriticalSection(&j->cs);
             j->phase = 0;       /* 下一轮答复另起新文本气泡 */
             j->out.clear();
@@ -1559,6 +1952,14 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
     j->truncated = truncated;
     j->err = W8(errMsg.c_str());
     j->state = aborted ? 3 : (failed ? 2 : 1);
+    /* 临时诊断 (空答复排查): 作业收尾时 out 的长度与开头 */
+    if (g_host->StorageSet) {
+        std::wstring dbg = L"state=" + std::to_wstring(j->state) +
+                           L" truncated=" + std::to_wstring((int)truncated) +
+                           L" outLen=" + std::to_wstring(j->out.size()) +
+                           L"\noutHead=" + j->out.substr(0, 200);
+        g_host->StorageSet(g_ctx, "调试作业末", U8(dbg).c_str(), (int)U8(dbg).size());
+    }
     LeaveCriticalSection(&j->cs);
     if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
 }
