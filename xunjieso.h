@@ -790,8 +790,11 @@ XJS_API const char* XJS_CALL xjs_db_GetExcludedDirs(xjs_engine* engine);
       已有别名的行一律不动(不覆盖 desktop.ini/EXE/lnk/用户设置的现存别名);
       应用后重建默认查询顺序并刷新各搜索结果的排序数组(当前结果顺序不变, 重新搜索后生效).
     - 同步执行: 持引擎写锁遍历全库, 大库可能耗时数百毫秒~数秒, 期间并发 API 会等待; 别名功能未开启时此步无操作(仍返回真).
+    refresh_results: 是否刷新现有搜索结果(仅 sync_existing_db=真 时生效, 默认真).
+    - 真: 库内有行变化时重导各搜索结果的排序数组, 排序字段为别名/评分的结果立即按新值重排(当前结果集行数不变).
+    - 假: 不动任何现有结果(最快), 重新搜索后生效.
     @return 真=已生效; 假=引擎无效/JSON为空或解析失败(30=参数无效)/引擎正忙(遍历/保存/加载中, 35=数据库正忙). */
-XJS_API BOOL XJS_CALL xjs_alias_SetAliasJSON(xjs_engine* engine, const char* alias_json, BOOL sync_existing_db);
+XJS_API BOOL XJS_CALL xjs_alias_SetAliasJSON(xjs_engine* engine, const char* alias_json, BOOL sync_existing_db, BOOL refresh_results);
 
 /** @brief 获取当前路径别名配置.
     @return 返回JSON对象文本(UTF-8), 形如 {"D:\\WoNiu\\e.exe":"易语言"}; 路径为已展开的绝对路径
@@ -813,8 +816,13 @@ XJS_API const char* XJS_CALL xjs_alias_GetAliasJSON(xjs_engine* engine);
       随后刷新各搜索结果的排序数组(当前结果顺序不变, 重新搜索后生效).
     - 同步执行: 持引擎写锁遍历全库, 大库可能耗时数百毫秒~数秒, 期间并发 API 会等待.
     - 遍历期间调用会失败(扫描/同步线程正并发读取).
+    refresh_results: 是否刷新现有搜索结果(仅 sync_existing_db=真 时生效, 默认真).
+    - 真: 类型有变化时联动现有搜索结果: 重导排序数组(排序字段为文件类型的结果立即重排),
+      并对开启类型筛选(选中≠全部)的结果重新筛选, 类型不再命中的行移出当前结果集并触发结果变化事件
+      (新命中的行非本次搜索命中, 待重新搜索后出现).
+    - 假: 不动任何现有结果(最快), 重新搜索后生效.
     @return 真=已生效; 假=引擎无效/JSON为空(30=参数无效)/引擎正忙(遍历/保存/加载中, 35=数据库正忙). */
-XJS_API BOOL XJS_CALL xjs_filter_SetFilterJSON(xjs_engine* engine, const char* filter_json, BOOL sync_existing_db);
+XJS_API BOOL XJS_CALL xjs_filter_SetFilterJSON(xjs_engine* engine, const char* filter_json, BOOL sync_existing_db, BOOL refresh_results);
 
 /** @brief 获取当前筛选器配置.
     @return 返回JSON数组文本(UTF-8), 格式同 xjs_filter_SetFilterJSON 的入参.
@@ -906,15 +914,16 @@ XJS_API int XJS_CALL xjs_lua_ToJson(void* L, int index, char* buffer, int buffer
 // 返回契约同 xjs_lua_ToJson
 XJS_API int XJS_CALL xjs_lua_ArgsToJson(void* L, char* buffer, int bufferCount);
 
-/** @brief 取 Lua 脚本提示词文本(UTF-8, '\0'结尾).
-    引擎内嵌的 Lua 脚本编写提示词(AI 投喂用), 按类型返回其一:
+/** @brief 取查询提示词文本(UTF-8, '\0'结尾).
+    引擎内嵌的查询提示词(AI 投喂用), 按类型返回其一:
     0=搜索过程提示词(《搜索过程提示词.md》: -3 过滤模式脚本——宿主多线程逐文件调用的单文件谓词, f 表 API/两种脚本形态/性能规则);
     1=全局搜索提示词(《ExecuteLua脚本生成提示词.md》: -4 执行模式脚本——脚本自主遍历数据库/排序/生成结果, db/f/res 三表 API 全集);
-    2=合集提示词(《Lua提示词合集.md》: 0 与 1 的合并去重版——公共章节只讲一遍, 一次投喂即可生成 -3/-4 两种模式脚本, 节约 token).
-    宿主可将其作为系统提示词投喂给大模型生成对应模式的脚本.
-    promptType: 0=搜索过程, 1=全局搜索, 2=合集; 其它值返回空字符串("").
+    2=合集提示词(《Lua提示词合集.md》: 0 与 1 的合并去重版——公共章节只讲一遍, 一次投喂即可生成 -3/-4 两种模式脚本, 节约 token);
+    3=SQL搜索提示词(《迅捷搜SQL文件搜索指南.md》: alltable 单表 SQL 查询能力参考——语法支持与限制/表结构/结果返回格式/示例).
+    宿主可将其作为系统提示词投喂给大模型.
+    promptType: 0=搜索过程, 1=全局搜索, 2=合集, 3=SQL搜索; 其它值返回空字符串("").
     @return UTF-8 文本指针; 指向进程级静态缓冲, 进程生命期内有效, 无需释放、请勿改写. */
-XJS_API const char* XJS_CALL xjs_LUA_GetPprompt(int promptType);
+XJS_API const char* XJS_CALL xjs_Query_GetPrompt(int promptType);
 
 // ============================================================================
 // 搜索结果 API

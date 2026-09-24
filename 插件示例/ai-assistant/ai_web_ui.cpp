@@ -4,13 +4,15 @@
  * 结构/样式/交互与参考实现的 AI 助手页同源 (类名同源: ai-msg/ai-bubble/ai-reasoning/
  * ai-cmd-policy/ai-usage/ai-jumpbar/ai-history-*), 颜色 = CSS 变量 (运行时由 C++
  * 推送的皮肤调色注入, 派生色一律 color-mix 从变量现算)。
- * 交互: C++→JS 推送 (boot/pal/cfg/convs/msgs/last/usage/status), JS→C++ 命令 (send/stop/
- * close/settings/policy/new/load/del/clearHist/copy/openurl/pallow/pdeny/retry/notify/ready/
- * search/searchfill/open/reveal/copypath)。
+ * 交互: C++→JS 推送 (boot/pal/cfg/convs/msgs/last/usage/status/toast), JS→C++ 命令 (send/stop/
+ * close/settings/policy/new/load/del/clearHist/copy/openurl/pallow/pdeny/retry/ready/
+ * search/searchfill/open/reveal/copypath)。toast = 页面内提示浮层: 面板被浏览器子窗盖住,
+ * 宿主 Toast 画不进来, 面板打开期间的提示一律走这条 (C++ WebToast 推送 / 页内 showToast)。
  * 可点击交互 (AI 决定点击的类型, 一律标准 Markdown 链接语法): 模型输出 [指引](xjs://search?text=..&mode=..)
- * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); [指引](xjs://open|reveal?path=..)
- * 渲染成文件动作链接; 正文与工具样本里的绝对路径自动识别为文件链接 (单击=打开, 右键=打开/定位/复制);
- * lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
+ * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); 文件动作 [文件名](xjs://open|reveal?id=<FileId>)
+ * 只带引擎 FileId — 路径由程序按 ID 解析, 前端不接触路径 (2026-09-25 用户口径); path 参数 =
+ * 旧历史消息的路径版链接, 继续受理; 正文里确有绝对路径 (旧消息/ai.row 的路径字段) 仍自动识别为文件链接
+ * (单击=打开, 右键=打开/定位/复制); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
  * 安全面: CSP 关 fetch/XHR/表单/外域; 模型输出永不产生活 HTML (C++ md4c 层转义裁剪);
  * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力 (右键菜单只在
  * 卡片/路径上接管为自绘菜单, 其余区域保留原生菜单 = 选区复制入口)。
@@ -121,6 +123,42 @@ textarea,input{user-select:text;-webkit-user-select:text}
                background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
 .ai-reason-toggle[aria-pressed="true"] .ai-reason-box::after{content:'';position:absolute;left:3px;top:.5px;width:3.5px;height:6.5px;
                border-right:1.6px solid var(--accent-violet);border-bottom:1.6px solid var(--accent-violet);transform:rotate(42deg)}
+)AIWEBUI"
+           LR"AIWEBUI(/* 档案下拉与"新建/复制/删除"并排: 下拉吞掉剩余宽度, 按钮各自保持内容宽 */
+.ai-config-profile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;align-items:center;gap:8px}
+.ai-config-profile-row .ai-btn{height:28px;padding:0 10px}
+.ai-config-profile-row select{cursor:default}
+/* 待确认删除: 两步确认语言 (删除模型档案 / 清空历史记录共用) */
+.ai-config-profile-row .ai-btn[data-armed="true"],.ai-history-clear[data-armed="true"]{border-color:color-mix(in srgb,var(--accent-pink) 55%,transparent);
+               color:var(--accent-pink)}
+/* 工具栏模型切换下拉 (管理动作都在接口设置面板里, 末项固定是"管理模型…") */
+.ai-model-picker{position:relative;display:flex;flex:0 1 auto;min-width:0}
+.ai-model-picker-button{max-width:190px}
+.ai-model-caret{flex:0 0 auto;font-size:9px;line-height:1;transition:transform 120ms ease}
+.ai-model-picker-button[aria-expanded="true"] .ai-model-caret{transform:rotate(180deg)}
+.ai-model-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:17;display:grid;gap:2px;width:max-content;
+          min-width:190px;max-width:300px;max-height:320px;overflow-y:auto;padding:4px;border-radius:7px;
+          background:var(--surface-raised);box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.28);
+          cursor:default;opacity:1;transform:translateY(0) scale(1);transform-origin:right top;
+          transition:opacity 120ms ease,transform 140ms cubic-bezier(.2,0,0,1)}
+.ai-model-menu[hidden]{display:none}
+.ai-model-menu.opening,.ai-model-menu.closing{opacity:0;transform:translateY(-5px) scale(.98);pointer-events:none}
+.ai-model-menu.closing{transition-duration:90ms}
+.ai-model-option{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:6px;width:100%;
+          padding:5px 8px;border:0;border-radius:4px;background:transparent;color:var(--text-secondary);
+          font:inherit;font-size:12px;line-height:1.5;text-align:left;cursor:default;outline:none}
+.ai-model-option:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
+.ai-model-option[aria-checked="true"]{background:color-mix(in srgb,var(--accent-violet) 14%,transparent);color:var(--text-primary)}
+.ai-model-option-check{color:transparent;font-size:11px;line-height:1.6}
+.ai-model-option[aria-checked="true"] .ai-model-option-check{color:var(--accent-violet)}
+/* 档案名与其模型名: 两条档案显示名撞车时, 靠第二行才分得清 */
+.ai-model-option-text{display:flex;flex-direction:column;min-width:0}
+.ai-model-option-name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ai-model-option-hint{overflow:hidden;color:var(--text-tertiary);font-size:10.5px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
+.ai-model-option[aria-checked="true"] .ai-model-option-hint{color:var(--text-secondary)}
+/* 管理入口不是"一个可选模型", 用一条分隔线划开 */
+.ai-model-option-manage{display:block;margin-top:4px;padding-top:8px;border-top:1px solid var(--divider);
+               border-radius:0 0 4px 4px;color:var(--text-tertiary)}
 
 /* ==================== 对话流 ==================== */
 .ai-thread-wrap{position:relative;display:flex;flex:1 1 auto;min-width:0;min-height:0}
@@ -153,13 +191,34 @@ textarea,input{user-select:text;-webkit-user-select:text}
            background:color-mix(in srgb,var(--accent-pink) 12%,var(--surface-raised))!important}
 
 /* ---- 过程区 (一个回合内, 回答气泡之前的全部中间产物) ----
- * 中间叙述文本 + 工具卡片都收在这里, 虚线分隔线之下才是本轮回答气泡 ——
- * 整轮只有末尾一个气泡, 不再每段叙述各自成泡像连答多次 (对齐参考实现的命令记录)。
- * --ai-reasoning-text 的取值与推理区同源: 过程是草稿, 比正文淡一档 */
-.ai-turn-log{display:flex;flex-direction:column;gap:8px;width:100%;padding-bottom:9px;
-             border-bottom:1px dashed var(--glass-border);
+ * 思考块 + 工具组 + 中间叙述合成**一块**面板: 各自只占一行, 行间细线分隔,
+ * 不再每块自带边框各自成卡散开 (用户反馈"有思考的时候不放在一起") ——
+ * 面板之下才是本轮回答气泡。--ai-reasoning-text 的取值与推理区同源: 过程是草稿, 比正文淡一档 */
+.ai-turn-log{display:flex;flex-direction:column;gap:0;width:100%;overflow:hidden;
+             border:1px solid var(--glass-border);border-radius:8px;
+             background:color-mix(in srgb,var(--text-primary) 3%,transparent);
              --ai-reasoning-text:color-mix(in srgb,var(--text-secondary) 62%,var(--text-tertiary))}
-.ai-turn-note{font-size:12px;line-height:1.68;color:var(--ai-reasoning-text);overflow-wrap:anywhere}
+/* 面板整体可收起: 头部一行常驻 (图标+标签+状态+箭头), 体 = 各过程行 (2026-09-25 用户口径
+ * "AI 开始回答正文时自动收缩" — 收起落账见 maybeAutoCollapseTurn; 点头部开合后手动覆写自动) */
+.ai-turn-log-head{display:flex;align-items:center;gap:7px;width:100%;padding:6px 10px;border:0;
+             background:transparent;color:var(--ai-reasoning-text);font:inherit;font-size:11px;
+             line-height:1.5;text-align:left;cursor:default}
+.ai-turn-log-head:hover{background:color-mix(in srgb,var(--accent-violet) 8%,transparent);color:var(--text-secondary)}
+.ai-turn-log-ic,.ai-turn-log-arr{flex:0 0 auto;font-size:11px}
+.ai-turn-log-arr{font-size:9px;transition:transform 120ms ease}
+.ai-turn-log.open .ai-turn-log-arr{transform:rotate(180deg)}
+.ai-turn-log-label{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ai-turn-log-sum{flex:0 0 auto;color:color-mix(in srgb,var(--accent-amber) 82%,var(--text-primary))}
+.ai-turn-log-body{display:none;flex-direction:column;gap:0;border-top:1px solid var(--divider)}
+.ai-turn-log.open>.ai-turn-log-body{display:flex}
+/* 相邻行细分隔线; 行内元素在面板里脱掉自己的卡框 (圆角/边框/底色归面板所有) */
+.ai-turn-log-body>*+*{border-top:1px solid var(--divider)}
+.ai-turn-log .ai-reasoning,.ai-turn-log .ai-toolgrp{border:0;border-radius:0;background:transparent}
+.ai-turn-log-body>.ai-steps>.step{border:0;border-radius:0;background:transparent}
+/* 面板内各行的水平内边距统一 10px (推理头原样, 工具组头/单卡片行原本 8px 会错位) */
+.ai-turn-log-body>.ai-toolgrp>.ai-toolgrp-head,
+.ai-turn-log-body>.ai-steps>.step>.shead{padding-left:10px;padding-right:10px}
+.ai-turn-note{font-size:12px;line-height:1.68;color:var(--ai-reasoning-text);overflow-wrap:anywhere;padding:7px 10px}
 /* 中间叙述复用 C++ 的 ai-bubble 输出, 在过程区内脱掉气泡外框 (无边框无底色, 淡色小字) */
 .ai-turn-note>.ai-bubble{border:0;background:transparent;padding:0;min-width:0;
              color:inherit;font-size:12px;line-height:1.68}
@@ -575,6 +634,19 @@ textarea,input{user-select:text;-webkit-user-select:text}
   .ai-history-sidebar{position:absolute;z-index:40;width:260px;flex-basis:260px;top:0;bottom:0;right:0;
           box-shadow:0 8px 28px rgba(0,0,0,.28)}
 }
+/* ==================== 页面内 Toast (宿主 Toast 被面板上的浏览器子窗盖住, 提示一律画在页面里;
+   顶部居中浮层: 设置面板/对话区两态都可见, 也不与 composer 向上弹的浮层相撞) ==================== */
+.ai-toast{position:fixed;left:50%;top:72px;transform:translateX(-50%) translateY(-8px);z-index:14000;
+          max-width:min(420px,calc(100vw - 32px));padding:8px 14px;border:1px solid var(--overlay-border);
+          border-radius:8px;background:color-mix(in srgb,var(--surface-raised) 94%,var(--bg));
+          box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:12px;line-height:1.5;color:var(--text-primary);
+          opacity:0;pointer-events:none;transition:opacity 160ms ease,transform 160ms ease}
+.ai-toast.visible{opacity:1;transform:translateX(-50%) translateY(0)}
+.ai-toast::before{content:'';display:inline-block;width:7px;height:7px;margin-right:8px;border-radius:50%;
+          background:var(--accent-violet);vertical-align:1px}
+.ai-toast[data-kind="ok"]::before{background:var(--accent-emerald)}
+.ai-toast[data-kind="warn"]::before{background:var(--accent-amber)}
+.ai-toast[data-kind="err"]::before{background:var(--accent-pink)}
 </style>
 </head>
 <body>
@@ -587,6 +659,14 @@ textarea,input{user-select:text;-webkit-user-select:text}
         <span class="ellipsis-text" id="stText">未配置接口</span>
       </span>
       <div class="ai-toolbar-actions">
+        <!-- 模型切换: 点开列出全部档案, 选中即生效; 管理动作在接口设置面板里 -->
+        <div class="ai-model-picker" id="modelPicker">
+          <button class="ai-btn ai-model-picker-button" id="modelBtn" type="button"
+            aria-haspopup="listbox" aria-expanded="false" title="模型">
+            <span class="glyph" aria-hidden="true">&#xE99A;</span><span class="ellipsis-text" id="modelBtnLabel"></span><span class="ai-model-caret glyph" aria-hidden="true">&#xE70D;</span>
+          </button>
+          <div class="ai-model-menu" id="modelMenu" role="listbox" hidden></div>
+        </div>
         <button class="ai-btn" id="b-set" type="button" title="接口设置"><span class="glyph" aria-hidden="true">&#xE713;</span><span class="ellipsis-text">接口设置</span></button>
         <button class="ai-btn" id="b-hist" type="button" title="历史对话"><span class="glyph" aria-hidden="true">&#xE81C;</span><span class="ellipsis-text">历史对话</span></button>
         <button class="ai-btn" id="b-new" type="button" title="新对话"><span class="glyph" aria-hidden="true">&#xE72C;</span><span class="ellipsis-text">新对话</span></button>
@@ -594,17 +674,33 @@ textarea,input{user-select:text;-webkit-user-select:text}
       </div>
     </div>
 
+    <!-- 接口设置: 管理模型档案 (每条档案是一套完整接口配置, 跨服务商时地址与密钥随档案走) -->
     <div class="ai-config-panel" id="cfgPanel" hidden>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-prof">模型</label>
+        <div class="ai-config-profile-row">
+          <select class="ai-config-input" id="f-prof"></select>
+          <button class="ai-btn" id="f-prof-add" type="button">新建</button>
+          <button class="ai-btn" id="f-prof-dup" type="button">复制</button>
+          <button class="ai-btn" id="f-prof-del" type="button" data-armed="false">删除</button>
+        </div></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-name">名称</label>
+        <input class="ai-config-input" id="f-name" type="text" spellcheck="false" autocomplete="off" placeholder="例如：DeepSeek 官方"></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-url">接口地址</label>
         <input class="ai-config-input" id="f-url" type="text" spellcheck="false" autocomplete="off" placeholder="https://api.deepseek.com"></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-key">API 密钥</label>
         <input class="ai-config-input" id="f-key" type="password" spellcheck="false" autocomplete="off" placeholder="sk-..."></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-model">模型</label>
         <input class="ai-config-input" id="f-model" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-flash"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-ctx">上下文长度</label>
+        <input class="ai-config-input" id="f-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则自动推断"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-max">最大输出</label>
+        <input class="ai-config-input" id="f-max" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则用服务端默认"></div>
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
         <button class="ai-reason-toggle" id="f-reason" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>深度思考 (reasoning.effort=high)</button></div>
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <span class="ai-config-hint">密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出；接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
+        <span class="ai-config-hint">两个长度都填 token 数，支持 128K、1M 这类写法。上下文长度只影响用量的“剩余”显示（留空则按模型名推断）；最大输出留空时不发送该参数。</span></div>
+      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+        <span class="ai-config-hint">密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出；留空保存 = 保留已存密钥。接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
       <div class="ai-config-actions">
         <button class="ai-btn" id="b-cancel" type="button">取消</button>
         <button class="ai-btn ai-btn-primary" id="b-save" type="button">保存</button>
@@ -667,6 +763,9 @@ textarea,input{user-select:text;-webkit-user-select:text}
     <div class="ai-history-list" id="sideList"></div>
     <div class="ai-history-empty" id="sideEmpty" hidden>暂无历史对话</div>
   </aside>
+
+  <!-- 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 恒在 DOM, 显隐走 .visible, pointer-events:none 不挡点击) -->
+  <div class="ai-toast" id="toast" role="status" aria-live="polite"></div>
 </div>
 <script>
 'use strict';
@@ -712,17 +811,21 @@ const POLICY=[
 
 /* ==================== 状态 ==================== */
 const S={
-  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2},
+  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,name:'',ctx:0,maxOut:0,active:'',profs:[]},
   pal:null, convs:[], msgs:[], cur:0,
   sending:false, net:0, phase:0,
   usage:{has:false,up:0,uo:0,ut:0,uch:0,lp:0,lc:0,tps:0},
-  sideOpen:false, cfgOpen:false, policyOpen:false, usageOpen:false, ctxOpen:false,
-  dUrl:'',dKey:'',dModel:'',dReason:false,
+  sideOpen:false, cfgOpen:false, policyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
+  profDirty:false,  /* 表单里有未保存的编辑: 挡住 C++ 整包下发把正在敲的内容冲掉 */
+  delArmed:false, delTimer:0, modelTimer:0,
+  clearArmed:false, clearTimer:0,   /* 清空记录两步确认 (首击待确认, 4s 内再击才清) */
   openSteps:{},     /* 展开的工具卡片样本: convId+':'+msgIdx → true */
   toolGrp:{},       /* 展开的连续工具组: convId+':'+k0 → true (缺省 = 含待确认卡才展开) */
   reasonOpen:{},    /* 手动展开的推理块: msgIdx → true (流式自动展开之外的覆盖) */
+  turnLog:{},       /* 过程面板开合: convId+':'+组起点 → true 展开/false 收起
+                       (undefined=缺省: 流式中最新回合展开、其余收起; 正文开始自动落 false) */
   follow:true,      /* 生成期间跟随滚动 (用户手动上滚即停) */
-  policyTimer:0, copiedTimer:0,
+  policyTimer:0, copiedTimer:0, toastTimer:0,
   jumpRounds:[], jumpFlashTimer:0, jumpFrame:0, jumpTip:null,
 };
 
@@ -743,22 +846,160 @@ function applyPal(p){
 /* ==================== 状态点 ==================== */
 function renderStatus(){
   const complete=S.cfg.url&&S.cfg.model&&S.cfg.hasKey;
+  /* 状态里用档案显示名而不是裸模型名: 与工具栏下拉同一套取名, 切模型后才能对上 */
+  const nm=S.cfg.name||S.cfg.model||'未配置接口';
   let st,txt;
-  if(S.sending){st='busy';txt='正在与 '+S.cfg.model+' 对话';}
+  if(S.sending){st='busy';txt='正在与 '+nm+' 对话';}
   else if(!complete){st='missing';txt='未配置接口';}
   else if(S.net===2){st='error';txt='上次请求失败';}
-  else {st='ready';txt='已连接 '+S.cfg.model;}
+  else {st='ready';txt='已连接 '+nm;}
   $('stDot').setAttribute('data-state',st);
   $('stText').textContent=txt;
+}
+
+/* ==================== 模型档案 (多模型切换; 源样式 aiProfiles 同构) ====================
+ * 宿主 (C++) 是权威副本: 页面的增删改都发命令回传, cfg 广播整包覆盖本地。
+ * 密钥不在其中 (只见 hasKey): 复制/切换档案时密钥在 C++ 侧搬运。 */
+function profById(id){return S.cfg.profs.find(p=>p.id===id)||null;}
+function profActive(){return profById(S.cfg.active)||(S.cfg.profs[0]||null);}
+/* 显示名: 用户没起名时用模型名兜底, 两者都没有才说"未命名模型" (与 C++ CfgDisplayName 同款) */
+function profName(p){return p?(p.name||p.model||'未命名模型'):'未配置接口';}
+/* token 长度: 空=0(未指定), 支持 128K/1M 简写; 非法=null (调用方提示, 不静默改值) */
+function parseTok(t){
+  const raw=String(t==null?'':t).trim().replace(/[,，\s]/g,'');
+  if(!raw)return 0;
+  const m=/^(\d+(?:\.\d+)?)([kKmM])?$/.exec(raw);
+  if(!m)return null;
+  const u=(m[2]||'').toLowerCase(),v=Number(m[1])*(u==='m'?1000000:u==='k'?1000:1);
+  if(!isFinite(v)||v<=0)return null;
+  return Math.round(Math.max(1,Math.min(100000000,v)));
+}
+function fmtTokInput(v){v=+v||0;return v>0?String(v):'';}
+/* 活动档案的上下文窗口: 档案指定值优先, 否则按模型名推断 (宁可保守不要乐观) */
+function ctxWin(){return S.cfg.ctx>0?S.cfg.ctx:ctxWindowFor(S.cfg.model);}
+function fillProfForm(){
+  const p=profActive();
+  $('f-name').value=p?(p.name||''):'';
+  $('f-url').value=p?(p.url||''):'';
+  $('f-key').value='';   /* 密钥不回显 (宿主不给明文): 恒空, 留空保存 = 保留已存 */
+  $('f-model').value=p?(p.model||''):'';
+  $('f-ctx').value=fmtTokInput(p?p.ctx:0);
+  $('f-max').value=fmtTokInput(p?p.maxOut:0);
+  $('f-reason').setAttribute('aria-pressed',S.cfg.reasoning?'true':'false');
+}
+function renderProfSelect(){
+  const sel=$('f-prof');sel.textContent='';
+  const act=profActive();
+  if(!S.cfg.profs.length){
+    const o=document.createElement('option');o.value='';o.textContent='未配置接口';sel.appendChild(o);
+  }else{
+    S.cfg.profs.forEach(p=>{
+      const o=document.createElement('option');o.value=p.id;o.textContent=profName(p);sel.appendChild(o);
+    });
+    sel.value=act?act.id:'';
+  }
+  /* 没有档案时管理按钮没有作用对象 */
+  const has=S.cfg.profs.length>0;
+  $('f-prof-dup').disabled=!has;
+  $('f-prof-del').disabled=!has;
+  $('f-prof-add').disabled=S.cfg.profs.length>=50;
+}
+/* 删除两步确认复位 (重开面板/收起/超时都归零) */
+function profDisarm(){
+  S.delArmed=false;clearTimeout(S.delTimer);
+  const b=$('f-prof-del');b.textContent='删除';b.setAttribute('data-armed','false');
+}
+/* 切换当前档案: 本地即时生效 (广播随后确认), 切换是离散动作立即持久化 */
+function selectProf(id){
+  if(!profById(id))return;
+  S.profDirty=false;
+  S.cfg.active=id;
+  const p=profActive();
+  if(p){S.cfg.url=p.url||'';S.cfg.model=p.model||'';S.cfg.hasKey=!!p.hasKey;
+        S.cfg.ctx=p.ctx||0;S.cfg.maxOut=p.maxOut||0;S.cfg.name=profName(p);}
+  if(S.cfgOpen){renderProfSelect();fillProfForm();}
+  renderModelBtn();renderStatus();renderUsage();
+  post({c:'profActive',id});
+}
+function saveProf(){
+  const ctx=parseTok($('f-ctx').value),max=parseTok($('f-max').value);
+  if(ctx===null||max===null){   /* 任一写法非法就整体不保存, 不静默把合法的一半写进去 */
+    showToast('长度需填写正整数 token 数（可写 128K、1M）','warn');
+    return;
+  }
+  S.profDirty=false;
+  post({c:'profSave',name:$('f-name').value.trim(),url:$('f-url').value.trim(),
+        key:$('f-key').value.trim(),model:$('f-model').value.trim(),ctx,max,
+        reasoning:$('f-reason').getAttribute('aria-pressed')==='true'});
+  showToast('接口设置已保存','ok');
+  cfgToggle(false);   /* 保存成功即收起面板 (校验失败才停留) */
+}
+)AIWEBUI"
+           LR"AIWEBUI(/* ==================== 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 页内已知消息直接调,
+   C++ 已知消息经 t:"toast" 推送进来, 同一浮层) ==================== */
+function showToast(msg,kind){
+  const t=$('toast');
+  t.textContent=msg;
+  t.setAttribute('data-kind',kind||'info');
+  t.classList.add('visible');
+  clearTimeout(S.toastTimer);
+  S.toastTimer=setTimeout(()=>t.classList.remove('visible'),2600);
+}
+/* ==================== 工具栏模型下拉 (切换之外的管理动作都在接口设置面板里) ==================== */
+function renderModelBtn(){
+  const label=profName(profActive());
+  $('modelBtnLabel').textContent=label;
+  $('modelBtn').title='模型：'+label;
+}
+function renderModelMenu(){
+  const menu=$('modelMenu');menu.textContent='';
+  const act=profActive();
+  S.cfg.profs.forEach(p=>{
+    const o=document.createElement('button');
+    o.className='ai-model-option';o.type='button';
+    o.setAttribute('data-pid',p.id);o.setAttribute('role','option');
+    o.setAttribute('aria-checked',act&&p.id===act.id?'true':'false');
+    /* 第二行放模型名: 两条档案显示名撞车时, 靠它才分得清 */
+    o.innerHTML='<span class="ai-model-option-check glyph" aria-hidden="true">&#xE73E;</span>'
+      +'<span class="ai-model-option-text"><span class="ai-model-option-name">'+esc(profName(p))+'</span>'
+      +'<span class="ai-model-option-hint">'+esc(p.model||'未填写模型名')+'</span></span>';
+    menu.appendChild(o);
+  });
+  const mg=document.createElement('button');
+  mg.className='ai-model-option ai-model-option-manage';mg.type='button';
+  mg.textContent='管理模型…';
+  menu.appendChild(mg);
+}
+function modelSetOpen(open){
+  S.modelOpen=open;
+  const btn=$('modelBtn'),menu=$('modelMenu');
+  btn.setAttribute('aria-expanded',open?'true':'false');
+  clearTimeout(S.modelTimer);
+  if(open){
+    renderModelMenu();
+    usageSetOpen(false);policySetOpen(false);   /* 互斥: 另外两个浮层也从工具区展开 */
+    menu.classList.remove('closing');menu.classList.add('opening');menu.hidden=false;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      if(btn.getAttribute('aria-expanded')==='true')menu.classList.remove('opening');
+    }));
+    return;
+  }
+  menu.classList.remove('opening');
+  if(menu.hidden)return;
+  menu.classList.add('closing');
+  S.modelTimer=setTimeout(()=>{
+    if(btn.getAttribute('aria-expanded')!=='true'){menu.hidden=true;menu.classList.remove('closing');}
+  },90);
 }
 
 /* ==================== 接口设置面板 ==================== */
 function cfgToggle(open){
   S.cfgOpen=open;
   if(open){
-    $('f-url').value=S.cfg.url; $('f-key').value=''; $('f-model').value=S.cfg.model;
-    $('f-reason').setAttribute('aria-pressed',S.cfg.reasoning?'true':'false');
-    setTimeout(()=>{try{$('f-url').focus();}catch(e){}},0);
+    /* 关闭面板 = 放弃未保存的编辑; 打开时从活动档案重填 */
+    S.profDirty=false;profDisarm();
+    renderProfSelect();fillProfForm();
+    setTimeout(()=>{try{$('f-prof').focus();}catch(e){}},0);
   }
   $('cfgPanel').hidden=!open;
   $('b-set').setAttribute('aria-expanded',open?'true':'false');
@@ -789,20 +1030,36 @@ function reasoningHtml(m,mi){
 /* ---- 回合分组渲染 ----
  * 一轮提问之后的全部助手侧消息 (中间叙述文本 + 工具卡片 + 最终回答) 归为**一个** ai-msg 组:
  * 只有末尾一条是回答气泡, 前面的全部收进上方"过程区" (虚线分隔 + 淡色小字),
- * 不再每段叙述各自成泡 = 看起来像连答多次 (用户反馈)。 */
+ * 不再每段叙述各自成泡 = 看起来像连答多次 (用户反馈)。
+ * 过程区面板整体可收起 (头部一行), 正文开始自动收起 — 见 maybeAutoCollapseTurn。 */
 function turnEnd(start){   /* 助手侧连续段 [start, end) */
   let e=start;
   while(e<S.msgs.length&&S.msgs[e].r!==0) e++;
   return e;
 }
+)AIWEBUI"
+           LR"AIWEBUI(/* 正文开始 → 本回合过程面板自动收起 (2026-09-25 用户口径 "AI 开始回答正文时自动收缩"):
+ * 末条消息首次出现非空正文 (打字点气泡有了文字) 时落账 false。只在尚无落账 (undefined) 时写 —
+ * 用户手动开合过的面板不被自动行为覆盖。回合里只有这一条 (无过程面板) 不动。 */
+function maybeAutoCollapseTurn(){
+  if(!S.sending||!S.msgs.length)return;
+  const m=S.msgs[S.msgs.length-1];
+  if(m.r===2||m.r===0||m.empty||!m.html)return;
+  let start=S.msgs.length-1;
+  while(start>0&&S.msgs[start-1].r!==0)start--;
+  if(start===S.msgs.length-1)return;
+  const key=S.cur+':'+start;
+  if(S.turnLog[key]===undefined)S.turnLog[key]=false;
+}
 function turnPartHtml(m,mi,isFinal){
   if(m.r===2) return m.html||'';   /* 工具卡片组 (C++ 生成的 ai-steps; 折叠态见 .step) */
   if(!isFinal){
-    /* 中间叙述: 淡色小字过程区, 无气泡外框; 空文本的占位消息不渲染 */
+    /* 中间叙述: 淡色小字过程区, 无气泡外框; 无正文的消息只画推理行
+       (empty=C++ 判定没有正文 — 不看它, &nbsp; 占位气泡会渲染成空行, 2026-09-25 实锤) */
     if(m.empty||!m.html) return m.reason?reasoningHtml(m,mi):'';
     return (m.reason?reasoningHtml(m,mi):'')+'<div class="ai-turn-note">'+m.html+'</div>';
   }
-  let inner=m.reason?reasoningHtml(m,mi):'';
+  let inner='';
   if(S.sending&&mi===S.msgs.length-1&&S.phase===0&&m.empty){
     inner+='<div class="ai-bubble">'+typingHtml()+'</div>';   /* 正在生成: 三点在气泡内 */
   }else{
@@ -818,7 +1075,11 @@ function turnGroupHtml(start){
                                                    工具执行期 (末条是卡片) 本回合暂无气泡 */
   let log='';
   for(let k=start;k<end;k++){
-    if(finalIsBubble&&k===finalIdx) continue;
+    if(finalIsBubble&&k===finalIdx){
+      /* 最终回答的推理也归过程面板 (与中间轮同一行样式, 不再自成独立卡散在面板外) */
+      if(S.msgs[k].reason) log+=reasoningHtml(S.msgs[k],k);
+      continue;
+    }
     const m=S.msgs[k];
     if(m.r!==2){ log+=turnPartHtml(m,k,false); continue; }
     /* 连续工具段: ≥2 次聚成一组整组折叠 (默认一行摘要, 点开展开全部卡片);
@@ -829,7 +1090,23 @@ function turnGroupHtml(start){
     else log+=turnPartHtml(m,k,false);
     k=e2-1;
   }
-  let main=log?'<div class="ai-turn-log">'+log+'</div>':'';
+  let main='';
+  if(log){
+    /* 面板整体可收起 (2026-09-25 用户口径): 缺省 = 流式中的最新回合展开 (看得到进行中的过程)、
+       其余 (已完成回合/历史载入) 收起; 正文开始自动收起 (maybeAutoCollapseTurn 落账),
+       手动点头部开合落账后自动行为不再覆盖。收起只留头部一行 (标签+状态+箭头) */
+    const isLive=S.sending&&end===S.msgs.length;
+    const key=S.cur+':'+start;
+    const open=S.turnLog[key]!==undefined?S.turnLog[key]:isLive;
+    const sum=!isLive?'':(S.phase===1?'执行中…':'生成中…');
+    main='<div class="ai-turn-log'+(open?' open':'')+'">'
+        +'<button class="ai-turn-log-head" type="button" data-act="turnlog" aria-expanded="'+(open?'true':'false')+'">'
+        +'<span class="ai-turn-log-ic glyph" aria-hidden="true">&#xE9D9;</span>'
+        +'<span class="ai-turn-log-label">思考与工具调用</span>'
+        +(sum?'<span class="ai-turn-log-sum">'+sum+'</span>':'')
+        +'<span class="ai-turn-log-arr glyph" aria-hidden="true">&#xE70D;</span>'
+        +'</button><div class="ai-turn-log-body">'+log+'</div></div>';
+  }
   if(finalIsBubble) main+=turnPartHtml(S.msgs[finalIdx],finalIdx,true);
   return '<div class="ai-msg ai-msg-assistant" data-mi="'+start+'">'
     +'<span class="ai-msg-avatar glyph" aria-hidden="true">&#xE99A;</span>'
@@ -1033,8 +1310,9 @@ function jumpTo(round){
            LR"AIWEBUI(/* ==================== 可点击交互 (搜索卡片 / 语法高亮 / 路径链接 / 右键菜单) ====================
  * AI 决定点击的类型, 一律标准 Markdown 链接语法 (链接文字 = 给用户看的动作指引):
  * [..](xjs://search?text=..&mode=..) = 搜索卡片 (点击置入搜索框并按模式执行);
- * [..](xjs://open|reveal?path=..) = 文件动作链接; 正文/样本里的绝对路径 = 自动文件链接
- * (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
+ * [..](xjs://open|reveal?id=<FileId>) = 文件动作链接 — 模型只输出引擎 FileId, 路径由
+ * C++ 按 ID 解析 (path 参数 = 旧历史消息的路径版链接, 兼容受理); 正文里确有的绝对路径 =
+ * 自动文件链接 (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
  * enhance() 挂在每次消息 HTML 落地之后 (innerHTML 重建后节点全新, 幂等无需去重)。 */
 const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua过滤','lua-exec':'Lua执行',lua_exec:'Lua执行'};
 /* 路径字符边界: 停在 空格/引号/尖括号/管道/星号/冒号/问号/正斜杠 + 全角标点与中文句读,
@@ -1103,14 +1381,25 @@ function transformActionLinks(root){
         +'<span class="ai-chip-go glyph" aria-hidden="true">&#xE768;</span>';
       a.replaceWith(chip);
     }else if(u.kind==='open'||u.kind==='reveal'){
-      const path=(u.p.path||'').trim();
-      if(!path)return;
+      const id=String(u.p.id||'').trim();
+      const path=(u.p.path||'').trim();   /* path = 旧历史消息的路径版链接, 继续受理 */
+      if(!id&&!path)return;
       const sp=document.createElement('span');
       sp.className='ai-path';
-      sp.setAttribute('data-path',path);
-      if(u.kind==='reveal')sp.setAttribute('data-open','reveal');
-      sp.title=(u.kind==='reveal'?'定位: ':'打开: ')+path;
-      sp.textContent=a.textContent.trim()||path;
+      if(id&&!/^\d+$/.test(id)){
+        /* 模型写出的 ID 不是纯数字 (编造/近似, 如"…附近"): 渲染成禁用态, 点击给明确提示 */
+        sp.setAttribute('data-badid','1');
+        sp.title='链接无效: AI 未能给出准确的文件 ID, 无法打开';
+      }else if(id){
+        sp.setAttribute('data-id',id);
+        if(u.kind==='reveal')sp.setAttribute('data-open','reveal');
+        sp.title=(u.kind==='reveal'?'定位文件':'打开文件')+' · 右键更多操作';
+      }else{
+        sp.setAttribute('data-path',path);
+        if(u.kind==='reveal')sp.setAttribute('data-open','reveal');
+        sp.title=(u.kind==='reveal'?'定位文件':'打开文件')+' · 右键更多操作';
+      }
+      sp.textContent=a.textContent.trim()||path||('#'+id);
       a.replaceWith(sp);
     }
   });
@@ -1254,8 +1543,14 @@ function bindThread(){
     const hasSel=window.getSelection&&!window.getSelection().isCollapsed;
     const pth=e.target.closest('.ai-path');
     if(pth&&!hasSel){
+      /* 模型编造/近似的 ID (渲染期已标禁用): 点击如实告知, 不发命令 */
+      if(pth.getAttribute('data-badid')){showToast('这个链接的文件 ID 无效 (AI 未能给出准确 ID), 无法打开','warn');return;}
       const act=pth.getAttribute('data-open')==='reveal'?'reveal':'open';
-      post({c:act,path:pth.getAttribute('data-path')||pth.textContent});return;}
+      const id=pth.getAttribute('data-id');
+      /* 新链接只带引擎 FileId (程序按 ID 取路径); 旧历史消息是 data-path */
+      if(id)post({c:act,id:+id});
+      else post({c:act,path:pth.getAttribute('data-path')||pth.textContent});
+      return;}
     const a=e.target.closest('a');
     if(a){e.preventDefault();const href=a.getAttribute('href')||'';
       if(/^https?:/i.test(href))post({c:'openurl',href});return;}
@@ -1270,7 +1565,12 @@ function bindThread(){
     const mb=e.target.closest('.ai-meta-btn');
     if(mb){const mi=+mb.closest('.ai-msg-meta').getAttribute('data-mi');
       if(mb.getAttribute('data-act')==='copy')copyTurn(mi);
-      else if(mb.getAttribute('data-act')==='retry'&&!S.sending)post({c:'retry'});
+      else if(mb.getAttribute('data-act')==='retry'&&!S.sending){
+        /* 重跑同一回合组起点不变: 清掉本会话过程面板开合落账 (上轮自动收起的 false 会让
+           重跑过程一直藏着), 回到缺省口径 = 流式中的最新回合展开, 其余仍按缺省收起 */
+        const pfx=S.cur+':';
+        Object.keys(S.turnLog).forEach(k=>{if(k.startsWith(pfx))delete S.turnLog[k];});
+        post({c:'retry'});}
       return;}
     const ab=e.target.closest('.abtn');
     if(ab){const act=ab.getAttribute('data-act');
@@ -1288,6 +1588,14 @@ function bindThread(){
       const body=card.querySelector('.ssamples');
       if(body)body.style.display=S.openSteps[key]?'':'none';
       card.classList.toggle('open',!!S.openSteps[key]);
+      return;}
+    const tlh=e.target.closest('.ai-turn-log-head');
+    if(tlh){const msg=tlh.closest('.ai-msg');const key=S.cur+':'+msg.getAttribute('data-mi');
+      const panel=tlh.closest('.ai-turn-log');
+      const cur=S.turnLog[key]!==undefined?S.turnLog[key]:panel.classList.contains('open');
+      S.turnLog[key]=!cur;
+      panel.classList.toggle('open',S.turnLog[key]);
+      tlh.setAttribute('aria-expanded',S.turnLog[key]?'true':'false');
       return;}
     const tg=e.target.closest('.ai-toolgrp-head');
     if(tg){const grp=tg.closest('.ai-toolgrp');const key=S.cur+':'+grp.getAttribute('data-k0');
@@ -1324,12 +1632,18 @@ function bindThread(){
     const pth=e.target.closest('.ai-path');
     if(pth){
       e.preventDefault();
-      const p=pth.getAttribute('data-path')||pth.textContent;
+      /* 禁用链接 (编造的 ID): 只留"复制名称", 不发打开/定位命令 */
+      if(pth.getAttribute('data-badid')){
+        showCtx([{t:'复制名称',fn:()=>post({c:'copy',text:pth.textContent})}],e.clientX,e.clientY);
+        return;
+      }
+      const id=pth.getAttribute('data-id');
+      const ref=id?{id:+id}:{path:pth.getAttribute('data-path')||pth.textContent};
       showCtx([
-        {t:'打开文件',fn:()=>post({c:'open',path:p})},
-        {t:'定位文件',fn:()=>post({c:'reveal',path:p})},
+        {t:'打开文件',fn:()=>post(Object.assign({c:'open'},ref))},
+        {t:'定位文件',fn:()=>post(Object.assign({c:'reveal'},ref))},
         '-',
-        {t:'复制路径',fn:()=>post({c:'copypath',path:p})}
+        {t:'复制路径',fn:()=>post(Object.assign({c:'copypath'},ref))}
       ],e.clientX,e.clientY);
       return;
     }
@@ -1367,8 +1681,13 @@ function renderSide(){
   }
   $('sideList').innerHTML=html;
 }
+/* 清空记录两步确认复位 (开合侧栏/超时/Esc 都归零) */
+function clearDisarm(){
+  S.clearArmed=false;clearTimeout(S.clearTimer);
+  const b=$('clearb');b.textContent='清空记录';b.setAttribute('data-armed','false');
+}
 function sideToggle(open){
-  S.sideOpen=open;
+  S.sideOpen=open;clearDisarm();
 )AIWEBUI"
            LR"AIWEBUI(  if(!open)hideJumpTip();
   renderSide();
@@ -1407,7 +1726,7 @@ function doSend(){
   const text=ta.value.trim();
   if(!text||S.sending)return;
   if(!S.cfg.hasKey){  /* 未配置: 打开接口设置面板 + 明确提示 (与参考实现同口径) */
-    post({c:'notify',msg:'尚未配置接口密钥 — 请填写接口地址、API 密钥与模型'});
+    showToast('尚未配置接口密钥 — 请填写接口地址、API 密钥与模型','warn');
     cfgToggle(true);
     return;
   }
@@ -1456,7 +1775,7 @@ function policySetOpen(open){
 /* ---- 用量简况 + 详情浮层 ---- */
 function renderUsage(){
   const u=S.usage;
-  const win=ctxWindowFor(S.cfg.model);
+  const win=ctxWin();
   const used=u.has?(u.lp+u.lc):0;   /* 占用条按最近一次请求 (累计值会把上下文重复计入) */
   const ratio=win>0?Math.min(1,Math.max(0,used/win)):0;
   const free=1-ratio;
@@ -1468,7 +1787,7 @@ function renderUsage(){
 }
 function renderUsagePanel(){
   const u=S.usage;
-  const win=ctxWindowFor(S.cfg.model);
+  const win=ctxWin();
   const used=u.has?(u.lp+u.lc):0;
   const free=Math.max(0,win-used),freeRatio=win>0?free/win:1;
   const has=u.has;
@@ -1487,7 +1806,11 @@ function renderUsagePanel(){
     +row('上下文已用',has?fmtTokens(used)+' / '+fmtTokens(win):'--','',!used)
     +row('上下文剩余',Math.round(freeRatio*100)+'%',freeRatio<=0.1?'data-warn="true"':'')
     +row('速度',speed,'',speed==='--');
-  html+='<div class="ai-usage-note">上下文上限按模型「'+esc(S.cfg.model)+'」推断为 '+fmtTokens(win)+'</div>';
+  /* 上限来源照实标注: 档案指定了就写"由档案指定", 没写才是按模型名推断 */
+  const note=S.cfg.ctx>0
+    ?'上下文上限由档案指定为 '+fmtTokens(win)
+    :'上下文上限按模型「'+esc(S.cfg.model)+'」推断为 '+fmtTokens(win);
+  html+='<div class="ai-usage-note">'+note+'</div>';
   $('usagePanel').innerHTML=html;
 }
 function positionUsagePanel(){
@@ -1520,27 +1843,36 @@ function handle(m){
       S.convs=m.convs||[];S.cur=m.cur||0;S.msgs=m.msgs||[];
       S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;
       S.usage=m.usage||S.usage;
+      maybeAutoCollapseTurn();
       renderAll();break;
     case 'pal':S.pal=m.pal;applyPal(S.pal);renderAll();break;
     case 'cfg':
       S.cfg=m.cfg;
-      if(S.cfgOpen){$('f-url').value=S.cfg.url;$('f-model').value=S.cfg.model;
-        $('f-reason').setAttribute('aria-pressed',S.cfg.reasoning?'true':'false');S.cfgOpen=false;cfgToggle(false);}
-      renderStatus();renderComposer();break;
+      /* 面板开着且表单干净 → 从新活动档案重填; 有未保存编辑就不动 (不冲掉正在敲的内容)。
+         面板不再随广播自动收起 (保存后停留展示 + toast 确认, 取消/✕ 才收) */
+      if(S.cfgOpen&&!S.profDirty)fillProfForm();
+      renderProfSelect();renderModelBtn();
+      if(S.modelOpen)renderModelMenu();
+      renderStatus();renderComposer();
+      break;
     case 'convs':S.convs=m.convs||[];renderSide();break;
     case 'msgs':
       if(m.cur!==undefined)S.cur=m.cur;
       S.msgs=m.msgs||[];
       if(m.st){S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;}
+      maybeAutoCollapseTurn();
       renderThread(true);renderStatus();renderComposer();renderSide();break;
     case 'last':{
       if(!S.msgs.length)break;
       S.msgs[S.msgs.length-1]=m.m;
       if(m.st){S.sending=!!m.st.sending;S.phase=m.st.phase||0;}
+      maybeAutoCollapseTurn();
       applyLast();renderStatus();break;}
     case 'usage':S.usage=m.u||S.usage;renderUsage();break;
+    case 'toast':showToast(m.msg,{0:'info',1:'ok',2:'warn',3:'err'}[m.k]||'warn');break;
     case 'status':
       S.sending=!!m.sending;S.net=m.net;S.phase=m.phase||0;
+      maybeAutoCollapseTurn();
       renderStatus();renderThread(true);renderComposer();renderSide();break;
     case 'blur':
       /* 浏览器焦点离开面板 (点击宿主/切走窗口): 收起瞬态弹层与悬浮侧栏。
@@ -1549,26 +1881,62 @@ function handle(m){
       if(S.ctxOpen)hideCtx();
       if(S.policyOpen)policySetOpen(false);
       if(S.usageOpen)usageSetOpen(false);
+      if(S.modelOpen)modelSetOpen(false);
       if(S.sideOpen&&sideFloating())sideToggle(false);
       break;
   }
 }
 function renderAll(){
+  renderProfSelect();renderModelBtn();
   renderStatus();cfgToggle(S.cfgOpen);renderThread(false);renderComposer();renderSide();
 }
-
-/* ==================== 事件接线 ==================== */
+)AIWEBUI"
+           LR"AIWEBUI(/* ==================== 事件接线 ==================== */
 function bind(){
   $('b-set').addEventListener('click',()=>cfgToggle(!S.cfgOpen));
   $('b-hist').addEventListener('click',()=>sideToggle(!S.sideOpen));
   $('b-new').addEventListener('click',()=>post({c:'new'}));
   $('b-close').addEventListener('click',()=>post({c:'close'}));
   $('b-cancel').addEventListener('click',()=>cfgToggle(false));
-  $('b-save').addEventListener('click',()=>{
-    S.cfgOpen=false;cfgToggle(false);
-    post({c:'settings',url:$('f-url').value.trim(),key:$('f-key').value.trim(),
-          model:$('f-model').value.trim(),
-          reasoning:$('f-reason').getAttribute('aria-pressed')==='true'});
+  $('b-save').addEventListener('click',saveProf);
+  /* 模型档案: 下拉切换 / 新建 / 复制 / 删除 (删除是两步确认); 保存成功/点外/Esc 均收起面板 */
+  $('f-prof').addEventListener('change',()=>selectProf($('f-prof').value));
+  $('f-prof-add').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:0});});
+  $('f-prof-dup').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:1});});
+  $('f-prof-del').addEventListener('click',()=>{
+    if(!S.cfg.profs.length)return;
+    if(!S.delArmed){   /* 首击进入待确认, 4s 内再击才删 (超时自动复位) */
+      S.delArmed=true;
+      const b=$('f-prof-del');b.textContent='确认删除';b.setAttribute('data-armed','true');
+      clearTimeout(S.delTimer);S.delTimer=setTimeout(profDisarm,4000);
+      return;
+    }
+    profDisarm();
+    const p=profActive();
+    const del=p?p.id:'';
+    /* 本地先切到剩下的第一条; 宿主回推 (cfg 广播) 会给出同样的结果 */
+    S.profDirty=false;
+    S.cfg.profs=S.cfg.profs.filter(q=>q.id!==del);
+    S.cfg.active=S.cfg.profs.length?S.cfg.profs[0].id:'';
+    const np=profActive();
+    if(np){S.cfg.url=np.url||'';S.cfg.model=np.model||'';S.cfg.hasKey=!!np.hasKey;
+           S.cfg.ctx=np.ctx||0;S.cfg.maxOut=np.maxOut||0;S.cfg.name=profName(np);}
+    else{S.cfg.url='';S.cfg.model='';S.cfg.hasKey=false;S.cfg.ctx=0;S.cfg.maxOut=0;S.cfg.name='未配置接口';}
+    if(S.cfgOpen){renderProfSelect();fillProfForm();}
+    renderModelBtn();renderStatus();renderUsage();
+    post({c:'profDel',id:del});
+  });
+  /* 表单里任何编辑都标脏 —— 挡住宿主整包下发把用户正在敲的内容冲掉 */
+  ['f-name','f-url','f-key','f-model','f-ctx','f-max'].forEach(id=>{
+    $(id).addEventListener('input',()=>{S.profDirty=true;});
+  });
+  /* 工具栏模型下拉: 触发器开合 / 选中即切换 / 管理入口 / 点外部与 Esc 收起 */
+  $('modelBtn').addEventListener('click',()=>modelSetOpen(!S.modelOpen));
+  $('modelMenu').addEventListener('click',e=>{
+    const mg=e.target.closest('.ai-model-option-manage');
+    if(mg){modelSetOpen(false);if(!S.cfgOpen)cfgToggle(true);return;}
+    const o=e.target.closest('.ai-model-option');
+    if(o&&o.getAttribute('data-pid')){selectProf(o.getAttribute('data-pid'));modelSetOpen(false);}
   });
   $('f-reason').addEventListener('click',()=>{
     const on=$('f-reason').getAttribute('aria-pressed')==='true';
@@ -1593,7 +1961,17 @@ function bind(){
     post({c:'policy',v:+op.getAttribute('data-policy')});
   });
   $('usageBtn').addEventListener('click',()=>usageSetOpen(!S.usageOpen));
-  $('clearb').addEventListener('click',()=>post({c:'clearHist'}));
+  /* 清空记录 = 两步确认 (与删除模型档案同一套语言): 首击进入待确认, 4s 内再击才清空 */
+  $('clearb').addEventListener('click',()=>{
+    if(!S.clearArmed){
+      S.clearArmed=true;
+      const b=$('clearb');b.textContent='确认清空';b.setAttribute('data-armed','true');
+      clearTimeout(S.clearTimer);S.clearTimer=setTimeout(clearDisarm,4000);
+      return;
+    }
+    clearDisarm();
+    post({c:'clearHist'});
+  });
   $('sideList').addEventListener('click',e=>{
     const del=e.target.closest('.ai-history-item-delete');
     if(del){e.stopPropagation();post({c:'del',id:+del.getAttribute('data-del')});return;}
@@ -1609,19 +1987,24 @@ function bind(){
     if(S.ctxOpen&&!e.target.closest('#ctxMenu'))hideCtx();
     if(S.policyOpen&&!e.target.closest('#policy')&&!e.target.closest('#policyMenu'))policySetOpen(false);
     if(S.usageOpen&&!e.target.closest('#usagePanel')&&!e.target.closest('#usageBtn'))usageSetOpen(false);
+    if(S.modelOpen&&!e.target.closest('#modelPicker'))modelSetOpen(false);
     /* 悬浮侧栏点外收起 (排除 #b-hist: 按钮自己的 click 负责开关, mousedown 先收会把它再弹开) */
     if(S.sideOpen&&sideFloating()&&!e.target.closest('#side')&&!e.target.closest('#b-hist'))sideToggle(false);
+    /* 接口设置面板点外收起 = 取消未保存的编辑 (同样排除 #b-set: 它的 click 负责开关) */
+    if(S.cfgOpen&&!e.target.closest('#cfgPanel')&&!e.target.closest('#b-set'))cfgToggle(false);
   });
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if(S.clearArmed){clearDisarm();e.preventDefault();return;}
       if(S.ctxOpen){hideCtx();e.preventDefault();return;}
-      if(S.cfgOpen){cfgToggle(false);e.preventDefault();return;}
+      if(S.modelOpen){modelSetOpen(false);e.preventDefault();return;}
+      if(S.cfgOpen){profDisarm();cfgToggle(false);e.preventDefault();return;}
       if(S.policyOpen){policySetOpen(false);e.preventDefault();return;}
       if(S.usageOpen){usageSetOpen(false);e.preventDefault();return;}
     }
   });
 )AIWEBUI"
-           LR"AIWEBUI(  window.addEventListener('resize',()=>{hideJumpTip();hideCtx();});
+           LR"AIWEBUI(  window.addEventListener('resize',()=>{hideJumpTip();hideCtx();if(S.modelOpen)modelSetOpen(false);});
   /* 内容高度变化时自动跟随到底 (用户手动上滚后 S.follow=false 不再拉回) */
   try{
     new ResizeObserver(()=>{

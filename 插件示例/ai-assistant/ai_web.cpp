@@ -76,6 +76,7 @@ std::wstring WebPaletteJson(AiSess* s) {
 }
 
 std::wstring WebCfgJson() {
+    AiProfile* act = CfgActive();
     std::wstring j = L"{\"url\":";
     j += W8(JsonEscapeUtf8(g_cfg.baseUrl).c_str());
     j += L",\"model\":";
@@ -86,7 +87,32 @@ std::wstring WebCfgJson() {
     j += g_cfg.reasoning ? L"true" : L"false";
     j += L",\"policy\":";
     j += std::to_wstring(g_cfg.filePolicy);
-    j += L"}";
+    /* 活动档案显示名: 状态点与工具栏模型按钮用它 (与前端兜底同款: name||model||未命名模型) */
+    j += L",\"name\":";
+    j += W8(JsonEscapeUtf8(CfgDisplayName(act)).c_str());
+    j += L",\"ctx\":" + std::to_wstring(g_cfg.ctx);
+    j += L",\"maxOut\":" + std::to_wstring(g_cfg.maxOut);
+    j += L",\"active\":";
+    j += W8(JsonEscapeUtf8(g_cfg.activeId).c_str());
+    /* 档案表整包下发 (密钥只出 hasKey, 明文不出宿主) */
+    j += L",\"profs\":[";
+    for (size_t i = 0; i < g_cfg.profiles.size(); i++) {
+        AiProfile& p = g_cfg.profiles[i];
+        if (i) j += L",";
+        j += L"{\"id\":";
+        j += W8(JsonEscapeUtf8(p.id).c_str());
+        j += L",\"name\":";
+        j += W8(JsonEscapeUtf8(p.name).c_str());
+        j += L",\"url\":";
+        j += W8(JsonEscapeUtf8(p.baseUrl).c_str());
+        j += L",\"model\":";
+        j += W8(JsonEscapeUtf8(p.model).c_str());
+        j += L",\"hasKey\":";
+        j += p.apiKey.empty() ? L"false" : L"true";
+        j += L",\"ctx\":" + std::to_wstring(p.ctx);
+        j += L",\"maxOut\":" + std::to_wstring(p.maxOut) + L"}";
+    }
+    j += L"]}";
     return j;
 }
 
@@ -984,6 +1010,7 @@ void WebSessionCreate(AiSess* s) {
     int x, y, cw, ch;
     if (g_host->PanelGetRect(g_ctx, s->tok, &parent, &x, &y, &cw, &ch) != XJS_PLUGIN_OK || !parent) return;
     if (!g_noRuntime && !WebEnsureEnv() && !g_envPending) {
+        /* 宿主 Toast 唯一保留点: 面板没起来 = 没有页面, 页内 toast 无处可画 */
         g_host->Toast(g_ctx, s->tok, "本机缺少 WebView2 运行时 (系统组件), AI 助手无法打开", XJS_PLUGIN_TOAST_ERROR);
         return;
     }
@@ -1044,6 +1071,19 @@ static void WebPost(AiSess* s, const std::string& jsonUtf8) {
     w->web->PostWebMessageAsJson(j.c_str());
 }
 
+/* 页面内 Toast: 面板区域被浏览器真子窗盖住, 宿主 Toast 画不进来 — 面板打开期间的
+ * 提示一律推给页面画 (kind = XJS_PLUGIN_TOAST_*, 前端按 0info/1ok/2warn/3err 着色) */
+void WebToast(AiSess* s, const char* utf8, int kind) {
+    if (!s->web || !s->bootDone) return;
+    std::string j = "{\"t\":\"toast\",\"msg\":";
+    j += JsonEscapeUtf8(W8(utf8));
+    j += ",\"k\":";
+    j += std::to_string(kind >= XJS_PLUGIN_TOAST_INFO && kind <= XJS_PLUGIN_TOAST_ERROR
+                            ? kind : XJS_PLUGIN_TOAST_WARN);
+    j += "}";
+    WebPost(s, j);
+}
+
 static void WebStatusObj(AiSess* s, std::string* out) {
     int phase = 0;
     if (s->job) {
@@ -1081,11 +1121,23 @@ void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, 
         *out += JsonEscapeUtf8(m.reason);
     }
     if (m.err) *out += ",\"err\":true";
-    if (m.role == 1 && m.text.empty() && m.reason.empty()) *out += ",\"empty\":true";
+    /* empty = 没有正文 (推理不算正文): 过程区只画推理行 — 若按旧口径 (正文+推理都空才算
+       empty), 推理轮的 &nbsp; 占位气泡会照渲染, 过程面板里每轮跟一条空行 (2026-09-25 实锤) */
+    if (m.role == 1 && m.text.empty()) *out += ",\"empty\":true";
     if (m.role == 0) {
         *out += ",\"q\":";
         std::wstring q = m.text.size() > 200 ? m.text.substr(0, 200) : m.text;
         *out += JsonEscapeUtf8(q);
+    }
+    if (m.role == 2 && !m.steps.empty()) {   /* 步骤状态: 前端聚合头部计数用 (卡面视觉由 MsgHtmlOf 直出) */
+        *out += ",\"steps\":[";
+        for (size_t i = 0; i < m.steps.size(); i++) {
+            if (i) *out += ",";
+            *out += "{\"state\":";
+            *out += std::to_string(m.steps[i].state);
+            *out += "}";
+        }
+        *out += "]";
     }
     *out += "}";
 }
@@ -1407,15 +1459,81 @@ void WebCommand(AiSess* s, const Jv& msg) {
         if (HOST_PANEL_OK && g_host) g_host->PanelClose(g_ctx, s->tok);
         return;
     }
-    if (c == L"settings") {
-        std::wstring url = TrimW(msg.S(L"url"));
-        std::wstring model = TrimW(msg.S(L"model"));
-        if (!url.empty()) g_cfg.baseUrl = url;
-        if (!model.empty()) g_cfg.model = model;
-        const Jv* key = msg.Get(L"key");
-        if (key && key->t == 3) g_cfg.apiKey = TrimW(key->str);
-        const Jv* rs = msg.Get(L"reasoning");
-        if (rs && rs->t == 1) g_cfg.reasoning = rs->b;
+    if (c == L"profSave") {
+        /* 保存表单到活动档案 (一条都没有时 = 建第一条再用)。
+         * 密钥留空 = 保留已存密钥 — 前端永不持有明文 (面板密钥框恒空),
+         * 若照"表单为权威"处理, 切到别的档案随手一存就会把密钥抹掉。 */
+        AiProfile* p = CfgActive();
+        if (!p) {
+            AiProfile np;
+            np.id = CfgGenProfileId();
+            g_cfg.profiles.push_back(std::move(np));
+            p = CfgActive();
+            if (!p) return;
+        }
+        const Jv* v;
+        if ((v = msg.Get(L"name")) != NULL && v->t == 3) p->name = TrimW(v->str);
+        if ((v = msg.Get(L"url")) != NULL && v->t == 3) p->baseUrl = TrimW(v->str);
+        if ((v = msg.Get(L"model")) != NULL && v->t == 3) p->model = TrimW(v->str);
+        if ((v = msg.Get(L"key")) != NULL && v->t == 3 && !TrimW(v->str).empty()) p->apiKey = TrimW(v->str);
+        if ((v = msg.Get(L"ctx")) != NULL && v->t == 2) p->ctx = CfgClampTok(v->num);
+        if ((v = msg.Get(L"max")) != NULL && v->t == 2) p->maxOut = CfgClampTok(v->num);
+        if ((v = msg.Get(L"reasoning")) != NULL && v->t == 1) g_cfg.reasoning = v->b;
+        CfgApplyActive();
+        CfgSave();
+        CfgBroadcast();
+        return;
+    }
+    if (c == L"profNew") {   /* 新建 / 复制档案并切过去 (新建的目的就是要用它) */
+        if ((int)g_cfg.profiles.size() >= AiProfileMax) {
+            WebToast(s, "最多只能保存 50 个模型", XJS_PLUGIN_TOAST_WARN);
+            return;
+        }
+        AiProfile np;
+        np.id = CfgGenProfileId();
+        const Jv* d = msg.Get(L"dup");
+        if (d && d->t == 1 && d->b) {   /* 复制: 密钥不出宿主, 在 C++ 侧随档案一起搬 */
+            const AiProfile* src = CfgActive();
+            if (src) {
+                np.name = CfgDisplayName(src) + L" 副本";
+                np.baseUrl = src->baseUrl;
+                np.apiKey = src->apiKey;
+                np.model = src->model;
+                np.ctx = src->ctx;
+                np.maxOut = src->maxOut;
+            }
+        }
+        g_cfg.profiles.push_back(std::move(np));
+        g_cfg.activeId = g_cfg.profiles.back().id;
+        CfgApplyActive();
+        CfgSave();
+        CfgBroadcast();
+        return;
+    }
+    if (c == L"profDel") {   /* 删除 (两步确认在前端); activeId 失效自动回落第一条 */
+        std::wstring id = msg.S(L"id");
+        if (id.empty()) {
+            AiProfile* p = CfgActive();
+            if (p) id = p->id;
+        }
+        for (size_t i = 0; i < g_cfg.profiles.size(); i++) {
+            if (g_cfg.profiles[i].id != id) continue;
+            g_cfg.profiles.erase(g_cfg.profiles.begin() + i);
+            break;
+        }
+        CfgApplyActive();
+        CfgSave();
+        CfgBroadcast();
+        return;
+    }
+    if (c == L"profActive") {   /* 切换当前档案 (切换是离散动作, 立即生效并持久化) */
+        std::wstring id = msg.S(L"id");
+        for (auto& p : g_cfg.profiles) {
+            if (p.id != id) continue;
+            g_cfg.activeId = id;
+            break;
+        }
+        CfgApplyActive();
         CfgSave();
         CfgBroadcast();
         return;
@@ -1599,12 +1717,6 @@ void WebCommand(AiSess* s, const Jv& msg) {
             ShellExecuteW(NULL, L"open", u->str.c_str(), NULL, NULL, SW_SHOWNORMAL);
         return;
     }
-    if (c == L"notify") {
-        const Jv* t = msg.Get(L"msg");
-        if (t && t->t == 3 && g_host)
-            g_host->Toast(g_ctx, s->tok, U8(t->str).c_str(), XJS_PLUGIN_TOAST_WARN);
-        return;
-    }
     /* ---- 可点击交互 (用户点回答里的搜索卡片/文件路径) ----
        search/searchfill = 搜索卡片: 置入搜索词 (+可选切换搜索模式), execute 区分是否立即执行;
        open/reveal = 文件路径: 索引内走宿主 OpenFile (打开行为/资源管理器定位), 索引外插件自开;
@@ -1618,35 +1730,61 @@ void WebCommand(AiSess* s, const Jv& msg) {
                                        mode.empty() ? NULL : U8(mode).c_str(),
                                        c == L"search" ? 1 : 0);
         if (rc == XJS_PLUGIN_ERR_ARG) {
-            std::wstring tip = L"未知搜索模式 (" + mode + L"), 已忽略";
-            g_host->Toast(g_ctx, s->tok, U8(tip).c_str(), XJS_PLUGIN_TOAST_WARN);
+            WebToast(s, U8(L"未知搜索模式 (" + mode + L"), 已忽略").c_str(), XJS_PLUGIN_TOAST_WARN);
         }
         else if (rc != XJS_PLUGIN_OK)
-            g_host->Toast(g_ctx, s->tok, "搜索窗口不可用 (已关闭?)", XJS_PLUGIN_TOAST_WARN);
+            WebToast(s, "搜索窗口不可用 (已关闭?)", XJS_PLUGIN_TOAST_WARN);
         return;
     }
+    /* 文件动作: 新协议 = 引擎 FileId (模型只输出 ID, 程序按 ID 取路径 — 2026-09-25 用户口径);
+     * path 参数 = 旧历史消息里的路径版链接, 继续受理 (载入的历史不重排)。 */
     if (c == L"open" || c == L"reveal") {
-        std::wstring path = TrimW(msg.S(L"path"));
-        if (path.empty() || !g_host) return;
         bool isReveal = c == L"reveal";
         xjs_engine* eng = xjs_GetDefaultEngine();
-        int fid = eng ? xjs_db_GetFileIdByPath(eng, U8(path).c_str()) : -1;
-        int rc = (fid >= 0) ? g_host->OpenFile(g_ctx, s->tok, fid, isReveal ? 1 : 0)
-                            : XJS_PLUGIN_ERR_NOTFOUND;
-        if (rc != XJS_PLUGIN_OK) {   /* 未索引/窗口失效: 插件自开 (SDK 契约: 非索引路径自理) */
+        std::wstring path = TrimW(msg.S(L"path"));
+        const Jv* idv = msg.Get(L"id");
+        bool hasIdParam = idv != NULL;
+        int fid = -1;
+        if (idv && idv->t == 2) fid = (int)idv->num;
+        else if (!path.empty() && eng) fid = xjs_db_GetFileIdByPath(eng, U8(path).c_str());
+        int rc = (fid >= 0 && g_host) ? g_host->OpenFile(g_ctx, s->tok, fid, isReveal ? 1 : 0)
+                                      : XJS_PLUGIN_ERR_NOTFOUND;
+        if (rc != XJS_PLUGIN_OK) {
+            if (fid >= 0) {   /* ID 命中但打开失败: 按 ID 反查真路径自理 */
+                const char* p = eng ? xjs_db_GetPath(eng, fid) : NULL;
+                if (p) path = W8(p);
+            }
+            if (path.empty()) {
+                /* 两类失败分开说: 参数里根本没有有效数字 = 链接本身无效;
+                 * 数字有效但库里查无此 ID = 索引重建后 ID 已变 (ID 引用的固有限制) */
+                if (hasIdParam && fid < 0)
+                    WebToast(s, "链接无效: 没有有效的文件 ID", XJS_PLUGIN_TOAST_WARN);
+                else
+                    WebToast(s, "文件 ID 已失效 (索引重建后 ID 会变化), 请让 AI 重新搜索这个文件",
+                             XJS_PLUGIN_TOAST_WARN);
+                return;
+            }
+            /* 未索引/窗口失效: 插件自开 (SDK 契约: 非索引路径自理) */
             HINSTANCE r = isReveal
                 ? ShellExecuteW(NULL, L"open", L"explorer.exe",
                                 (L"/select,\"" + path + L"\"").c_str(), NULL, SW_SHOWNORMAL)
                 : ShellExecuteW(NULL, L"open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
             if ((INT_PTR)r <= 32)
-                g_host->Toast(g_ctx, s->tok, "打开失败: 路径不存在或无法访问", XJS_PLUGIN_TOAST_WARN);
+                WebToast(s, "打开失败: 路径不存在或无法访问", XJS_PLUGIN_TOAST_WARN);
         }
         return;
     }
     if (c == L"copypath") {
         const Jv* t = msg.Get(L"path");
-        if (t && t->t == 3 && !t->str.empty() && g_host)
-            g_host->ClipboardSetText(g_ctx, U8(t->str).c_str());
+        std::wstring path = (t && t->t == 3) ? TrimW(t->str) : L"";
+        const Jv* idv = msg.Get(L"id");
+        if (idv && idv->t == 2) {   /* ID 版: 程序自取真实路径 */
+            xjs_engine* eng = xjs_GetDefaultEngine();
+            const char* p = eng ? xjs_db_GetPath(eng, (int)idv->num) : NULL;
+            if (p) path = W8(p);
+        }
+        if (!path.empty() && g_host)
+            g_host->ClipboardSetText(g_ctx, U8(path).c_str());
         return;
     }
 }

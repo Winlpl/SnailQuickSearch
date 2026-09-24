@@ -628,22 +628,130 @@ static std::wstring AgentToolUi(AiJob* j, int uiKind, XjsWindowToken defTok,
     return err;
 }
 
-/* ---- 临时调试观察口 (2026-09-25 用户口径): Lua 脚本执行前落盘 data\待运行.lua, 跑完即删 ----
+/* ---- 临时调试观察口 (2026-09-25 用户口径): Lua 脚本执行前落盘 data\待运行.lua, 会话作业结束才删 ----
  * agent 工作线程在 Query 提交前经宿主 StorageSet 写入 (免权限/任意线程, 一键一文件,
- * 落 plugins\ai-assistant\data\待运行.lua), 作用域守卫析构时 StorageRemove 删除 —
- * 提交失败/停止/超时/执行失败/正常完成 全部退出路径都删 (RAII 无漏)。
- * 工具串行锁保证同一时刻只有一份; 观察者盯这个文件即可看到模型即将执行的脚本。 */
-struct LuaDumpCleaner {
-    ~LuaDumpCleaner() { g_host->StorageRemove(g_ctx, "待运行.lua"); }
+ * 落 plugins\ai-assistant\data\待运行.lua), **每次调用覆盖** — 文件内容恒为最近一次
+ * 提交的脚本; 作业守卫 (JobLuaDumpCleaner, 挂 WorkerMain 顶部) 析构时 StorageRemove 删除 —
+ * 停止/失败/截断/轮数耗尽/正常完成 全部退出路径都删 (RAII 无漏)。
+ * 作业进行中文件常驻, 观察者随时打开都能看到模型最近一次执行的脚本。 */
+struct JobLuaDumpCleaner {
+    JobLuaDumpCleaner() { g_host->StorageRemove(g_ctx, "待运行.lua"); }   /* 清上次进程中途被杀的残留 */
+    ~JobLuaDumpCleaner() { g_host->StorageRemove(g_ctx, "待运行.lua"); }
 };
+
+/* ---- lua_exec 顶层 return 强制校验 (2026-09-25 用户口径: 强制写 return 数组) ----
+ * 执行模式脚本 return 的 ID 数组 = 最终结果集 (res 表只读, 没有第二条产出通道); 缺 return
+ * 引擎静默按 0 条处理, 与"真没搜到"不可区分, 外部(结果对象/工具卡)无从得知脚本选中了哪些。
+ * 故提交前静态扫描, 缺顶层 return = 拒绝执行, 指示性错误喂回模型令其补写 (统计类任务同样
+ * 要求把涉及的 ID 数组 return 回来, 数字本身走 ai.print)。
+ * 扫描器只认结构: 跳过 行注释/--[=*[ 长注释 与 '…'/[[=*[ 长短字符串 后, 按块关键字配对计
+ * 深度 —— function/if/for/while/do/repeat 各开一层, end/until 各闭一层; for/while 头部的
+ * do 归构造本身不另计 (记下开层深度, 深度回落到该值的首个 do 才消费); 深度 0 处见 return
+ * 即判定通过 —— 位置在脚本中段(提前返回)同样算数, 包在 if/function 里的 return 不算。 */
+static bool LuaHasTopLevelReturn(const char* s) {
+    auto IsWord = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    };
+    auto IsKw = [](const char* w, int n, const char* kw) {
+        while (*kw) { if (n-- <= 0 || *w++ != *kw++) return false; }
+        return n == 0;
+    };
+    const char* p = s;
+    int depth = 0;
+    int pendingDoAt = 0;
+    bool pendingDo = false;
+    while (*p) {
+        char c = *p;
+        if (c == '-' && p[1] == '-') {                    /* 注释: 行注释 或 --[=*[ 长注释 */
+            p += 2;
+            int eq = 0;
+            if (p[0] == '[') {
+                const char* q = p + 1;
+                while (*q == '=') { eq++; q++; }
+                if (*q == '[') {                          /* 长注释, 找同级 ]=*=] */
+                    p = q + 1;
+                    while (*p) {
+                        if (p[0] == ']') {
+                            int e2 = 0;
+                            while (p[1 + e2] == '=') e2++;
+                            if (e2 == eq && p[1 + e2] == ']') { p += e2 + 2; break; }
+                        }
+                        p++;
+                    }
+                    if (!*p) break;
+                    continue;
+                }
+            }
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        if (c == '\"' || c == '\'') {                     /* 短字符串: 找源码级收尾引号 */
+            p++;
+            while (*p && *p != c) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p) p++;
+            continue;
+        }
+        if (c == '[') {                                   /* 可能是长字符串 [[..]] / [=*[..]=*] */
+            int eq = 0;
+            const char* q = p + 1;
+            while (*q == '=') { eq++; q++; }
+            if (*q == '[') {
+                p = q + 1;
+                while (*p) {
+                    if (p[0] == ']') {
+                        int e2 = 0;
+                        while (p[1 + e2] == '=') e2++;
+                        if (e2 == eq && p[1 + e2] == ']') { p += e2 + 2; break; }
+                    }
+                    p++;
+                }
+                if (!*p) break;
+                continue;
+            }
+            p++;
+            continue;
+        }
+        if (IsWord(c)) {                                  /* 标识符/关键字 */
+            const char* w = p;
+            while (IsWord(*p)) p++;
+            int n = (int)(p - w);
+            if (IsKw(w, n, "return") && depth == 0) return true;
+            if (IsKw(w, n, "function") || IsKw(w, n, "if") || IsKw(w, n, "for") ||
+                IsKw(w, n, "while") || IsKw(w, n, "repeat")) {
+                depth++;
+                if (IsKw(w, n, "for") || IsKw(w, n, "while")) { pendingDo = true; pendingDoAt = depth; }
+            } else if (IsKw(w, n, "do")) {
+                if (pendingDo && depth == pendingDoAt) pendingDo = false;
+                else depth++;
+            } else if (IsKw(w, n, "end") || IsKw(w, n, "until")) {
+                if (depth > 0) depth--;
+            }
+            continue;
+        }
+        p++;                                              /* 空白/标点/UTF-8 高位字节逐个跳过 */
+    }
+    return false;
+}
 
 /* run_search 实体; 返回空串 = 成功, 否则 = 错误描述 (调用方持 g_agentCs) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query, AiToolStep* st) {
+    if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
+        return L"lua_exec 脚本缺少顶层 return, 已拒绝执行 (未提交引擎) — 执行模式必须以顶层 return ID 数组结尾, "
+               L"return 的数组 = 最终结果集, 结果卡/外部靠它得知脚本选中了哪些文件; 缺了引擎只会静默给 0 条, 与真没搜到无法区分。"
+               L"请在脚本结尾补上 return (如 return ids 或 return {...}) 后重新调用; "
+               L"统计类任务同样把涉及/选中的文件 ID 数组 return 回来, 数字本身继续走 ai.print。";
     xjs_engine* eng = xjs_GetDefaultEngine();
     if (!eng) return L"搜索引擎未就绪";
     if (g_agentRes && !xjs_result_IsEffective(g_agentRes)) g_agentRes = NULL;
     if (!g_agentRes) {
-        if (xjs_db_GetEngineState(eng) != XJS_DB_STATE_IDLE) return L"索引正忙 (加载/扫描中), 请稍后重试";
+        /* 懒建只挡"库不可用"两态: 加载数据库 (无索引可查) 与扫描建索引/遍历 (结果会不完整);
+         * 同步文件变化/保存/搜索中的引擎不拦 — 同步是常态长跑, 拦它 = 平时也动辄拒查 (2026-09-25 用户口径) */
+        int dbState = xjs_db_GetEngineState(eng);
+        if (dbState == XJS_DB_STATE_LOADING || dbState == XJS_DB_STATE_SCANNING)
+            return L"索引未就绪 (正在加载数据库或建立索引), 请稍后重试";
         g_agentRes = xjs_result_Create(eng);
         if (!g_agentRes) return L"结果对象创建失败";
         xjs_result_SetCallback(g_agentRes, XJS_RESULT_EVENT_FAILED, (const void*)AgentOnSearchFailed, NULL);
@@ -660,7 +768,6 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     g_srchErrFp = -1;
     LeaveCriticalSection(&g_srchErrCs);
     bool luaMode = (mode == L"lua_filter" || mode == L"lua_exec");
-    LuaDumpCleaner dumpCleaner;   /* 作用域 = 本次工具执行, 返回时删 data\待运行.lua (非 lua 模式无文件, 空删无害) */
     if (luaMode) {   /* 清缓冲必须在发起前: Query 返回后 VM 可能立刻开跑并 ai.print/ai.row */
         EnterCriticalSection(&g_emitCs);
         g_emitBuf.clear();
@@ -714,9 +821,10 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     }
     st->count = xjs_result_GetCount(g_agentRes);
     st->elapsedMs = xjs_result_GetElapsed(g_agentRes);
+    std::string emit8, rowsRaw;   /* lua 过程输出原文 (UTF-8) / 数据行 (插件自拼合法 JSON 数组) */
     if (luaMode) {   /* 取走本次 ai.print 过程/统计输出 + ai.row 数据行 (整段并入工具结果) */
         EnterCriticalSection(&g_emitCs);
-        st->emit = W8(g_emitBuf.c_str());
+        emit8 = g_emitBuf;
         g_emitBuf.clear();
         g_emitCut = false;
         std::string missNote;
@@ -734,16 +842,19 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
                 wrapped += "\"(行数过多, 后续已截断)\"";
             }
             wrapped += "]";
-            st->rows = W8(wrapped.c_str());   /* 插件自拼的合法 JSON, 回喂时直接拼接不再转义 */
+            rowsRaw = wrapped;   /* 合法 JSON, 拼装时直接并入不再转义 */
         }
         for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
         g_rowBuf.clear();
         g_rowCut = false;
         LeaveCriticalSection(&g_emitCs);
     }
-    /* 样本 TOP 20: fileId 留给 open_file, 路径给模型 (GetPath 指针为线程本地缓存, 必须立即拷贝) */
+    /* 样本 TOP 20: 完整路径进 st->top (卡片展开显示/历史落库用); 喂模型的 JSON 现场拼进
+     * res8 — 模型只拿 [FileId,文件名], **不拿路径** (回答里的文件链接只写 ID, 打开/定位/
+     * 复制路径由程序按 ID 解析; GetPath/GetName 指针为线程本地缓存, 必须立即拷贝) */
     g_agentTopIds.clear();
     st->top.clear();
+    std::wstring files;
     int n = st->count < 20 ? st->count : 20;
     for (int i = 0; i < n; i++) {
         int fid = xjs_result_GetFileId(g_agentRes, i);
@@ -751,7 +862,29 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         g_agentTopIds.push_back(fid);
         const char* p = xjs_db_GetPath(eng, fid);
         st->top.push_back(p ? W8(p) : L"(路径不可用)");
+        const char* nm = xjs_db_GetName(eng, fid);
+        if (!files.empty()) files += L",";
+        wchar_t nb[32];
+        swprintf(nb, 32, L"%d", fid);
+        files += L"[" + std::wstring(nb) + L",\"";
+        files += W8(JsonEscapeUtf8(W8(nm && *nm ? nm : "(未命名)")).c_str());
+        files += L"\"]";
     }
+    wchar_t head[128];
+    swprintf(head, 128, L"{\"count\":%d,\"elapsedMs\":%lld,\"files\":[", st->count, st->elapsedMs);
+    std::wstring feed = head;
+    feed += files;
+    feed += L"]";
+    if (!emit8.empty()) {   /* lua 脚本 ai.print 的过程/统计输出 */
+        feed += L",\"output\":";
+        feed += W8(JsonEscapeUtf8(W8(emit8.c_str())).c_str());
+    }
+    if (!rowsRaw.empty()) {   /* lua 脚本 ai.row 数据行 */
+        feed += L",\"rows\":";
+        feed += W8(rowsRaw.c_str());
+    }
+    feed += L"}";
+    st->res8 = U8(feed);
     return L"";
 }
 
@@ -785,54 +918,13 @@ static std::wstring AgentToolCopyPaths() {
 }
 
 /* ==================== 工具结果省 token (向成熟 agent harness 口径看齐) ====================
- * ① 路径清单不整条回喂: 样本先求"最长公共目录前缀"(目录边界对齐/大小写不敏感/斜杠归一),
- *   够长才作 base — base 内条目只回相对路径, base 外条目保留绝对路径, 还原口径
- *   (完整路径 = base + '\' + 条目) 写在工具 description 与系统提示词《路径是精确数据》节。
- *   st->top 恒存完整路径 (卡片展开显示/历史落库用), 压缩只发生在喂模型这一步。
- * ② 旧轮工具输出中段裁剪 (ToolOutputPrune): 一轮对话里早先回喂过的超长输出 (get_lua_spec
+ * ① 旧轮工具输出中段裁剪 (ToolOutputPrune): 一轮对话里早先回喂过的超长输出 (get_lua_spec
  *   规范全文/大段 ai.print), 后续每轮重发时只留头尾+占位标记 — 原文已经送达过一次,
  *   规范可随时 get_lua_spec 重取; 本轮刚产出的批次不裁 (模型正要用)。
- * ③ 环境快照移到请求尾部 (AgentBuildBody): instructions/tools/历史前缀逐字节稳定,
- *   provider 前缀缓存才命得到 — 快照带秒级时间, 拼在 instructions 里每请求必变 = 缓存全灭。 */
-
-static wchar_t AiWLower(wchar_t c) { return (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c; }
-
-/* a/b 的最长公共目录前缀长度 (含结尾分隔符; '/' 归一 '\\' 后比较, 大小写不敏感) */
-static size_t PathCommonDirPrefix(const std::wstring& a, const std::wstring& b) {
-    size_t n = a.size() < b.size() ? a.size() : b.size();
-    size_t last = 0;
-    for (size_t i = 0; i < n; i++) {
-        wchar_t ca = a[i] == L'/' ? L'\\' : AiWLower(a[i]);
-        wchar_t cb = b[i] == L'/' ? L'\\' : AiWLower(b[i]);
-        if (ca != cb) break;
-        if (ca == L'\\') last = i + 1;
-    }
-    return last;
-}
-
-/* top → (base, 压缩后条目)。base 空 = 不压缩 (样本不足/无公共目录/只有盘根级前缀)。 */
-static void PathCompressList(const std::vector<std::wstring>& top, std::wstring* baseOut,
-                             std::vector<std::wstring>* out) {
-    *baseOut = L"";
-    *out = top;
-    if (top.size() < 2) return;
-    size_t common = top[0].size();
-    for (size_t i = 1; i < top.size() && common > 0; i++) {
-        size_t c = PathCommonDirPrefix(top[0], top[i]);
-        if (c < common) common = c;
-    }
-    if (common < 6) return;
-    /* 发出的 base 剥掉尾分隔符: 模型侧还原公式恒为 base+'\\'+条目 (提示词/描述已写死),
-     * base 自带尾 '\\' 会照公式拼出双分隔符; 逐条判定/截取仍用带分隔符的原 common */
-    size_t emitLen = common;
-    while (emitLen > 0 && top[0][emitLen - 1] == L'\\') emitLen--;
-    if (emitLen < 6) return;   /* 剥完只剩盘符级前缀, 省不了几列, 不值得让模型多做一步拼接 */
-    baseOut->assign(top[0], 0, emitLen);
-    for (size_t i = 0; i < top.size(); i++) {
-        if (PathCommonDirPrefix(top[0], top[i]) < common) continue;   /* base 外 = 保留绝对路径 */
-        (*out)[i] = top[i].size() > common ? top[i].substr(common) : L".";   /* 恰为 base 目录自身 = "." */
-    }
-}
+ * ② 环境快照移到请求尾部 (AgentBuildBody): instructions/tools/历史前缀逐字节稳定,
+ *   provider 前缀缓存才命得到 — 快照带秒级时间, 拼在 instructions 里每请求必变 = 缓存全灭。
+ * (路径不回喂模型是最大的省 token 项: 搜索/选中样本只回 [FileId,文件名], 见
+ *   AgentToolRunSearch 尾部与 get_window_selection — 2026-09-25 用户口径。) */
 
 /* 旧轮工具输出中段裁剪: 超过阈值只保留头尾, 断点回退 UTF-8 字符边界 (避免切碎多字节)。 */
 static const size_t PRUNE_THRESHOLD = 3600, PRUNE_HEAD = 2400, PRUNE_TAIL = 900;
@@ -894,17 +986,17 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         return err;
     }
     if (name8 == "get_lua_spec") {
-        /* Lua 规范按需展开 (提示词防膨胀): 引擎内嵌文本工作者线程直读, 无需 UI 编组。
-         * 优先合集 (promptType 2 = 0+1 合并去重版, 一次投喂即可生成两种模式脚本, 体积更小);
-         * 旧引擎无合集 = 按 mode 单取一份 (此时 mode 必填)。 */
+        /* Lua 规范重读通道 (2026-09-25 起规范全文默认拼进系统提示词附录, 本工具供脚本报错
+         * 排查时重读/附录疑似截断时取全文): 引擎内嵌文本工作者线程直读, 无需 UI 编组。
+         * 优先合集 (promptType 2 = 0+1 合并去重版); 旧引擎无合集 = 按 mode 单取一份 (此时 mode 必填)。 */
         st->kind = 9;
-        const char* p = xjs_LUA_GetPprompt(2);
+        const char* p = xjs_Query_GetPrompt(2);
         if (p && *p) {
             st->argz = L"Lua 规范合集";
         } else {
             std::wstring wm = TrimW(v.S(L"mode"));
             if (wm == L"lua_filter" || wm == L"lua_exec")
-                p = xjs_LUA_GetPprompt(wm == L"lua_exec" ? 1 : 0);
+                p = xjs_Query_GetPrompt(wm == L"lua_exec" ? 1 : 0);
             if (!p || !*p) return L"mode 必填 lua_filter | lua_exec (引擎无合集提示词)";
             st->argz = wm + L" 规范";
         }
@@ -1010,7 +1102,7 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         if (lv && lv->t == 2 && lv->num >= 1 && lv->num <= 10000) limit = (long long)lv->num;
         std::wstring err = AgentToolUi(j, UIW_WINDOW_SELECTION, tok, win, L"", L"", limit, 0, st);
         if (!err.empty()) return err;
-        /* worker 直连引擎补路径/名称 (GetPath/GetName 指针为线程本地缓存, 必须立即拷贝);
+        /* worker 直连引擎补名称 (GetName 指针为线程本地缓存, 必须立即拷贝);
            UI 编组只回 FileId (宿主口径: 引擎数据是事实源)。解析不出引擎时原样透传 ID 列表 */
         Jv o = JsonParseW(W8(st->res8.c_str()));
         const Jv* arr = o.Get(L"文件ID");
@@ -1019,33 +1111,22 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         long long total = 0;
         const Jv* tv = o.Get(L"选中数");
         if (tv && tv->t == 2) total = (long long)tv->num;
-        /* 紧凑回喂: files=[[FileId,路径],…] (路径经公共前缀压缩, 名称=路径最后一段不再单列;
-         * 键名/逐对象包装对 200 条上限的清单是白烧 token)。UI 不消费 res8, 随便压。 */
-        std::vector<std::wstring> paths;
-        std::vector<int> ids;
+        /* 紧凑回喂: files=[[FileId,文件名],…] (同 run_search 口径: 模型不拿路径,
+         * 引用文件一律用 ID。键名/逐对象包装对 200 条上限的清单是白烧 token) */
+        std::wstring out = L"{\"win\":\"" + W8(JsonEscapeUtf8(o.S(L"窗口名称")).c_str()) + L"\"";
+        out += L",\"total\":" + std::to_wstring(total);
+        out += L",\"files\":[";
+        bool first = true;
         for (auto& f : arr->arr) {
             if (f.t != 2) continue;
             int fid = (int)f.num;
-            const char* p = xjs_db_GetPath(eng, fid);
-            ids.push_back(fid);
-            paths.push_back(p ? W8(p) : L"");
-        }
-        std::vector<std::wstring> rel;
-        std::wstring base;
-        PathCompressList(paths, &base, &rel);
-        std::wstring out = L"{\"win\":\"" + W8(JsonEscapeUtf8(o.S(L"窗口名称")).c_str()) + L"\"";
-        out += L",\"total\":" + std::to_wstring(total);
-        if (!base.empty()) {
-            out += L",\"base\":";
-            out += W8(JsonEscapeUtf8(base).c_str());
-        }
-        out += L",\"files\":[";
-        for (size_t i = 0; i < ids.size(); i++) {
-            if (i) out += L",";
+            const char* nm = xjs_db_GetName(eng, fid);
+            if (!first) out += L",";
+            first = false;
             wchar_t nb[32];
-            swprintf(nb, 32, L"%d", ids[i]);
-            out += L"[" + std::wstring(nb) + L",";
-            out += W8(JsonEscapeUtf8(rel[i]).c_str()) + L"]";
+            swprintf(nb, 32, L"%d", fid);
+            out += L"[" + std::wstring(nb) + L",\"";
+            out += W8(JsonEscapeUtf8(W8(nm && *nm ? nm : "(未命名)")).c_str()) + L"\"]";
         }
         out += L"]}";
         st->res8 = U8(out);
@@ -1109,6 +1190,9 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         if (!mode.empty() && mode != L"wildcard" && mode != L"regex" && mode != L"sql" &&
             mode != L"lua" && mode != L"lua-exec")
             return L"mode 只接受 wildcard | regex | sql | lua | lua-exec";
+        if (mode == L"lua-exec" && !kw.empty() && !LuaHasTopLevelReturn(U8(kw).c_str()))
+            return L"lua-exec 脚本缺少顶层 return, 未置入窗口 — 执行模式必须以顶层 return ID 数组结尾"
+                   L"(return 的数组 = 窗口结果列表; 缺 return 执行后只会显示 0 条)。请补上 return 后重试。";
         st->argz = (win.empty() ? L"(当前窗口)" : win) + L" 搜: " + (kw.empty() ? L"(保持现词)" : kw);
         if (!mode.empty()) st->argz += L" [" + mode + L"]";
         ArgzCut(&st->argz);
@@ -1186,7 +1270,9 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
                          : (L"未知工具: " + W8(name8.c_str()));
 }
 
-/* 工具结果 → function_call_output 文本 (喂回模型的 JSON) */
+/* 工具结果 → function_call_output 文本 (喂回模型的 JSON)。
+ * run_search/get_window_selection 的结果 JSON 在各自完成时已拼进 res8 (样本只含
+ * [FileId,文件名], 路径不回喂); 其余工具 res8 = 宿主扩展 API 原样, 空 = 无返回值。 */
 static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st) {
     std::wstring j;
     if (!err.empty()) {
@@ -1195,46 +1281,16 @@ static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st
         j += L"}";
         return U8(j);
     }
-    if (st.kind == 0) {
-        std::vector<std::wstring> rel;
-        std::wstring base;
-        PathCompressList(st.top, &base, &rel);
-        wchar_t head[128];
-        swprintf(head, 128, L"{\"count\":%d,\"elapsedMs\":%lld,", st.count, st.elapsedMs);
-        j = head;
-        if (!base.empty()) {
-            j += L"\"base\":";
-            j += W8(JsonEscapeUtf8(base).c_str());
-            j += L",";
-        }
-        j += L"\"top\":[";
-        for (size_t i = 0; i < rel.size(); i++) {
-            if (i) j += L",";
-            j += W8(JsonEscapeUtf8(rel[i]).c_str());
-        }
-        j += L"]";
-        if (!st.emit.empty()) {   /* lua 脚本 ai.print 的过程/统计输出 */
-            j += L",\"output\":";
-            j += W8(JsonEscapeUtf8(st.emit).c_str());
-        }
-        if (!st.rows.empty()) {   /* lua 脚本 ai.row 数据行 (插件拼好的 JSON 数组文本) */
-            j += L",\"rows\":";
-            j += st.rows;
-        }
-        j += L"}";
-    } else if (!st.res8.empty()) {
-        return st.res8;   /* 代办类: 宿主扩展 API 的结果 JSON 原样回喂 */
-    } else {
-        j = L"{\"ok\":true}";
-    }
-    return U8(j);
+    if (!st.res8.empty()) return st.res8;
+    return "{\"ok\":true}";
 }
 
-/* 系统提示词 — 按"常驻骨架 + 按需展开"拆分 (提示词防膨胀口径):
+/* 系统提示词 — "常驻骨架 + Lua 规范附录" (2026-09-25 用户口径: Lua 提示词默认进全局提示词):
  *   常驻 = 角色目标 / 工作方式 / 工具目录(只有名字+一句话, 细节在各工具 description 里) /
  *          跨工具规则 / 可点击输出 / 语法速查 / Lua 速查 — 全是"每轮都要用"的行为契约。
- *   按需 = 引擎内嵌的两份 Lua 规范全文 (体量最大且只有写脚本时才用) 不再拼进每轮请求,
- *          改经 get_lua_spec 工具由模型在写 lua_filter/lua_exec 前自取 (工具结果纯文本回喂)。
+ *   附录 = 引擎内嵌 Lua 规范全文, 由 BuildInstructions 拼在骨架之后 (xjs_Query_GetPrompt(2)
+ *          合集, 旧引擎无合集回落 0/1 拼接; 规范与骨架速查冲突时以规范为准的适配说明一并写入);
+ *          get_lua_spec 工具保留为"重读"通道 (脚本报错排查/怀疑附录被截断时取全文)。
  *   新增工具一律: 加 tools JSON (描述里写全参数语义) + 工具目录加一行; 别再往这里堆细节。 */
 static const wchar_t* AI_INSTRUCTIONS =
     L"## 角色与目标\n"
@@ -1243,25 +1299,25 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"\n"
     L"## 工作方式\n"
     L"- 找文件/查文件/统计类任务：**先调用 run_search 实际执行搜索**，根据返回的条数/样本/ai.print 输出判断结果，"
-    L"不符合就换口径再搜（先粗筛再精筛），绝不凭空编造路径；需要给用户看文件用 open_file，给路径清单用 copy_paths。\n"
+    L"不符合就换口径再搜（先粗筛再精筛），绝不凭空编造结果；需要给用户看文件用 open_file，给路径清单用 copy_paths。\n"
     L"- 统计类必须**自己跑到出数**再回答（用户要的是数字与结论，不是脚本）；只有确实多次失败，"
     L"才把可粘贴的搜索式/脚本交给用户并说明卡在哪一步。\n"
     L"- 改设置/换皮肤/切语言/窗口管理：用对应代办工具提交——这类改动**不会直接生效**，而是列进\"待应用的调整\"卡片，"
     L"用户逐项点\"应用\"才执行。提交后用一句话请用户到卡片上确认，**绝不宣称已生效**，"
     L"**用户没让改就不要替用户提交任何调整**。搜索模式管理与任务类操作（搜索/打开文件/复制路径）仍直接执行。\n"
-    L"- 工具调用轮数有限，别在一种写法上反复试错：同一口径连续两次拿不到有效数据，立即换搜索模式（或先取 Lua 规范）。\n"
+    L"- 工具调用轮数有限，别在一种写法上反复试错：同一口径连续两次拿不到有效数据，立即换搜索模式（或重读 Lua 规范附录）。\n"
     L"- 得到足够信息后用最终答复总结：找到什么、在哪、关键数据；推荐执行的搜索用 xjs:// 搜索链接给出（见《可点击输出》）。\n"
     L"- 与任务无关的问题直接回答，不要调用工具。\n"
     L"\n"
     L"## 工具目录（只有名字与一句话；参数细节看各工具的 description，用前先读）\n"
-    L"- get_lua_spec：取 Lua 脚本规范全文（默认返回合集，取一次即可写两种模式的脚本）——"
-    L"**写 lua_filter/lua_exec 脚本前必须先取**，脚本报错后也先重读规范再改。\n"
+    L"- get_lua_spec：重新取 Lua 脚本规范全文（规范已内置在本提示词文末附录，写脚本前先读附录；一般无需调用）——"
+    L"只在脚本报错要重读规范、或怀疑附录被截断时调用。\n"
     L"- run_search：引擎内执行一次搜索（5 种模式，语法见《搜索语法速查》；Lua 统计经 ai.print、数据行经 ai.row 回传）。\n"
     L"- open_file / copy_paths：把搜索样本中的文件打开/定位给用户看 / 复制路径清单到剪贴板。\n"
     L"- get_author_and_donate：关于作者/软件背景的权威介绍；用户想捐赠/赞赏时也用它取二维码引用（竖排显示在对话页）。\n"
     L"- list_windows / get_window_state / set_window_settings / control_window / create_window：窗口查看与代办（改动经\"待应用的调整\"卡片，用户点应用才生效）。\n"
     L"- get_global_settings / set_global_settings / list_skins：全局设置读写（改经卡片）/ 皮肤名清单。\n"
-    L"- get_window_selection：读某窗口当前选中的文件 (FileId+路径, 压缩口径同 run_search)。用户指\"选中的/这些文件\"要做判断、统计或批量操作建议时用它。\n"
+    L"- get_window_selection：读某窗口当前选中的文件 (FileId+文件名, 同 run_search 口径不含路径)。用户指\"选中的/这些文件\"要做判断、统计或批量操作建议时用它。\n"
     L"- list_languages / get_language / set_language：界面语言清单 / 查询 / 切换（代码 auto|zh|zh-TW|en|ko|th|ms，切换经卡片，用户点应用才生效）。\n"
     L"- set_search：把关键词置入用户窗口的搜索框并执行（run_search 是你的私有搜索，不动用户界面）。\n"
     L"- list_modes / apply_mode / add_search_mode / remove_search_mode：搜索模式查看/执行/增删。\n"
@@ -1290,37 +1346,60 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"[🔍 找出大于 100MB 的视频](xjs://search?text=SELECT%20Path%20FROM%20alltable%20WHERE%20Size%20%3E%20'100M'&mode=sql)。\n"
     L"   凡要给\"可执行的搜索式\"一律用这种链接；链接里的 lua 脚本写成**单行紧凑形式**（语句用分号衔接，\n"
     L"   不用 -- 行注释——搜索框是单行显示）；过长塞不进链接的脚本改用普通代码块给出。\n"
-    L"2. 文件动作：[打开 xxx](xjs://open?path=<完整路径>)、[在资源管理器中定位 xxx](xjs://reveal?path=<完整路径>)。\n"
-    L"   path 的值同样要 URL 编码（空格=%20、&=%26、括号最好也编码=%28 %29）。表格清单里链接文字用文件名即可，\n"
-    L"   完整路径放进 path（悬停可见），别把几百字符的整条路径铺在表格里。\n"
-    L"3. 路径是精确数据：必须**逐字符保真**（盘符/空格/括号/间隔点/扩展名一个字符都不能变），\n"
-    L"   绝不凭印象改写、意译或补全——差一个字符，用户点击就打不开。工具结果里的路径条目分两种：\n"
-    L"   以盘符（如 C:\\）开头 = 完整绝对路径，直接用；不带盘符 = 相对路径，结果 JSON 里有\n"
-    L"   \"base\":\"C:\\\\…\\\\目录\"，完整路径 = base + \\\\ + 条目（拼接时不增删任何字符）。\n"
-    L"   链接文字照抄原文件名（路径最后一段），不要自造名称。\n"
-    L"4. 直接写出完整绝对路径（含盘符）也会自动渲染为可点击链接：单击=打开，右键=打开/定位/复制路径。\n"
+    L"2. 文件动作：[文件名](xjs://open?id=<FileId>)、[在资源管理器中定位 文件名](xjs://reveal?id=<FileId>)。\n"
+    L"   id = 工具结果 files 里给出的 FileId 数字，**只能是纯数字，逐字照抄**——带任何其它字符\n"
+    L"   （如\"4396180附近\"、\"≈4396180\"）的链接点不开；记不清/没看到的 ID 宁可不放链接，绝不估写。\n"
+    L"   链接文字写文件名（照抄工具结果给的名称，不要自造），不要把 ID 数字或文件名裸放在正文里当引用。\n"
+    L"3. 文件只按 ID 引用：工具结果给你的只有 [FileId, 文件名]，**没有、也不需要完整路径**——\n"
+    L"   绝不在回答里拼凑、猜测或编造路径；打开/定位/复制路径都由程序按 ID 自动完成。\n"
+    L"   样本只给前 20 条：排在其后的文件你**没有 ID**，不放链接，如实写明\"仅列前 20\"即可。\n"
+    L"   确实需要路径细节时（如按目录写脚本）用 ai.row(id,\"路径\") 让脚本自取，回答里仍只放 ID 链接。\n"
+    L"4. 工具结果里确实存在的完整绝对路径（如 ai.row 请求了\"路径\"字段）直接写出也会自动渲染为\n"
+    L"   可点击链接：单击=打开，右键=打开/定位/复制路径。\n"
     L"5. 网页链接照常 [标题](https://...)，点击用系统浏览器打开。\n"
     L"\n"
     L"## 搜索语法速查（run_search 的 mode）\n"
     L"- wildcard 通配符（日常默认）：* 任意长度、? 单个字符；不含 * ? 时自动按包含匹配；支持拼音首拼/全拼（wd 命中 文档.docx）；"
     L"空格=且，|=或；搜索词含 \\\\ 或 / 时按完整路径匹配。\n"
     L"- regex 正则（PCRE2）：如 ^[0-9]{4}-报告.*\\.docx$。\n"
-    L"- sql（功能最强）：SELECT Path FROM alltable WHERE Size > '100M' AND ModTime > NOW() - INTERVAL '7 days' ORDER BY Size DESC LIMIT 100；"
-    L"支持 LIKE/ILIKE/~/GROUP BY/COUNT/CASE WHEN/CTE 等；尺寸简写 '100M'；常用字段：ID、Path、FName、Ext、Size、CreateTime、ModTime、"
-    L"AccessTime、FileType、IsDir（1=目录 0=文件）、Alias、Score、FileContent（不区分大小写）；不支持窗口函数(OVER)/多表 FROM/EXISTS/DDL。\n"
+    L"- sql（功能最强，类 PostgreSQL，仅单表 alltable）：SELECT Path FROM alltable WHERE Size > '100M' AND ModTime > NOW() - INTERVAL '7 days' ORDER BY Size DESC LIMIT 100。\n"
+    L"  运算符：LIKE/NOT LIKE/ILIKE（% 任意长度、_ 单字符；字符串 = 比较默认区分大小写，不区分用 ILIKE）；"
+    L"正则 ~（区分大小写）/~*（不区分）/~ !~（取反），如 FName ~ '^[0-9]{4}'；IN 仅常量列表；"
+    L"GROUP BY/COUNT/HAVING（HAVING 仅单条 COUNT 比较）/CASE WHEN/CTE(WITH)；尺寸简写 '100M' '2G'；"
+    L"时间：ModTime >= CURRENT_DATE - INTERVAL '7 days'（或 '1 month'），精确时间段用 CAST('2025-01-01' AS int)（不支持 '值'::类型）。\n"
+    L"  常用字段：ID、ParentID、Path、FName（**不含扩展名**）、Ext（**扩展名不含点**，是 docx 不是 .docx）、"
+    L"ParentName/ParentPath（直接父目录名/路径；**ParentPath = 是精确匹配只查直接子项，ParentPath LIKE 'D:\\\\x\\\\%' 才含全部后代**，"
+    L"ParentPath LIKE '_:' = 各盘根）、AnyParent（任意层级父目录名，如 AnyParent ILIKE 'Work'）、Size、CreateTime、ModTime、"
+    L"AccessTime、FileType（**只认 = / !=，不支持 LIKE**：视频/音频/图片/文档/办公/程序/压缩/系统/其他）、IsDir（1=目录 0=文件）、"
+    L"Alias、Score、FAttr（属性串正则匹配：S=系统 H=隐藏 R=只读 D=目录…，**排除系统+隐藏 = FAttr !~ '[SH]'**——"
+    L"用户没有特殊说明的统计/清单默认加上）、FileContent（**文件全文内容**，**严禁单独作 WHERE 条件**，见下方内容搜索规则）。\n"
+    L"  不支持：窗口函数(OVER)/写操作(UPDATE/DELETE/INSERT)/DDL/多表 FROM/EXISTS/VALUES/SELECT INTO/多语句。\n"
     L"- lua_filter 过滤模式：对每个文件做一次真值判断的 Lua 脚本；**每个文件一条线程并发求值，文件间顺序不定**——"
     L"脚本必须无状态，聚合统计一律换 lua_exec。\n"
     L"- lua_exec 执行模式：脚本全权遍历数据库/跨文件聚合/自定义排序，return 的 ID 数组即结果。\n"
+    L"  **脚本必须有顶层 return ID 数组**——插件提交前静态校验，缺顶层 return 直接拒绝执行（不提交引擎）；"
+    L"统计类任务也要把涉及/选中的文件 ID 数组 return 回来（外部靠 return 的数组得知脚本选中了哪些），数字本身走 ai.print。\n"
     L"选择建议：找名字用 wildcard/regex；按字段组合筛选用 sql；逐文件自定义判断用 lua_filter；"
     L"**计数/分组/排名/占比等一切统计类问题直接用 lua_exec**（统计数字经 ai.print 拿回来）。\n"
-    L"- SQL 做不了统计：聚合数值经工具通道拿不到（COUNT(*) 只回 1 行，数值本身不回传），GROUP BY 形态受限、不支持子查询/CASE。\n"
-    L"- SQL 的 LIKE 里 \\ 是转义字符，`Path LIKE 'C:\\%'` 实测匹配 0 条；含 \\ 的路径前缀筛选改用 lua_exec（f.fpath() 判断前缀）。\n"
+    L"- SQL 聚合的结果到不了你手里：run_search 只回命中总数与样本清单，GROUP BY/COUNT 的结果行拿不回来"
+    L"（聚合查询 count 恒为 1）——**一切要出数字的统计改用 lua_exec**（数字经 ai.print 拿回来）；"
+    L"给用户手动执行的搜索不受此限（CASE WHEN/CTE/IN (SELECT…) 引擎都支持）。\n"
+    L"- LIKE 里 \\ 是转义字符，**匹配路径分隔符 \\ 必须写成 \\\\**（单写一个 \\ 再跟普通字符会匹配 0 条）；"
+    L"按目录前缀缩小范围：`Path LIKE 'D:\\\\蜗牛快搜\\\\蜗牛快搜(D2D)%'`。\n"
+    L"- 文件内容搜索 = FileContent 条件。**严禁 FileContent 单独作 WHERE 条件**——如 "
+    L"`SELECT * FROM alltable WHERE FileContent LIKE '%搜索%'` 这种没有任何前置条件的写法是**禁止**的：\n"
+    L"  它会读取所有分区每一个文件的内容，极慢。**必须**先缩小范围，只允许两种形态：\n"
+    L"  ① 加路径前置条件（推荐）：`SELECT * FROM alltable WHERE Path LIKE 'D:\\\\蜗牛快搜\\\\蜗牛快搜(D2D)%' AND FileContent LIKE '%搜索%'`；\n"
+    L"  ② 指定少量 ID：`SELECT * FROM alltable WHERE ID IN (0,2,5) AND FileContent LIKE '%搜索%'`。\n"
+    L"  用户没给范围时，先按文件名/目录粗筛定位目录，或如实告知需要范围；绝不发全盘内容搜索。\n"
+    L"  内容条件**放 WHERE 末位**，先让便宜的属性条件过滤（如 `Ext IN ('txt','md') AND Path LIKE 'D:\\\\x\\\\%' AND FileContent ~* '关键词'`）；"
+    L"内容也支持正则（~* 不区分大小写）；`GROUP BY MD5(FileContent)` 可按内容查重（流式 MD5，单文件读取上限 200MB）。\n"
     L"\n"
     L"## 文件与目录必须区分（分析口径）\n"
-    L"索引同时收录**文件和目录（文件夹/盘符）**，搜索结果默认两类混排，count 与 top 样本都是混合口径。"
+    L"索引同时收录**文件和目录（文件夹/盘符）**，搜索结果默认两类混排，count 与样本清单都是混合口径。"
     L"分析时必须分清对象究竟是文件还是目录，禁止把目录当文件、把文件当目录：\n"
-    L"- 类型只能靠字段判断：SQL 用 `IsDir`，Lua 用 `f.isdir()`。**不要凭后缀或路径长相猜**——目录名可以带点，"
-    L"无后缀的路径不一定是目录；top 样本只有路径字符串，本身不带类型标志。\n"
+    L"- 类型只能靠字段判断：SQL 用 `IsDir`，Lua 用 `f.isdir()`。**不要凭后缀猜**——目录名可以带点，"
+    L"无后缀的名字不一定是目录；样本只有 FileId 和文件名，本身不带类型标志。\n"
     L"- 用户问\"文件\"=必须排除目录：SQL 加 `AND IsDir=0`；lua_filter 脚本开头 `if f.isdir() then return false end`；"
     L"lua_exec 统计时按 `f.isdir()` 把文件/目录分开计数。\n"
     L"- 用户问\"文件夹/目录\"=只算目录：SQL `IsDir=1`，Lua `f.isdir()`。\n"
@@ -1329,19 +1408,20 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- 统计文件数/总大小/最大文件一律先排除目录（IsDir=0），目录条目不参与\"文件\"的计数与求和；"
     L"给用户的清单里目录行要标明是目录（如 📁 前缀），不要一律写成\"文件\"。\n"
     L"\n"
-    L"## Lua 脚本速查（全文规范用 get_lua_spec 取合集，写脚本前必读规范）\n"
-    L"- db 表只有 count/ids/files/get 四个成员，没有 db.ext/db.isdir/db.size 之类的快捷函数——"
-    L"取文件属性必须先 `local f = db.get(id)` 再 f.ext()/f.isdir()/f.size()/f.fpath()（虚构 API 脚本必报错）。\n"
+    L"## Lua 脚本速查（全文规范见本提示词文末附录，写脚本前先读附录；此处只列 agent 环境差异与高频要点）\n"
+    L"- 文件属性经 f 表 / db 表访问器取：f.ext()=**不带点小写扩展名**（docx，无后缀空串）、f.isdir()、f.size()、f.fpath()（最贵放最后）；"
+    L"lua_exec 全库遍历只用 db.ids()/db.files()，**禁止按数字范围枚举 ID**（ID 是稀疏槽位，必踩空槽漏文件）。\n"
     L"- 过程输出：引擎规范里\"数据走 print\"的说法对你不适用（print 进引擎调试输出，工具结果拿不到）；"
     L"你的工具环境注册了 **ai.print(...)**（与 print 同款多参数，可多次调用，参数可为字符串/数字/表），"
     L"输出会作为本次工具结果 JSON 的 output 字段原样回传——统计数字/逐目录计数/过程日志一律经它；\n"
     L"- 数据行：要把文件清单（含属性）给用户看时用 **ai.row(id, \"字段名\", ...)** 逐条压行。字段名可任意"
-    L"组合：名称 / 路径 / 大小 / 修改时间 / 创建时间 / 访问时间 / 扩展名 / 目录 / 类型 / 属性 / 别名 / 评分"
+    L"组合：名称 / 路径 / 大小 / 修改时间 / 创建时间 / 访问时间 / 扩展名（不含点） / 目录 / 类型 / 属性 / 别名 / 评分"
     L"（不带字段实参 = id+名称；字段名就是输出 JSON 的键）。行进工具结果 JSON 的 rows 数组，"
     L"**每行是只含请求字段的 JSON 对象**（如 {\"id\":123,\"大小\":1048576,\"名称\":\"a.docx\"}，时间=epoch 秒）；"
     L"索引未开启的字段整键省略（rows 首元素有提示），行数过多会截断。清单展示优先 ai.row，别用 ai.print 手拼行。\n"
-    L"return 仍按规范（执行模式=ID 数组，过滤模式=逐文件真值）。\n"
-    L"- 脚本沙箱删除了 io/os 等库；API 全集以 get_lua_spec 返回的规范为准，绝不虚构函数。\n"
+    L"return 硬规则：lua_exec 必须以**顶层 return ID 数组**结尾（插件静态校验，缺顶层 return 拒绝执行；"
+    L"包在 if/function 里的 return 不算——主流程必须有兜底 return）；lua_filter 逐文件返回真值。\n"
+    L"- 脚本沙箱删除了 io/os 等库；API 全集以文末附录规范为准，绝不虚构函数。\n"
     L"- **交给用户运行的脚本**（写在回答里的代码块或 xjs://search 链接，不经你执行）：必须写 return ID 数组"
     L"（漏写 return 界面一条结果都不显示）；**禁止调用 ai.print**（用户侧没有这个函数，调用即报错）；"
     L"过滤模式脚本没有用户侧入口（搜索框的 lua 模式就是执行模式），别生成 lua_filter 的搜索链接；"
@@ -1349,8 +1429,8 @@ static const wchar_t* AI_INSTRUCTIONS =
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条路径样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, top=样本路径数组, output=ai.print 输出 (仅 Lua 模式有)。top 压缩口径: 结果带 base 键时条目是相对 base 的路径, 完整路径=base+\\+条目; 条目以盘符开头即为绝对路径。结果同时含文件与目录(文件夹), count/top 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先调 get_lua_spec 取规范。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
-  {"type":"function","name":"get_lua_spec","description":"获取引擎内嵌的 Lua 脚本规范全文 (纯文本)。写 lua_filter 或 lua_exec 脚本前必须先取, 脚本报错时也先重读规范再修改 — 规范里有全部可用 API 与硬性规则, 绝不虚构函数。默认返回合集 (两种模式合并去重版, 取一次即可写两种模式的脚本); 仅当引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
+  {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"open_file","description":"打开最近一次 run_search 样本列表中的某个文件 (在用户屏幕上打开/定位), 用于让用户直接看到该文件。","parameters":{"type":"object","properties":{"index":{"type":"integer","description":"样本列表序号 (1 起)"},"reveal":{"type":"boolean","description":"true=只在资源管理器中定位, 不打开"}},"required":["index"]}},
   {"type":"function","name":"copy_paths","description":"把最近一次 run_search 的前 100 条完整路径 (每行一条) 复制到剪贴板, 供用户粘贴。","parameters":{"type":"object","properties":{},"required":[]}},
@@ -1360,26 +1440,51 @@ static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"get_global_settings","description":"读取全局设置 (双击Ctrl目标/绘制引擎)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"set_global_settings","description":"提交对全局设置的修改。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才逐项执行。键: 双击Ctrl目标=\"\"(禁用)|\"默认窗口\"|档案名; 绘制引擎=\"d2d\"|\"gdiplus\"(应用后重启生效)。","parameters":{"type":"object","properties":{"settings":{"type":"object","description":"要修改的全局设置键值对"}},"required":["settings"]}},
   {"type":"function","name":"list_skins","description":"列出全部可用皮肤名 (set_window_settings 的\"皮肤\"键只接受这些名字)。","parameters":{"type":"object","properties":{},"required":[]}},
-  {"type":"function","name":"get_window_selection","description":"读取一个搜索窗口当前选中的文件清单。结果 JSON: win=窗口名称, total=选中总数, base?=公共目录前缀 (存在时 files 里的路径是相对它的, 完整路径=base+\\+条目; 条目以盘符开头即为绝对路径), files=[[引擎FileId,路径],…]; 名称=路径最后一段, 不再单列; files 长度<total 时仅详列了前若干条。用户说\"我选中的这些/当前选中的文件\"要做判断、统计或给出批量操作建议时调用; 没有选中时 total=0。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"limit":{"type":"integer","description":"最多详列多少条 (默认 200; 选中数为全量, 超出部分不展开)"}},"required":[]}},
+  {"type":"function","name":"get_window_selection","description":"读取一个搜索窗口当前选中的文件清单。结果 JSON: win=窗口名称, total=选中总数, files=[[引擎FileId,文件名],…] (FileId=文件的唯一引用方式, 回答里的文件动作链接 xjs://open|reveal?id= 填它; 不含路径); files 长度<total 时仅详列了前若干条。用户说\"我选中的这些/当前选中的文件\"要做判断、统计或给出批量操作建议时调用; 没有选中时 total=0。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"limit":{"type":"integer","description":"最多详列多少条 (默认 200; 选中数为全量, 超出部分不展开)"}},"required":[]}},
   {"type":"function","name":"list_languages","description":"列出全部可用界面语言 (代码 + 母语名称)。set_language 的 language 参数只接受这些代码 (另加 auto=跟随系统)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"get_language","description":"查询一个搜索窗口当前的界面语言设置 (语言代码; auto=跟随系统)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"}},"required":[]}},
   {"type":"function","name":"set_language","description":"提交切换一个搜索窗口的界面语言。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才切换 (应用后所有窗口标题各自按新语言刷新并落盘)。语言代码先 list_languages 查 (用户说的是\"中文/英文/泰语\"这类母语名, 映射成代码再调)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"language":{"type":"string","enum":["auto","zh","zh-TW","en","ko","th","ms"],"description":"语言代码 (auto=跟随系统)"}},"required":["language"]}},
   {"type":"function","name":"control_window","description":"提交对一个搜索窗口的界面动作。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才执行。show=唤起到前台; dismiss=窗口消失 (主窗藏托盘/子窗真关闭); openSettings=打开设置窗口并绑定该窗口。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"action":{"type":"string","enum":["show","dismiss","openSettings"],"description":"界面动作"}},"required":["action"]}},
   {"type":"function","name":"create_window","description":"提交一个创建搜索窗口的提案。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才创建 (该档案已打开则只激活; 索引扫描期应用会失败)。","parameters":{"type":"object","properties":{"profile":{"type":"string","description":"窗口档案名 (留空=新建空白档案)"},"inherit":{"type":"string","description":"继承尺寸的窗口名称 (留空=默认窗口)"}},"required":[]}},
-  {"type":"function","name":"set_search","description":"把关键词置入用户搜索窗口的搜索框并执行搜索 (用户立即可见)。与 run_search 的区别: run_search 是你私有的搜索, 不动用户界面; 要把某个搜索放进用户的窗口时用它。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"keyword":{"type":"string","description":"搜索词 (留空=保持现词)"},"mode":{"type":"string","enum":["wildcard","regex","sql","lua","lua-exec"],"description":"搜索模式 (留空=沿用窗口当前模式)"},"execute":{"type":"boolean","description":"false=只填词不搜索 (默认 true=立即搜索)"}},"required":[]}},
+  {"type":"function","name":"set_search","description":"把关键词置入用户搜索窗口的搜索框并执行搜索 (用户立即可见)。与 run_search 的区别: run_search 是你私有的搜索, 不动用户界面; 要把某个搜索放进用户的窗口时用它。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"keyword":{"type":"string","description":"搜索词 (留空=保持现词)"},"mode":{"type":"string","enum":["wildcard","regex","sql","lua","lua-exec"],"description":"搜索模式 (留空=沿用窗口当前模式; lua-exec 时 keyword 必须是含顶层 return ID 数组的完整脚本, 缺顶层 return 拒绝置入)"},"execute":{"type":"boolean","description":"false=只填词不搜索 (默认 true=立即搜索)"}},"required":[]}},
   {"type":"function","name":"list_modes","description":"列出一个窗口可用的全部搜索模式 (用户自定义+插件提供), 含标识/名称/类型/模板/来源。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"}},"required":[]}},
   {"type":"function","name":"apply_mode","description":"按搜索模式执行搜索 (语义=用户在药丸菜单点了该模式): 模板型把 input 置入搜索框转标签链执行; 插件接管型触发该插件。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"mode_id":{"type":"string","description":"模式标识 (list_modes 返回的\"标识\")"},"input":{"type":"string","description":"输入词 (留空=窗口现词)"}},"required":["mode_id"]}},
-  {"type":"function","name":"add_search_mode","description":"添加一个会话级模板型搜索模式 (本次运行内有效, 重启后消失; 返回其\"标识\")。template 必须含 <keyword> 占位符, 执行时替换为搜索框输入文字。","parameters":{"type":"object","properties":{"name":{"type":"string","description":"模式名 (≤64字)"},"type":{"type":"string","enum":["wildcard","regex","sql","lua"],"description":"模式类型 (默认 wildcard)"},"template":{"type":"string","description":"模板, 必须含 <keyword> 占位符, 如 FileContent LIKE '%<keyword>%'"},"desc":{"type":"string","description":"简介 (≤256字)"}},"required":["name","template"]}},
+  {"type":"function","name":"add_search_mode","description":"添加一个会话级模板型搜索模式 (本次运行内有效, 重启后消失; 返回其\"标识\")。template 必须含 <keyword> 占位符, 执行时替换为搜索框输入文字。","parameters":{"type":"object","properties":{"name":{"type":"string","description":"模式名 (≤64字)"},"type":{"type":"string","enum":["wildcard","regex","sql","lua"],"description":"模式类型 (默认 wildcard)"},"template":{"type":"string","description":"模板, 必须含 <keyword> 占位符。含 FileContent 时**必须**带路径前置条件 (FileContent 单独作条件 = 全盘读所有分区文件内容, 极慢, 禁止), 如 Path LIKE 'D:\\\\资料%' AND FileContent LIKE '%<keyword>%'"},"desc":{"type":"string","description":"简介 (≤256字)"}},"required":["name","template"]}},
   {"type":"function","name":"remove_search_mode","description":"删除你自己经 add_search_mode 添加的运行时搜索模式 (用户自定义/清单声明的模式删不了)。","parameters":{"type":"object","properties":{"mode_id":{"type":"string","description":"add_search_mode 返回的\"标识\""}},"required":["mode_id"]}},
   {"type":"function","name":"list_plugins","description":"列出全部已扫描插件 (标识/名称/版本/作者/启用/已加载)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"send_plugin_message","description":"向另一个插件发送 JSON 消息并等它的同步回复 (消息经宿主中转; 对方需已启用并实现收信口, 载荷结构约定看对方插件)。","parameters":{"type":"object","properties":{"plugin_id":{"type":"string","description":"目标插件标识 (list_plugins 查)"},"payload":{"type":"object","description":"消息载荷 (JSON 对象)"}},"required":["plugin_id","payload"]}}
 ])json";
 
-/* 系统提示词组装 (进程一次): 骨架已含全部常驻内容; Lua 两份规范不再拼入 —
-   改经 get_lua_spec 工具按需取 (见 AI_INSTRUCTIONS 头注释的拆分口径) */
+/* 系统提示词组装 (进程一次): 常驻骨架 + 引擎内嵌 Lua 规范全文附录 (2026-09-25 用户口径)。
+   优先合集 promptType=2 (0+1 合并去重版); 旧引擎无合集回落 0/1 两份顺序拼接。
+   附录头写 agent 环境适配说明: 规范原文是"产出脚本给用户"的口吻 (-3/-4 模式编号、print、
+   输出格式章节), 与本 agent "自己写脚本自己跑" 的用法差异都在这里一次性说清。 */
 static std::string g_instrA;
 void BuildInstructions() {
-    g_instrA = U8(AI_INSTRUCTIONS);
+    std::string s = U8(AI_INSTRUCTIONS);
+    std::string spec;
+    const char* p = xjs_Query_GetPrompt(2);
+    if (p && *p) {
+        spec = p;
+    } else {
+        const char* a = xjs_Query_GetPrompt(0);
+        const char* b = xjs_Query_GetPrompt(1);
+        if (a && *a) spec = a;
+        if (b && *b) { if (!spec.empty()) spec += "\n\n"; spec += b; }
+    }
+    if (!spec.empty()) {
+        s += "\n## 附录：Lua 脚本规范全文（引擎内嵌，上面的《Lua 脚本速查》只是要点，写脚本以本附录为准）\n";
+        s += "读法适配（规范按\"给用户产出脚本\"的口吻撰写，与你这个 agent 的用法差异如下）：\n";
+        s += "- 文中\"过滤模式 -3\" = run_search 的 lua_filter，\"执行模式 -4\" = lua_exec。\n";
+        s += "- 文中 print 在你的工具环境是 **ai.print(...)**（print 本体进引擎调试输出，工具结果拿不到）；"
+              "数据行另用 ai.row(id, \"字段名\", ...)，见《Lua 脚本速查》。\n";
+        s += "- 文中《输出格式》《风格基准》等\"向用户交付脚本\"的章节，只在你**把脚本交给用户**时适用；"
+              "你自己执行时把脚本全文直接经 run_search 提交即可，不必在回答里贴代码。\n";
+        s += "- \"lua_exec 必须 return ID 数组\"对本插件额外收紧为**顶层 return**（插件静态校验，缺顶层 return 拒绝执行），见《Lua 脚本速查》。\n\n";
+        s += spec;
+        s += "\n";
+    }
+    g_instrA = s;
 }
 
 /* 运行环境快照 (每次请求实时采集, 由 AgentBuildBody 作为注入型 user 项拼在 input 末尾):
@@ -1474,6 +1579,10 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
                                   const std::wstring& inject, bool withTools) {
     std::wstring body = L"{\"model\":";
     body += W8(JsonEscapeUtf8(g_cfg.model).c_str());
+    if (g_cfg.maxOut > 0) {   /* 档案指定了最大输出才发送 (0 = 服务端默认); 与 model 同处请求头
+                                 部稳定段, 只在切档案时一起变, 前缀缓存不受损 */
+        body += L",\"max_output_tokens\":" + std::to_wstring(g_cfg.maxOut);
+    }
     body += L",\"input\":[";
     bool first = true;
     auto sep = [&]() { if (!first) body += L","; first = false; };
@@ -1790,6 +1899,7 @@ static std::string AgentCallKey(const std::string& name8, const std::string& arg
 }
 
 void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果回填 → 下一轮, 直到最终答复 */
+    JobLuaDumpCleaner dumpCleaner;   /* data\待运行.lua 作业级守卫: 期间每次 lua 调用覆盖写入, 本函数任何出口删除 */
     wchar_t whost[512] = {};
     MultiByteToWideChar(CP_UTF8, 0, j->hostA.c_str(), -1, whost, 512);
     HINTERNET hs = WinHttpOpen(L"snail-quicksearch-ai-assistant", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
@@ -1907,7 +2017,6 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     dst.argz = local.argz;
                     dst.count = local.count;
                     dst.elapsedMs = local.elapsedMs;
-                    dst.emit = local.emit;
                     dst.err = local.err;
                     dst.top = local.top;   /* open 展开态归泵/用户, 不覆盖 */
                     dst.adj = local.adj;   /* 待应用的调整 (提案数据; 漏拷 = 卡片按钮区不渲染) */

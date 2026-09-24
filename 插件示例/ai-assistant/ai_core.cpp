@@ -164,38 +164,144 @@ void CfgSave() {
     if (!g_host) return;
     /* JSON 字面量拼接: 先 UTF-8 转义再转回宽字符 (纯 ASCII 字面量), 整体一次落盘 */
     auto lit = [](const std::wstring& s) { return W8(JsonEscapeUtf8(s).c_str()); };
-    std::wstring j = L"{\"baseUrl\":" + lit(g_cfg.baseUrl) + L",\"model\":" + lit(g_cfg.model);
-    if (!g_cfg.apiKey.empty()) {
-        std::string enc = B64Enc(XorSecret(U8(g_cfg.apiKey), U8(MachineKeyStr())));
-        j += L",\"apiKeyEnc\":\"enc:1:" + W8(enc.c_str()) + L"\"";
+    std::wstring mk = MachineKeyStr();
+    auto enc = [&](const std::wstring& k) -> std::wstring {   /* 密钥加密 (空 = 不落该字段) */
+        std::string e = B64Enc(XorSecret(U8(k), U8(mk)));
+        return L"\"enc:1:" + W8(e.c_str()) + L"\"";
+    };
+    std::wstring j = L"{\"reasoning\":";
+    j += g_cfg.reasoning ? L"true" : L"false";
+    j += L",\"filePolicy\":" + std::to_wstring(g_cfg.filePolicy);
+    j += L",\"activeId\":" + lit(g_cfg.activeId);
+    j += L",\"profiles\":[";
+    for (size_t i = 0; i < g_cfg.profiles.size(); i++) {
+        const AiProfile& p = g_cfg.profiles[i];
+        if (i) j += L",";
+        j += L"{\"id\":" + lit(p.id);
+        j += L",\"name\":" + lit(p.name);
+        j += L",\"baseUrl\":" + lit(p.baseUrl);
+        j += L",\"model\":" + lit(p.model);
+        if (!p.apiKey.empty()) j += L",\"apiKeyEnc\":" + enc(p.apiKey);
+        j += L",\"ctx\":" + std::to_wstring(p.ctx);
+        j += L",\"maxOut\":" + std::to_wstring(p.maxOut) + L"}";
     }
-    j += g_cfg.reasoning ? L",\"reasoning\":true" : L",\"reasoning\":false";
-    j += L",\"filePolicy\":" + std::to_wstring(g_cfg.filePolicy) + L"}";
+    j += L"]}";
     std::string u8 = U8(j);
     g_host->StorageSet(g_ctx, "cfg", u8.c_str(), (int)u8.size());
 }
+/* 密钥解密 ("enc:1:<b64>"; 换机解出乱码 = 视为未配置 — GUID 密码不出本机) */
+static std::wstring DecryptKeyStr(const std::wstring& encv) {
+    if (encv.rfind(L"enc:1:", 0) != 0) return L"";
+    std::string raw = B64Dec(U8(encv.substr(6)));
+    std::string plain = XorSecret(raw, U8(MachineKeyStr()));
+    return ValidUtf8(plain) ? W8(plain.c_str()) : L"";
+}
+/* token 长度夹取 (前端已验格式; 这里只防越界值: 0=未指定, 上限 1e8 与前端同值) */
+long long CfgClampTok(double v) {
+    if (!(v > 0)) return 0;
+    if (v > 100000000.0) v = 100000000.0;
+    return (long long)v;
+}
+std::wstring CfgGenProfileId() {
+    static volatile long s_seq = 0;
+    wchar_t b[40];
+    swprintf(b, 40, L"p%llx%lx", (unsigned long long)(GetTickCount64() & 0xFFFFFFFFFFFFULL),
+             (unsigned long)InterlockedIncrement(&s_seq));
+    return b;
+}
+AiProfile* CfgActive() {
+    for (auto& p : g_cfg.profiles)
+        if (p.id == g_cfg.activeId) return &p;
+    return g_cfg.profiles.empty() ? NULL : &g_cfg.profiles[0];
+}
+std::wstring CfgDisplayName(const AiProfile* p) {
+    if (!p) return L"未配置接口";
+    if (!p->name.empty()) return p->name;
+    if (!p->model.empty()) return p->model;
+    return L"未命名模型";
+}
+/* 活动档案 → 派生镜像。activeId 失效回落第一条 (与前端 activeAiProfile 同规);
+   空表 = 镜像全空 (请求侧按"未配置"拒绝)。切档/保存/删除后必须调。 */
+void CfgApplyActive() {
+    AiProfile* p = CfgActive();
+    if (p) {
+        g_cfg.activeId = p->id;
+        g_cfg.baseUrl = p->baseUrl;
+        g_cfg.model = p->model;
+        g_cfg.apiKey = p->apiKey;
+        g_cfg.ctx = p->ctx;
+        g_cfg.maxOut = p->maxOut;
+    } else {
+        g_cfg.activeId.clear();
+        g_cfg.baseUrl.clear();
+        g_cfg.model.clear();
+        g_cfg.apiKey.clear();
+        g_cfg.ctx = 0;
+        g_cfg.maxOut = 0;
+    }
+}
 void CfgLoad() {
     if (!g_host) return;
-    char buf[4096];
-    int n = g_host->StorageGet(g_ctx, "cfg", buf, (int)sizeof(buf) - 1);
-    if (n <= 0) return;
-    buf[n] = 0;
-    Jv v = JsonParseW(W8(buf));
-    if (v.t != 5) return;
-    std::wstring b = v.S(L"baseUrl");
-    if (!b.empty()) g_cfg.baseUrl = b;
-    std::wstring m = v.S(L"model");
-    if (!m.empty()) g_cfg.model = m;
-    const Jv* r = v.Get(L"reasoning");
-    if (r && r->t == 1) g_cfg.reasoning = r->b;
-    const Jv* fp = v.Get(L"filePolicy");
-    if (fp && fp->t == 2 && fp->num >= 0 && fp->num <= 3) g_cfg.filePolicy = (int)fp->num;
-    std::wstring enc = v.S(L"apiKeyEnc");
-    if (enc.rfind(L"enc:1:", 0) == 0) {
-        std::string raw = B64Dec(U8(enc.substr(6)));
-        std::string plain = XorSecret(raw, U8(MachineKeyStr()));
-        g_cfg.apiKey = ValidUtf8(plain) ? W8(plain.c_str()) : L"";   /* 换机解出乱码 = 视为未配置 */
+    /* 档案表可超旧的单配置几百字节: 两步读 (先查长度再取) 不设固定上限 */
+    int n = g_host->StorageGet(g_ctx, "cfg", NULL, 0);
+    bool firstRun = (n <= 0);
+    std::wstring text;
+    if (!firstRun) {
+        std::string u8((size_t)n + 1, '\0');
+        n = g_host->StorageGet(g_ctx, "cfg", &u8[0], n);
+        if (n > 0) text = W8(u8.c_str());
     }
+    if (!text.empty()) {
+        Jv v = JsonParseW(text);
+        if (v.t == 5) {
+            const Jv* r = v.Get(L"reasoning");
+            if (r && r->t == 1) g_cfg.reasoning = r->b;
+            const Jv* fp = v.Get(L"filePolicy");
+            if (fp && fp->t == 2 && fp->num >= 0 && fp->num <= 3) g_cfg.filePolicy = (int)fp->num;
+            const Jv* av = v.Get(L"activeId");
+            if (av && av->t == 3) g_cfg.activeId = av->str;
+            const Jv* ps = v.Get(L"profiles");
+            if (ps && ps->t == 4) {
+                for (auto& pv : ps->arr) {
+                    if (pv.t != 5) continue;
+                    AiProfile p;
+                    p.id = pv.S(L"id");
+                    if (p.id.empty()) continue;   /* 无 id 不可寻址, 丢弃 */
+                    p.name = pv.S(L"name");
+                    p.baseUrl = pv.S(L"baseUrl");
+                    p.model = pv.S(L"model");
+                    const Jv* cv = pv.Get(L"ctx");
+                    if (cv && cv->t == 2) p.ctx = CfgClampTok(cv->num);
+                    const Jv* mv = pv.Get(L"maxOut");
+                    if (mv && mv->t == 2) p.maxOut = CfgClampTok(mv->num);
+                    p.apiKey = DecryptKeyStr(pv.S(L"apiKeyEnc"));
+                    g_cfg.profiles.push_back(std::move(p));
+                }
+            }
+            /* 旧格式迁移: 单配置字段收编为第一条档案 (一次性, 立即按新格式落盘) */
+            if (g_cfg.profiles.empty() && (!v.S(L"baseUrl").empty() || !v.S(L"model").empty())) {
+                AiProfile p;
+                p.id = CfgGenProfileId();
+                p.baseUrl = v.S(L"baseUrl");
+                p.model = v.S(L"model");
+                p.apiKey = DecryptKeyStr(v.S(L"apiKeyEnc"));
+                g_cfg.profiles.push_back(std::move(p));
+                g_cfg.activeId = g_cfg.profiles[0].id;
+                firstRun = true;   /* 借下面同一出口触发落盘 */
+            }
+        }
+    } else if (firstRun) {
+        /* 首次运行: 播一条默认档案 (面板预填地址与模型, 用户只差密钥) */
+        AiProfile p;
+        p.id = CfgGenProfileId();
+        p.baseUrl = g_cfg.baseUrl;   /* 结构体默认值 = DeepSeek 官方 */
+        p.model = g_cfg.model;
+        g_cfg.profiles.push_back(std::move(p));
+        g_cfg.activeId = g_cfg.profiles[0].id;
+    }
+    if (g_cfg.profiles.empty()) g_cfg.activeId.clear();
+    CfgApplyActive();
+    if (firstRun) CfgSave();
 }
 
 /* ==================== 多对话历史 (存储键 "历史"; 上限 30 会话/每会话 200 条) ==================== */

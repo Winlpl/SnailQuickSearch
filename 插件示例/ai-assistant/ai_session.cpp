@@ -83,7 +83,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn) {
     std::wstring text = TrimW(textIn);
     if (text.empty()) return;
     if (g_cfg.apiKey.empty()) {
-        g_host->Toast(g_ctx, s->tok, "尚未配置接口密钥 — 请点右上角 接口设置 填写", XJS_PLUGIN_TOAST_WARN);
+        WebToast(s, "尚未配置接口密钥 — 请点右上角 接口设置 填写", XJS_PLUGIN_TOAST_WARN);
         return;
     }
     AiMsg um;

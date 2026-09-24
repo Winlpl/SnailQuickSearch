@@ -249,20 +249,44 @@ struct JParser {
 std::string JsonEscapeUtf8(const std::wstring& s);   /* → 完整 JSON 字符串字面量 (含首尾引号) */
 Jv JsonParseW(const std::wstring& text);
 
-/* ==================== 配置 (存储键 "cfg"; 定义 ai_core.cpp) ==================== */
+/* ==================== 配置 (存储键 "cfg"; 定义 ai_core.cpp) ====================
+ * 模型档案 (多模型切换): 每条档案是一套完整接口配置 —— 跨服务商时地址与密钥也随档案走。
+ * profiles/activeId 是事实源; 下面 baseUrl..maxOut 五项是**活动档案的派生镜像**,
+ * 请求构造与用量显示只读它们 → "切换模型"只需 CfgApplyActive 重算镜像, 请求代码零改动。
+ * 密钥不出宿主 (前端只见 hasKey): 复制/切换档案时密钥在 C++ 侧搬运。 */
+
+struct AiProfile {
+    std::wstring id;         /* "p"+时间戳+序号 (CfgGenProfileId 生成, 前端原样回传) */
+    std::wstring name;       /* 显示名 (空 = 用模型名兜底, 再空 = "未命名模型") */
+    std::wstring baseUrl;
+    std::wstring apiKey;     /* 内存明文; 落盘加密 (XorSecret+本机 GUID), 明文永不回传前端 */
+    std::wstring model;
+    long long ctx = 0;       /* 上下文长度 token; 0 = 按模型名推断 (只影响用量"剩余"显示) */
+    long long maxOut = 0;    /* 最大输出 token; 0 = 不发送 max_output_tokens 参数 */
+};
 
 struct AiCfg {
     std::wstring baseUrl = L"https://api.deepseek.com";
     std::wstring model = L"deepseek-flash";   /* Responses API 仅新模型名可用 (deepseek-flash / deepseek-v4-pro;
                                                  deepseek-chat 等旧名在此端点被拒) */
     std::wstring apiKey;
-    bool reasoning = false;   /* 深度思考: true=effort high, false=none (DeepSeek 须显式传) */
+    long long ctx = 0;        /* 活动档案的上下文长度 (派生镜像) */
+    long long maxOut = 0;     /* 活动档案的最大输出 (派生镜像) */
+    bool reasoning = false;   /* 深度思考: true=effort high, false=none (DeepSeek 须显式传; 进程级, 不随档案) */
     int filePolicy = 2;       /* 文件操作权限 (对话区下方分段控件): 0=禁用 1=只读 2=询问 3=允许;
                                  禁用/只读拒绝 open_file 与 copy_paths, 询问先拒后给确认卡, 允许直接执行 */
+    std::vector<AiProfile> profiles;   /* 档案表 = 事实源 (上限 50, AiProfileMax) */
+    std::wstring activeId;             /* 当前使用档案的 id (失效回落第一条, 与前端同规) */
 };
 extern AiCfg g_cfg;
+constexpr int AiProfileMax = 50;
 void CfgSave();
 void CfgLoad();
+AiProfile* CfgActive();                    /* activeId 校验失效回落第一条; 空表 = NULL */
+void CfgApplyActive();                     /* 活动档案 → 派生镜像 (切档/保存后必须调) */
+std::wstring CfgDisplayName(const AiProfile* p);   /* name || model || 未命名模型 (前端同款兜底) */
+std::wstring CfgGenProfileId();
+long long CfgClampTok(double v);           /* token 长度夹取 (0=未指定, 上限 1e8) */
 
 /* ==================== 多对话历史 (存储键 "历史"; 定义 ai_core.cpp) ==================== */
 
@@ -288,14 +312,12 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
     std::wstring argz;          /* 代办类工具的参数摘要 (卡片头展示; 随历史落库) */
-    std::string res8;           /* 代办类工具回喂模型的 JSON (瞬时; 不渲染不落库) */
+    std::string res8;           /* 回喂模型的 JSON (瞬时; 不渲染不落库) — run_search/get_window_selection
+                                   在完成时现场拼装 (样本=[FileId,文件名], 路径不回喂), 其余=宿主扩展 API 原样 */
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
-    std::wstring emit;          /* lua 两模式 ai.print 过程/统计输出 (并入工具结果 output 回喂模型; 不渲染不落库) */
-    std::wstring rows;          /* lua ai.row 数据行 (完整 JSON 数组文本 "[[..],..]"; 随工具结果 rows 字段回喂模型;
-                                    不渲染不落库 — 卡片只展示 count/路径样本) */
     std::wstring err;           /* 失败原因 */
-    std::vector<std::wstring> top;   /* 结果样本路径 (≤20; 展开显示) */
+    std::vector<std::wstring> top;   /* 结果样本完整路径 (≤20; 卡片展开显示用, 不回喂模型) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
@@ -326,7 +348,7 @@ unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>
 
 void AgentToolInit();
 void AgentToolShutdown();
-void BuildInstructions();      /* 系统提示词 = 角色说明 + 引擎内嵌 Lua 两规范 (进程一次) */
+void BuildInstructions();      /* 系统提示词 = 常驻骨架 + 引擎内嵌 Lua 规范全文附录 (进程一次) */
 
 /* ==================== 会话 (定义 ai_session.cpp) ==================== */
 
@@ -433,8 +455,10 @@ std::wstring ColHexA(const Gdiplus::Color& c);     /* → "#rrggbbaa" */
  *   {t:"last",...}   流式中的末条助手消息 (正文/推理 HTML 全量重推 — 部分增量无法转 md)
  *   {t:"usage",...}  用量计数
  *   {t:"status",...} 发送中/网络状态 (工具栏状态点)
- * 命令协议 (JS → C++, postMessage): 见 WebCommand (ai_web.cpp) — send/stop/close/settings/
- *   policy/pallow/pdeny/retry/new/load/del/clearHist/copy/openurl/notify/ready +
+ *   {t:"toast",...}  页面内提示 (面板被浏览器子窗盖住, 宿主 Toast 不可见 — WebToast)
+ * 命令协议 (JS → C++, postMessage): 见 WebCommand (ai_web.cpp) — send/stop/close/
+ *   profSave/profNew/profDel/profActive (模型档案: 保存/新建·复制/删除/切换) /
+ *   policy/pallow/pdeny/retry/new/load/del/clearHist/copy/openurl/ready +
  *   search/searchfill (搜索卡片: 词+模式, 区分是否立即执行) / open/reveal/copypath
  *   (文件路径链接: 单击打开 / 右键定位·复制)。
  * 安全面: 模型输出永不产生活 HTML (md4c 转换层 HTML/实体按旧口径裁剪转义), CSP 关
@@ -447,10 +471,12 @@ void WebSessionRect(AiSess* s);                   /* OPEN/RESIZE: 按宿主矩�
 void WebSyncSession(AiSess* s);                   /* 泵/命令后: 按同步状态推增量 (msgs/last/status/usage) */
 void WebSyncHist();                               /* g_hist 变化后向全部活跃会话推 convs */
 void WebTouch(AiSess* s);                         /* 会话数据结构性变化登记 (→ 全量重推) */
+void WebToast(AiSess* s, const char* utf8, int kind);
+                                                  /* 页面内提示 (kind=XJS_PLUGIN_TOAST_*; 面板开着时宿主 Toast 被浏览器子窗盖住) */
 void WebCommand(AiSess* s, const Jv& msg);        /* JS 命令分发 (WebMessageReceived 回调) */
 void WebPushSkin(AiSess* s);                      /* 皮肤变化后向该会话重推调色 (EVT_SKIN) */
 std::wstring WebPaletteJson(AiSess* s);           /* 调色 → {"bg":"#..",...} */
-std::wstring WebCfgJson();                        /* g_cfg → {"baseUrl":..,"model":..,"hasKey":..} */
+std::wstring WebCfgJson();                        /* g_cfg → 活动派生值 + 档案表 (密钥只出 hasKey) */
 void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* out);
                                                   /* 消息气泡 HTML (含工具卡片; data-act 点击路由) */
 void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, std::string* out);
