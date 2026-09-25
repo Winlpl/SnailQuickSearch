@@ -81,6 +81,7 @@ struct HostApi {
     XjsApiSkinsList     skinsList;
     XjsApiWindowSelection windowSel;
     XjsApiLangsList     langsList;
+    XjsApiWindowResult  windowResult;   /* window.result: 窗口结果对象裸指针 (旧宿主 = NULL) */
 };
 extern HostApi g_api;
 void ApiResolveAll();   /* UI 线程 (Init) 解析全部名字; 旧宿主全 NULL */
@@ -97,6 +98,7 @@ struct AiUiJob {
     std::wstring err;              /* 失败: 错误描述 (空 = 成功) */
     volatile LONG orphan = 0;      /* worker 已放弃 (UI 执行完代为 delete, 不再 SetEvent) */
     int doneSignaled = 0;          /* UI 已执行完 (s_uiCs 内读写; worker 放弃判定用) */
+    int waitMs = 0;                /* 等待上限毫秒 (0=默认 15s; 保存对话框等用户交互的作业给长) */
     HANDLE done = NULL;            /* 一次性信号 */
 };
 struct AiJob;   /* 会话层作业 (下文定义; AgentUiCall 挂起等待期间要读它的 abort) */
@@ -107,6 +109,14 @@ long long AgentUiWindowToken(const std::wstring& name, long long defTok, std::ws
                                           /* 窗口名 → 令牌 (仅 UI 线程; 空=defTok, 查无=设 *err 返 0)。
                                              WebCommand "adj" 应用调整卡时用 (提案时只存名, 应用时才解析) */
 std::wstring AgentApiErrText(int rc);     /* 扩展 API 错误码 → 短描述 (调整卡失败项展示用) */
+xjs_result* AgentWindowResultOf(XjsWindowToken tok);
+                                          /* 窗口令牌 → 该窗结果对象 (仅 UI 线程; 旧宿主/无窗 = NULL)。
+                                             结果同步的捕获口: 发送/勾选/手动执行三处在 UI 线程调它 */
+std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query);
+                                          /* 卡片右键"执行语句": 私有对象上异步重放该语句, 布防
+                                             结果同步 — 完成事件回调把 ID 全集推进目标窗列表。
+                                             仅 UI 线程; 只占串行锁完成提交 (agent 忙 = 拒绝);
+                                             返回错误描述 (空 = 已提交, 结果经完成事件落窗) */
 
 /* ==================== 基础工具 (实现 ai_core.cpp) ==================== */
 
@@ -186,6 +196,9 @@ struct AiCfg {
     int execPolicy = 2;       /* 命令执行权限 (run_command 外部程序): 0=禁用 2=询问 3=允许 (没有"只读"
                                  — 执行没有读取档, 默认询问 = 每条命令出确认卡, 用户"允许一次"只放行
                                  本条命令的完全相同重试, 不持久放权) */
+    bool syncResults = false; /* 结果同步 (对话区勾选): 开启后每次 run_search 完成把结果 FileId 全集
+                                 经宿主 window.resetResult 重置进发起窗口的列表 (AI 搜到什么, 用户
+                                 左侧列表就是什么; 含 lua_exec 的顶层 return 集合) */
     std::vector<AiProfile> profiles;   /* 档案表 = 事实源 (上限 50, AiProfileMax) */
     std::wstring activeId;             /* 当前使用档案的 id (失效回落第一条, 与前端同规) */
 };
@@ -199,7 +212,10 @@ std::wstring CfgDisplayName(const AiProfile* p);   /* name || model || 未命名
 std::wstring CfgGenProfileId();
 long long CfgClampTok(double v);           /* token 长度夹取 (0=未指定, 上限 1e8) */
 
-/* ==================== 多对话历史 (存储键 "历史"; 定义 ai_core.cpp) ==================== */
+/* ==================== 多对话历史 (按会话拆分存储; 定义 ai_core.cpp) ====================
+ * 索引 = 存储键 "历史索引" ([{"会话标题","文件名","id","时间"}], 只有元数据 — 打开面板零消息体载入);
+ * 会话正文 = 每会话一个存储文件 (索引."文件名" 指向 data\ 下的 "会话-<id>.json"), load/落库时按需读写。
+ * 旧版全量键 "历史" (所有会话堆一个文件) 在索引缺失时一次性搬入分文件+索引后删除。 */
 
 /* 待应用的调整 (AI 提案 → 用户逐项裁决, 不直接生效):
    worker 只生成提案挂进步骤; 用户点卡片按钮 → WebCommand "adj" 在 UI 线程应用。
@@ -229,6 +245,8 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     long long elapsedMs = -1;
     std::wstring err;           /* 失败原因 */
     std::vector<std::wstring> top;   /* 结果样本完整路径 (≤20; 卡片展开显示用, 不回喂模型) */
+    std::vector<std::wstring> wrote; /* lua_exec 脚本成功写出的文件路径 (ai.write/ai.saveas;
+                                         卡片常显块+随历史落库; 不回喂模型 — 模型经结果 JSON 得知) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
@@ -249,13 +267,19 @@ struct AiMsg {
     bool err = false;           /* 失败消息 (气泡转错误配色) */
     std::vector<AiToolStep> steps;   /* role==2: 本组工具步骤 */
 };
+struct AiConvRef {                  /* 历史索引条目 (会话正文在自己的文件里, 索引只存元数据) */
+    unsigned long long id = 0;
+    long long t = 0;            /* 最后活动时间 (time_t 秒) */
+    std::wstring title;         /* 首条用户消息 (≤30 字) */
+    std::wstring file;          /* 会话正文存储键/文件名 (形如 "会话-<id>.json") */
+};
 struct AiConv {
     unsigned long long id = 0;
     long long t = 0;            /* 最后活动时间 (time_t 秒) */
     std::wstring title;         /* 首条用户消息 (≤30 字) */
     std::vector<AiMsg> msgs;
 };
-extern std::vector<AiConv> g_hist;
+extern std::vector<AiConvRef> g_hist;   /* 历史索引 (侧栏列表只读这里的元数据; 正文按需 HistGet) */
 extern unsigned long long g_nextConvId;
 static const size_t AI_CONV_MAX = 30, AI_MSG_MAX = 200, AI_TEXT_MAX = 60000;
 static const int AI_AGENT_MAX_TURNS = 12;  /* agent 工具循环上限 (最后一轮省略 tools 强制收尾); 12 轮给统计任务留够粗筛/纠错余量 */
@@ -268,9 +292,12 @@ static const size_t AI_ATT_VIDEO_MAX = 24u * 1024 * 1024;
 static const size_t AI_ATT_AUDIO_MAX = 12u * 1024 * 1024;
 static const size_t AI_ATT_HIST_BUDGET = 48u * 1024 * 1024;
 
-void HistSave();
-void HistLoad();
+void HistLoad();                    /* 打开面板时只读索引 (旧全量键首次自动迁移); 定义 ai_core.cpp */
 unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>& msgs);
+                                    /* 当前会话落盘 = 写自己的会话文件 + 索引原位更新/追加 */
+bool HistGet(unsigned long long id, AiConv& out);   /* 按需读取一个会话正文 (侧栏 load 入口) */
+void HistRemove(unsigned long long id);             /* 删除会话 = 正文文件 + 索引条目一并移除 */
+void HistClearAll();                                /* 清空历史 = 全部正文文件 + 索引 */
 
 /* ==================== agent (实现 ai_agent.cpp) ==================== */
 
@@ -299,6 +326,10 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     volatile LONG policy = 2;      /* 文件操作权限快照 (发送时定格; 确认卡"允许"后由 UI 更新,
                                       之后的工具调用即时放行; g_cfg.filePolicy 为持久事实源) */
     volatile LONG execPolicy = 2;  /* 命令执行权限快照 (同上, g_cfg.execPolicy 的发送时定格) */
+    volatile LONG syncRes = 0;     /* 结果同步勾选 (g_cfg.syncResults 发送时定格; 勾选切换即时更新
+                                      在跑的作业, 下一次 run_search 起按新值同步) */
+    xjs_result* syncWin = NULL;    /* 同步目标窗的结果对象 (发送时在 UI 线程经 window.result 捕获;
+                                      完成事件回调里用前自查 IsEffective, 窗口已关即弃) */
     /* run_command 询问档的裁决通道 (dsh approval 口径: 审批**挂起**工具调用等用户裁决,
      * 答复恢复 — 不是"拒绝后指望模型自己重试"的死胡同): worker 出询问卡后在此轮询,
      * eallow/edeny 置位, worker 消费 (允许=继续执行, 拒绝=作为工具失败回喂模型)。

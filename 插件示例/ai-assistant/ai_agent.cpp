@@ -38,6 +38,36 @@ static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
     return 0;
 }
 
+/* ---- 结果同步 (对话区勾选 / 卡片右键"执行语句"; 2026-09-26 用户口径) ----
+ * 在私有结果的 XJS_RESULT_EVENT_COMPLETE 回调里把 ID 全集 xjs_result_ResetFileId 进
+ * 目标窗口的结果对象 — 引擎的事件机制自带线程与时机, 不经 UI 编组、不另起线程。
+ * 布防 = 提交搜索前置位 g_syncArm (run_search 勾选开启时 / 手动执行时), 回调消费:
+ * 只认未被更新搜索覆盖 (discarded=FALSE) 的完成, 目标窗已关 (IsEffective=FALSE) 即弃。
+ * g_syncWin 由 UI 线程经 window.result 捕获 (AgentWindowResultOf); 引擎对窗口结果对象
+ * 的行缓存/重绘链自理 (ResetFileId 触发其变化事件, 宿主照常刷新)。 */
+static xjs_result* volatile g_syncWin = NULL;   /* 同步目标窗结果对象 (UI 线程写, 回调线程读) */
+static volatile LONG g_syncArm = 0;             /* 布防标志: 1 = 下一次有效完成执行同步 (一次性) */
+
+static int AgentOnSearchComplete(void* userData, xjs_engine* eng, xjs_result* res,
+                                 int searchFingerprint, const char* keyword, BOOL discarded) {
+    (void)userData; (void)eng; (void)searchFingerprint; (void)keyword;
+    if (discarded) return 0;                       /* 被更新的搜索覆盖: 同步交给最新一次 */
+    if (!InterlockedCompareExchange(&g_syncArm, 0, 0)) return 0;
+    InterlockedExchange(&g_syncArm, 0);            /* 一次性: 消费布防 */
+    xjs_result* win = (xjs_result*)g_syncWin;
+    if (!win || win == res) return 0;
+    if (!xjs_result_IsEffective(win)) return 0;    /* 目标窗已关 (结果对象进销毁队列) */
+    int n = xjs_result_GetCount(res);
+    std::vector<int> ids;
+    ids.reserve((size_t)(n > 0 ? n : 0));
+    for (int i = 0; i < n; i++) {
+        int fid = xjs_result_GetFileId(res, i);
+        if (fid >= 0) ids.push_back(fid);
+    }
+    xjs_result_ResetFileId(win, ids.empty() ? NULL : ids.data(), (int)ids.size());
+    return 0;
+}
+
 /* ---- Lua 过程输出通道 (结果对象级注册 ai.print) ----
  * 引擎规范让统计型脚本"数据走 print", 但 print 只进引擎调试输出、SDK 无读取口 —— 统计
  * 数字物理上回不到模型。故在 g_agentRes 上注册 ai.print(...)(xjs_result_LuaRegisterFunction,
@@ -187,6 +217,233 @@ static int AgentLuaRow(void* L) {
     return 0;
 }
 
+/* ---- Lua 文件导出通道 (ai.read / ai.write / ai.saveas; 结果对象级注册, 2026-09-25) ----
+ * 引擎 Lua 执行环境 (-4) 的看门狗总预算 10 秒且全程持引擎读锁 —— 回调里绝不能弹对话框/
+ * 等用户。故 ai.write/ai.saveas 只做 **登记** (内存序列化 + 目标存在性快查, 零阻塞): 脚本
+ * 结束后由 worker (AgentToolRunSearch 收尾处) 统一执行真正的写出 —— 文件权限闸、覆盖
+ * 确认框、保存对话框全在 worker/UI 线程完成 (不受看门狗约束), 结果记进 st->wrote
+ * (卡片常显块 + 随历史落库) 并并入工具结果回喂模型。
+ * 格式规则 (用户口径): 二维表 → CSV (UTF-8 BOM, Excel 直开; 字典行取键并集做表头);
+ * 其它表 → JSON 原文; 字符串/数字/布尔 → 原样文本。仅 lua_exec 可用 (lua_filter 每文件
+ * 并发求值, 写文件无意义且登记乱序); 每脚本 ≤32 项, 单项 ≤32MB。
+ * 回调在引擎线程 — 与 ai.print 同一把 g_emitCs, 禁止碰 g_agentCs。 */
+
+struct AiWriteItem {         /* 一条待写出登记 (脚本运行时收集, 脚本结束后 worker 执行) */
+    bool saveDlg = false;    /* true = ai.saveas: 写出前弹通用保存对话框 (用户选定即授权) */
+    std::wstring path;       /* saveDlg=false: 目标绝对路径; true: 默认文件名建议 */
+    std::string data;        /* 序列化好的字节 (CSV 含 BOM / JSON / 原样文本) */
+    std::wstring ext;        /* 类型提示 (txt/csv/json; saveas 默认文件名兜底用) */
+};
+static std::vector<AiWriteItem> g_writeBuf;   /* g_emitCs 护; 发起前清、完成后取走 */
+static std::string g_writeNote;               /* 回调层拒绝/失败的留痕 (g_emitCs; 空=无) —
+                                                 保证任何路径下导出经过都进 writesNote 回喂模型,
+                                                 模型不会在无凭据时幻觉宣称"已导出" */
+static volatile LONG g_luaIoMode = 0;         /* worker 发起前写: 0=非 lua_exec (文件回调全拒) */
+static volatile LONG g_luaIoPolicy = 0;       /* worker 发起前写: 文件权限快照 (0/1 回调层拒写) */
+static void WriteNoteAppend(const wchar_t* why, const wchar_t* path) {
+    EnterCriticalSection(&g_emitCs);
+    g_writeNote += U8(std::wstring(why) + (path && *path ? (L": " + std::wstring(path)) : L"") + L"\n");
+    LeaveCriticalSection(&g_emitCs);
+}
+
+/* Lua 值 → 写出字节 (用户口径: 二维表=CSV / 其它表=JSON / 字符串·数字·布尔=原样文本)。
+ * 成功返回 true; err = 拒绝原因。表序列化经 xjs_lua_ToJson 原文保真, 二维表判定在
+ * 解析树上做: 数组且元素全为数组/对象 → CSV (对象行键并集做表头; 数组行直接逐值)。 */
+static bool CsvCsvEscape(const std::string& f, std::string* out) {   /* CSV 字段转义 (含分隔符/引号/换行才包引号) */
+    bool q = f.find_first_of(",\"\r\n") != std::string::npos;
+    if (!q) { *out += f; return true; }
+    *out += '"';
+    for (char c : f) { if (c == '"') *out += '"'; *out += c; }
+    *out += '"';
+    return true;
+}
+static std::string CsvCellOf(const picojson::value& v) {   /* 单元格值 → 文本 (null=空; 数字保真序列化) */
+    if (v.is<std::string>()) return v.get<std::string>();
+    if (v.is<bool>()) return v.get<bool>() ? "true" : "false";
+    if (v.is<double>()) return picojson::value(v.get<double>()).serialize();
+    return "";
+}
+static bool LuaValueToBytes(void* L, int idx, std::string* out, std::wstring* ext, std::wstring* err) {
+    const char* s = xjs_lua_ToString(L, idx);
+    if (s) {   /* 字符串/数字 → 原样文本 (ToString 对 number 给十进制文本) */
+        *out = s;
+        *ext = L"txt";
+        return true;
+    }
+    int need = xjs_lua_ToJson(L, idx, NULL, 0);
+    if (need <= 1 || need > 32 * 1024 * 1024) { *err = L"内容无法序列化或超过 32MB 上限"; return false; }
+    std::string buf((size_t)need, 0);
+    if (xjs_lua_ToJson(L, idx, &buf[0], need) <= 0) { *err = L"内容序列化失败"; return false; }
+    buf.resize(strlen(buf.c_str()));
+    if (buf == "null") { *err = L"没有要写出的内容 (nil)"; return false; }
+    if (buf == "true" || buf == "false") {   /* 布尔 → 文本 */
+        *out = buf;
+        *ext = L"txt";
+        return true;
+    }
+    /* 表: 解析判定二维 (数组且元素全为数组/对象) → CSV; 否则 JSON 原文 */
+    picojson::value pv;
+    if (JParseU8(pv, buf) && pv.is<picojson::array>()) {
+        const picojson::array& rows = pv.get<picojson::array>();
+        bool two = !rows.empty();
+        for (auto& r : rows)
+            if (!r.is<picojson::array>() && !r.is<picojson::object>()) { two = false; break; }
+        if (two) {
+            std::vector<std::string> headers;
+            for (auto& r : rows)
+                if (r.is<picojson::object>())
+                    for (auto& kv : r.get<picojson::object>())
+                        if (std::find(headers.begin(), headers.end(), kv.first) == headers.end())
+                            headers.push_back(kv.first);   /* 首现序 (picojson::object=map 已按键序, 稳定) */
+            out->clear();
+            *out += "\xEF\xBB\xBF";   /* UTF-8 BOM: Excel 双击直开不乱码 */
+            auto emitRow = [&](const std::vector<std::string>& cells) {
+                for (size_t c = 0; c < cells.size(); c++) {
+                    if (c) *out += ',';
+                    CsvCsvEscape(cells[c], out);
+                }
+                *out += "\r\n";
+            };
+            if (!headers.empty()) emitRow(headers);
+            for (auto& r : rows) {
+                std::vector<std::string> cells;
+                if (r.is<picojson::array>())
+                    for (auto& cv : r.get<picojson::array>()) cells.push_back(CsvCellOf(cv));
+                else {
+                    auto& o = r.get<picojson::object>();
+                    for (auto& h : headers) {
+                        auto it = o.find(h);
+                        cells.push_back(it != o.end() ? CsvCellOf(it->second) : "");
+                    }
+                }
+                emitRow(cells);
+            }
+            *ext = L"csv";
+            return true;
+        }
+    }
+    *out = buf;   /* 非二维表 → JSON 原文 (字节保真, 不二次序列化) */
+    *ext = L"json";
+    return true;
+}
+
+/* 路径校验: 必须绝对路径 (盘符或 UNC), 禁文件名字符, 防误写相对路径落临时目录难找 */
+static bool WritePathOk(const std::wstring& p) {
+    if (p.size() < 3 || p.size() > 1024) return false;
+    bool abs = (p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) || (p.rfind(L"\\\\", 0) == 0);
+    if (!abs) return false;
+    for (wchar_t c : p)
+        if (c < 0x20 || wcschr(L"<>|\"?*", c)) return false;
+    return true;
+}
+
+/* ai.write/ai.saveas 的回执: 成功 = true; 失败 = nil + 原因 (脚本可判可提示) */
+static int LuaWriteRet(void* L, bool ok, const wchar_t* why) {
+    if (ok) { xjs_lua_PushBoolean(L, TRUE); return 1; }
+    xjs_lua_PushNil(L);
+    xjs_lua_PushString(L, U8(why).c_str());
+    return 2;
+}
+static int AgentLuaWriteCommon(void* L, bool saveDlg) {
+    int n = xjs_lua_GetTop(L);
+    if (InterlockedCompareExchange(&g_luaIoMode, 0, 0) != 1) {
+        WriteNoteAppend(L"ai.write/ai.saveas 被拒绝 (仅 lua_exec 可用)", NULL);
+        return LuaWriteRet(L, false, L"ai.write/ai.saveas 仅在 Lua 执行模式 (lua_exec) 可用");
+    }
+    int pol = InterlockedCompareExchange(&g_luaIoPolicy, 0, 0);
+    if (pol == 0) {
+        WriteNoteAppend(L"写出被拒绝 (用户文件权限=禁用)", NULL);
+        return LuaWriteRet(L, false, L"文件功能已被用户禁用 (文件操作权限=禁用)");
+    }
+    if (pol == 1) {
+        WriteNoteAppend(L"写出被拒绝 (用户文件权限=只读)", NULL);
+        return LuaWriteRet(L, false, L"当前文件操作权限为只读, 不能写出文件 (请用户把权限切到「询问」或「允许」)");
+    }
+    std::wstring path, ext;
+    if (!saveDlg) {   /* ai.write(路径, 内容) */
+        if (n < 2) {
+            WriteNoteAppend(L"ai.write 缺少参数 (路径, 内容)", NULL);
+            return LuaWriteRet(L, false, L"缺少参数: ai.write(路径, 内容)");
+        }
+        const char* p = xjs_lua_ToString(L, 1);
+        if (!p || !*p) {
+            WriteNoteAppend(L"ai.write 路径为空", NULL);
+            return LuaWriteRet(L, false, L"路径为空");
+        }
+        path = W8(p);
+        if (!WritePathOk(path)) {
+            WriteNoteAppend(L"ai.write 路径非法 (须绝对路径)", path.c_str());
+            return LuaWriteRet(L, false, L"路径必须是合法绝对路径 (如 D:\\数据\\结果.csv), 且不含 <>|\"?* 等字符");
+        }
+    }
+    AiWriteItem it;
+    it.saveDlg = saveDlg;
+    it.path = path;
+    std::wstring err2;
+    if (!LuaValueToBytes(L, saveDlg ? 1 : 2, &it.data, &ext, &err2)) {
+        WriteNoteAppend((L"ai." + std::wstring(saveDlg ? L"saveas" : L"write") + L" 内容序列化失败 — " + err2).c_str(), NULL);
+        return LuaWriteRet(L, false, err2.c_str());
+    }
+    if (saveDlg) {   /* ai.saveas(内容[, "默认文件名.csv"]) */
+        if (n >= 2) {
+            const char* nm = xjs_lua_ToString(L, 2);
+            if (nm && *nm) {
+                path = W8(nm);
+                if (path.size() <= 260 && path.find_first_of(L"\\/:*?\"<>|") == std::wstring::npos)
+                    it.path = path;   /* 仅当像文件名才采纳 (带路径/非法字符 = 忽略建议) */
+            }
+        }
+        if (it.path.empty()) it.path = L"AI导出." + ext;
+        else if (it.path.rfind(L'.') == std::wstring::npos) it.path += L"." + ext;
+    }
+    EnterCriticalSection(&g_emitCs);
+    bool full = g_writeBuf.size() >= 32;
+    if (!full) g_writeBuf.push_back(std::move(it));
+    LeaveCriticalSection(&g_emitCs);
+    if (full) {
+        WriteNoteAppend(L"写出登记过多 (>32 项), 后续调用被拒", NULL);
+        return LuaWriteRet(L, false, L"本脚本登记的写出任务过多 (>32), 请合并内容一次写出");
+    }
+    return LuaWriteRet(L, true, NULL);   /* 已受理 — 实际写出在脚本结束后执行 (结果见工具结果) */
+}
+static int AgentLuaWrite(void* L) { return AgentLuaWriteCommon(L, false); }
+static int AgentLuaSaveAs(void* L) { return AgentLuaWriteCommon(L, true); }
+
+/* ai.read(路径) → 文本内容 (原样字节; 失败 = nil + 原因)。仅文本文件 —
+ * 内容含 '\0' 直接拒绝 (SDK 栈辅助按 C 串取值, 静默截断比报错更害人); 上限 8MB。 */
+static int AgentLuaRead(void* L) {
+    if (InterlockedCompareExchange(&g_luaIoMode, 0, 0) != 1)
+        return LuaWriteRet(L, false, L"ai.read 仅在 Lua 执行模式 (lua_exec) 可用");
+    if (InterlockedCompareExchange(&g_luaIoPolicy, 0, 0) == 0)
+        return LuaWriteRet(L, false, L"文件功能已被用户禁用 (文件操作权限=禁用)");
+    if (xjs_lua_GetTop(L) < 1) return LuaWriteRet(L, false, L"缺少参数: ai.read(路径)");
+    const char* p = xjs_lua_ToString(L, 1);
+    if (!p || !*p) return LuaWriteRet(L, false, L"路径为空");
+    std::wstring path = W8(p);
+    if (!WritePathOk(path)) return LuaWriteRet(L, false, L"路径必须是合法绝对路径");
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        std::wstring e = GetLastError() == ERROR_FILE_NOT_FOUND ? L"文件不存在" : L"无法打开文件 (被占用或无权限)";
+        return LuaWriteRet(L, false, e.c_str());
+    }
+    LARGE_INTEGER sz;
+    std::string data;
+    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart <= 8 * 1024 * 1024;
+    if (ok) {
+        data.resize((size_t)sz.QuadPart);
+        DWORD rd = 0;
+        ok = sz.QuadPart == 0 || (ReadFile(h, &data[0], (DWORD)data.size(), &rd, NULL) && rd == (DWORD)sz.QuadPart);
+        if (ok) data.resize(rd);
+    }
+    CloseHandle(h);
+    if (!ok) return LuaWriteRet(L, false, L"文件超过 8MB 上限 (ai.read 仅适合文本)");
+    if (data.find('\0') != std::string::npos)
+        return LuaWriteRet(L, false, L"内容含二进制数据, ai.read 仅支持文本文件");
+    xjs_lua_PushString(L, data.c_str());
+    return 1;
+}
+
 void AgentToolInit() {
     InitializeCriticalSectionAndSpinCount(&g_agentCs, 100);
     InitializeCriticalSectionAndSpinCount(&g_srchErrCs, 100);
@@ -254,6 +511,7 @@ void ApiResolveAll() {   /* UI 线程 (Init); 旧宿主 = 全 NULL, 相关工具
     g_api.skinsList    = (XjsApiSkinsList)g_host->QueryApi(g_ctx, XJS_API_SKINS_LIST);
     g_api.windowSel    = (XjsApiWindowSelection)g_host->QueryApi(g_ctx, XJS_API_WINDOW_SELECTION);
     g_api.langsList    = (XjsApiLangsList)g_host->QueryApi(g_ctx, XJS_API_LANGS_LIST);
+    g_api.windowResult = (XjsApiWindowResult)g_host->QueryApi(g_ctx, XJS_API_WINDOW_RESULT);
 }
 
 /* UIW_* 分派码 (AiUiJob::kind) */
@@ -262,6 +520,8 @@ enum {
     UIW_SET_SEARCH, UIW_LIST_MODES, UIW_APPLY_MODE,
     UIW_ADD_MODE, UIW_REMOVE_MODE, UIW_LIST_PLUGINS, UIW_PLUGIN_STATE, UIW_SEND_MSG,
     UIW_LIST_SKINS, UIW_OPEN_FILE, UIW_WINDOW_SELECTION, UIW_GET_LANGUAGE, UIW_LIST_LANGS,
+    UIW_SAVE_DIALOG,   /* lua 写出: 通用保存对话框 (s1=标题 s2=默认文件名) → {"path":..} / {} =取消 */
+    UIW_ASK_WRITE,     /* lua 写出: 覆盖/新文件确认框 (s1=正文) → {"确认":bool}; 15s 无响应=拒绝 */
 };
 
 static std::wstring ApiErrText(int rc) {
@@ -286,6 +546,16 @@ template <class F> static void ApiCallOut(std::string* out, std::wstring* err, F
     int n = need ? fn(&s[0], need + 1) : 0;
     if (n < 0) { *err = ApiErrText(n); return; }
     s.resize((size_t)(n > need ? need : n));
+    *out = s;
+}
+/* 单次调用取 JSON (固定大缓冲) — 供"每次调用都执行一遍操作"的宿主 API (如 DialogJson
+ * 弯模态对话框): 两段式会把它执行两遍 (第一遍探长度就把框弹了, 第二遍再弹一次)。 */
+template <class F> static void ApiCallOutFixed(std::string* out, std::wstring* err, F fn) {
+    std::string s(16 * 1024, 0);
+    int n = fn(&s[0], (int)s.size());
+    if (n < 0) { *err = ApiErrText(n); return; }
+    if (n >= (int)s.size()) { *err = L"结果超出缓冲"; return; }
+    s.resize((size_t)n);
     *out = s;
 }
 template <class F> static void ApiCallRc(std::wstring* err, F fn) {
@@ -446,6 +716,34 @@ static void UiDispatchRun(AiUiJob* jb) {
             if (!g_api.langsList) { jb->err = L"当前宿主不支持该操作"; return; }
             ApiCallOut(&jb->out8, &jb->err, [&](char* b, int c) { return g_api.langsList(g_ctx, b, c); });
             return;
+        case UIW_SAVE_DIALOG: {   /* 通用保存对话框 (宿主 DialogJson kind=save, 原生风格) */
+            if (!g_host || !g_host->DialogJson ||
+                g_host->size < offsetof(XjsPluginHost, DialogJson) + sizeof(void*)) {
+                jb->err = L"当前宿主不支持保存对话框"; return;
+            }
+            picojson::object opts;
+            opts[U8(L"title")] = JS(jb->s1.empty() ? L"AI 助手 - 导出文件" : jb->s1);
+            opts[U8(L"initialName")] = JS(jb->s2);
+            picojson::array filter;
+            picojson::array all;
+            all.push_back(JS(L"所有文件"));
+            all.push_back(JS(L"*.*"));
+            filter.push_back(picojson::value(all));
+            opts[U8(L"filter")] = picojson::value(filter);
+            std::string o8 = picojson::value(opts).serialize();
+            ApiCallOutFixed(&jb->out8, &jb->err, [&](char* b, int c) {
+                return g_host->DialogJson(g_ctx, "save", o8.c_str(), b, c);
+            });
+            return;
+        }
+        case UIW_ASK_WRITE: {   /* 覆盖/新文件写出确认 (原生消息框; 顶层置顶保证可见) */
+            int go = MessageBoxW(NULL, jb->s1.c_str(), L"AI 助手 - 文件写出确认",
+                                 MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
+            picojson::object o;
+            o[U8(L"确认")] = JB(go != 0);
+            jb->out8 = picojson::value(o).serialize();
+            return;
+        }
         default:
             jb->err = L"未知编组作业";
             return;
@@ -478,10 +776,11 @@ std::wstring AgentUiCall(AiJob* j, AiUiJob* jb, std::string* out8) {
         return L"界面任务投递失败";
     }
     ULONGLONG t0 = GetTickCount64();
+    ULONGLONG waitLimit = jb->waitMs > 0 ? (ULONGLONG)jb->waitMs : 15000;
     for (;;) {
         if (WaitForSingleObject(jb->done, 40) == WAIT_OBJECT_0) break;
         bool stop = InterlockedCompareExchange(&j->abort, 0, 0) != 0;
-        bool slow = GetTickCount64() - t0 > 15000;   /* 界面线程被模态/长活卡住的兜底 */
+        bool slow = GetTickCount64() - t0 > waitLimit;   /* 界面线程被模态/长活卡住的兜底 */
         if (!stop && !slow) continue;
         bool doneByUi = false;
         EnterCriticalSection(&s_uiCs);   /* 清理权仲裁: UI 已完成 = 走正常收尾 */
@@ -717,7 +1016,88 @@ const void* AgentFetchFileIco(int fileId, int* outLen) {
     return png;
 }
 
+/* 懒建私有结果对象 (AgentToolRunSearch / AgentManualExec 共用; 调用方持 g_agentCs):
+ * 引擎忙态 (载库/扫描) 拒建/拒用 — 忙时创建会被永久定成文件名序 (2026-09-15 实锤)。
+ * AgentFetchFileIco 可能先建了裸对象, 这里补齐回调/Lua 注册 (SetCallback 幂等覆盖)。 */
+static bool g_agentResWired = false;
+static xjs_result* AgentEnsureResult() {
+    xjs_engine* eng = xjs_GetDefaultEngine();
+    if (!eng) return NULL;
+    if (g_agentRes && !xjs_result_IsEffective(g_agentRes)) { g_agentRes = NULL; g_agentResWired = false; }
+    if (g_agentRes && g_agentResWired) return g_agentRes;
+    int dbState = xjs_db_GetEngineState(eng);
+    if (dbState == XJS_DB_STATE_LOADING || dbState == XJS_DB_STATE_SCANNING) return NULL;
+    if (!g_agentRes) {
+        g_agentRes = xjs_result_Create(eng);
+        if (!g_agentRes) return NULL;
+    }
+    xjs_result_SetCallback(g_agentRes, XJS_RESULT_EVENT_FAILED,   (const void*)AgentOnSearchFailed, NULL);
+    xjs_result_SetCallback(g_agentRes, XJS_RESULT_EVENT_COMPLETE, (const void*)AgentOnSearchComplete, NULL);
+    xjs_result_LuaRegisterFunction(g_agentRes, "ai", "print", AgentLuaPrint);
+    xjs_result_LuaRegisterFunction(g_agentRes, "ai", "row", AgentLuaRow);
+    xjs_result_LuaRegisterFunction(g_agentRes, "ai", "read", AgentLuaRead);
+    xjs_result_LuaRegisterFunction(g_agentRes, "ai", "write", AgentLuaWrite);
+    xjs_result_LuaRegisterFunction(g_agentRes, "ai", "saveas", AgentLuaSaveAs);
+    const char* ss = xjs_result_GetSearchSettings(g_agentRes);
+    EnterCriticalSection(&g_emitCs);
+    g_srchSet8 = ss ? ss : "";
+    LeaveCriticalSection(&g_emitCs);
+    g_agentResWired = true;
+    return g_agentRes;
+}
+
+xjs_result* AgentWindowResultOf(XjsWindowToken tok) {   /* 仅 UI 线程 (扩展 API 线程契约) */
+    if (!g_api.windowResult) return NULL;               /* 旧宿主: 无此名字, 结果同步不可用 */
+    return g_api.windowResult(g_ctx, tok);
+}
+
+/* 手动执行卡片语句 (卡片右键"执行语句"; UI 线程): 布防结果同步后, 私有对象上异步
+ * 重放该语句 — 只占串行锁完成提交, 等完成/推送全在引擎完成事件回调里, 不占 UI 线程。
+ * 返回错误描述 (空 = 已提交)。 */
+std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query) {
+    if (mode.empty() || query.empty()) return L"语句为空";
+    if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
+        return L"lua_exec 脚本缺少顶层 return (执行模式必须以顶层 return ID 数组结尾), 未提交引擎";
+    int type;
+    if (mode == L"wildcard")      type = 0;
+    else if (mode == L"regex")    type = 1;
+    else if (mode == L"sql")      type = 2;
+    else if (mode == L"lua_filter") type = XJS_KEYWORD_LUA;
+    else if (mode == L"lua_exec") type = XJS_KEYWORD_LUA_EXEC;
+    else return L"未知搜索模式: " + mode;
+    /* 同步目标先捕获 (窗已关 = NULL, 只执行不同步); agent 忙 = 拒绝 (工具循环正在跑) */
+    xjs_result* win = AgentWindowResultOf(tok);
+    if (!win) return L"目标窗口结果不可用 (窗口已关或宿主不支持结果同步)";
+    if (!TryEnterCriticalSection(&g_agentCs)) return L"AI 正在执行工具, 请稍后再试";
+    std::wstring err;
+    if (!AgentEnsureResult()) err = L"索引未就绪 (正在加载数据库或建立索引), 请稍后重试";
+    if (err.empty()) {
+        bool luaMode = (type == XJS_KEYWORD_LUA || type == XJS_KEYWORD_LUA_EXEC);
+        if (luaMode) {   /* 清缓冲: Query 返回后 VM 可能立刻开跑写 ai.print/登记导出 (同 run_search 口径) */
+            EnterCriticalSection(&g_emitCs);
+            g_emitBuf.clear(); g_emitCut = false; g_emitDrop = 0;
+            g_rowBuf.clear(); g_rowCut = false; g_rowDrop = 0;
+            g_writeBuf.clear(); g_writeNote.clear();
+            for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
+            LeaveCriticalSection(&g_emitCs);
+            InterlockedExchange(&g_luaIoMode, type == XJS_KEYWORD_LUA_EXEC ? 1 : 0);
+            InterlockedExchange(&g_luaIoPolicy, g_cfg.filePolicy);
+        }
+        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, win);
+        InterlockedExchange(&g_syncArm, 1);   /* 布防: 完成事件回调执行推送 */
+        std::string q8 = U8(query);
+        if (xjs_result_Query(g_agentRes, q8.c_str(), type, FALSE) < 0) {
+            InterlockedExchange(&g_syncArm, 0);   /* 撤防 (发起失败无完成事件) */
+            std::wstring e = W8(xjs_GetLastErrorMsg(xjs_GetDefaultEngine()));
+            err = L"搜索发起失败: " + (e.empty() ? std::wstring(L"引擎拒绝") : e);
+        }
+    }
+    LeaveCriticalSection(&g_agentCs);
+    return err;
+}
+
 /* run_search 实体; 返回空串 = 成功, 否则 = 错误描述 (调用方持 g_agentCs) */
+static std::string ExecuteLuaWrites(AiJob* j, AiToolStep* st);   /* lua 导出登记的写盘执行段 (定义在本函数后) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query, AiToolStep* st) {
     if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
         return L"lua_exec 脚本缺少顶层 return, 已拒绝执行 (未提交引擎) — 执行模式必须以顶层 return ID 数组结尾, "
@@ -725,24 +1105,8 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
                L"请在脚本结尾补上 return (如 return ids 或 return {...}) 后重新调用; "
                L"统计类任务同样把涉及/选中的文件 ID 数组 return 回来, 数字本身继续走 ai.print。";
     xjs_engine* eng = xjs_GetDefaultEngine();
-    if (!eng) return L"搜索引擎未就绪";
-    if (g_agentRes && !xjs_result_IsEffective(g_agentRes)) g_agentRes = NULL;
-    if (!g_agentRes) {
-        /* 懒建只挡"库不可用"两态: 加载数据库 (无索引可查) 与扫描建索引/遍历 (结果会不完整);
-         * 同步文件变化/保存/搜索中的引擎不拦 — 同步是常态长跑, 拦它 = 平时也动辄拒查 (2026-09-25 用户口径) */
-        int dbState = xjs_db_GetEngineState(eng);
-        if (dbState == XJS_DB_STATE_LOADING || dbState == XJS_DB_STATE_SCANNING)
-            return L"索引未就绪 (正在加载数据库或建立索引), 请稍后重试";
-        g_agentRes = xjs_result_Create(eng);
-        if (!g_agentRes) return L"结果对象创建失败";
-        xjs_result_SetCallback(g_agentRes, XJS_RESULT_EVENT_FAILED, (const void*)AgentOnSearchFailed, NULL);
-        xjs_result_LuaRegisterFunction(g_agentRes, "ai", "print", AgentLuaPrint);
-        xjs_result_LuaRegisterFunction(g_agentRes, "ai", "row", AgentLuaRow);
-        const char* ss = xjs_result_GetSearchSettings(g_agentRes);
-        EnterCriticalSection(&g_emitCs);
-        g_srchSet8 = ss ? ss : "";
-        LeaveCriticalSection(&g_emitCs);
-    }
+    if (!AgentEnsureResult())
+        return L"索引未就绪 (正在加载数据库或建立索引), 请稍后重试";
     std::string q8 = U8(query);
     EnterCriticalSection(&g_srchErrCs);
     g_srchErr.clear();
@@ -757,10 +1121,36 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         g_rowBuf.clear();
         g_rowCut = false;
         g_rowDrop = 0;
+        g_writeBuf.clear();   /* 文件导出登记一并清 (上一作业残留不得执行) */
+        g_writeNote.clear();
         for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
         LeaveCriticalSection(&g_emitCs);
+        /* 文件回调环境快照: 仅 lua_exec 放行 + 文件权限闸 (回调层拦截, 引擎线程不碰 g_cfg) */
+        InterlockedExchange(&g_luaIoMode, mode == L"lua_exec" ? 1 : 0);
+        InterlockedExchange(&g_luaIoPolicy, InterlockedCompareExchange(&j->policy, 0, 0));
         /* 临时调试观察口: 先落盘再提交 (VM 可能 Query 返回即开跑) */
         g_host->StorageSet(g_ctx, "待运行.lua", q8.c_str(), (int)q8.size());
+    }
+    /* 结果同步布防 (2026-09-26 用户口径: 完成事件里推送, 不经 UI 编组/不另起线程):
+     * 勾选开启且目标窗结果可得 → 置 g_syncArm, AgentOnSearchComplete (引擎搜索线程)
+     * 在本次完成未被覆盖 (discarded=FALSE) 时把 ID 全集 ResetFileId 进目标窗。 */
+    if (InterlockedCompareExchange(&j->syncRes, 0, 0) && j->syncWin) {
+        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, j->syncWin);
+        InterlockedExchange(&g_syncArm, 1);
+    } else {
+        InterlockedExchange(&g_syncArm, 0);
+    }
+    if (mode != L"wildcard" && mode != L"regex" && mode != L"sql" &&
+        mode != L"lua_filter" && mode != L"lua_exec")
+        return L"未知搜索模式: " + mode;
+    /* 结果同步布防 (2026-09-26 用户口径: 完成事件里推送, 不经 UI 编组/不另起线程):
+     * 勾选开启且目标窗结果可得 → 置 g_syncArm, AgentOnSearchComplete (引擎搜索线程)
+     * 在本次完成未被覆盖 (discarded=FALSE) 时把 ID 全集 ResetFileId 进目标窗。 */
+    if (InterlockedCompareExchange(&j->syncRes, 0, 0) && j->syncWin) {
+        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, j->syncWin);
+        InterlockedExchange(&g_syncArm, 1);
+    } else {
+        InterlockedExchange(&g_syncArm, 0);
     }
     int fp = -1;
     if (mode == L"wildcard")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 0, FALSE);
@@ -768,8 +1158,8 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     else if (mode == L"sql")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 2, FALSE);
     else if (mode == L"lua_filter") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA, FALSE);
     else if (mode == L"lua_exec") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA_EXEC, FALSE);
-    else return L"未知搜索模式: " + mode;
     if (fp < 0) {
+        InterlockedExchange(&g_syncArm, 0);   /* 发起失败无完成事件, 撤防 (残留会推错下一次结果) */
         std::wstring e = W8(xjs_GetLastErrorMsg(eng));
         return L"搜索发起失败: " + (e.empty() ? std::wstring(L"引擎拒绝") : e);
     }
@@ -861,6 +1251,8 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         pair.push_back(JS(nm && *nm ? W8(nm) : L"(未命名)"));
         files.push_back(picojson::value(pair));
     }
+    /* 脚本登记的文件导出在此执行 (脚本已结束, 确认/对话框不受看门狗约束; abort 经 AgentUiCall 退出) */
+    std::string wroteNote8 = mode == L"lua_exec" ? ExecuteLuaWrites(j, st) : std::string();
     picojson::object feed;
     feed["count"] = JN(st->count);
     feed["elapsedMs"] = JN(st->elapsedMs);
@@ -872,8 +1264,93 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         picojson::value rows;
         if (JParseU8(rows, rowsRaw)) feed["rows"] = rows;
     }
+    if (!st->wrote.empty()) {   /* 导出的文件清单 (模型回答可引用; 前端 linkify 自动可点) */
+        picojson::array wf;
+        for (auto& w : st->wrote) wf.push_back(JS(w));
+        feed["writtenFiles"] = picojson::value(wf);
+    }
+    if (!wroteNote8.empty()) {   /* 取消/拒绝/失败的逐项经过 (真实经过不粉饰) */
+        feed["writesNote"] = JS(W8(wroteNote8.c_str()));
+    }
     st->res8 = picojson::value(feed).serialize();
     return L"";
+}
+
+/* ---- lua_exec 文件导出的执行段 (脚本结束后 worker 侧; 2026-09-25) ----
+ * Lua 回调只登记 (看门狗 10 秒禁阻塞), 真正写盘/确认在这里: 保存对话框与覆盖确认经
+ * AgentUiCall 编组到 UI 线程 (15s 无响应/停止 = 放弃该项), 成功路径进 st->wrote
+ * (卡片常显块 + 随历史落库)。返回给模型的附注 (UTF-8, 空=无)。 */
+static std::wstring LuaWriteFileSync(const std::wstring& path, const std::string& data) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return L"创建文件失败 (错误码 " + std::to_wstring(GetLastError()) +
+               L"; 目录不存在或无写入权限?)";
+    DWORD wr = 0;
+    BOOL ok = data.empty() || (WriteFile(h, data.data(), (DWORD)data.size(), &wr, NULL) && wr == (DWORD)data.size());
+    CloseHandle(h);
+    return ok ? L"" : L"写入失败 (磁盘满或被占用)";
+}
+/* 经 UI 编组问用户 (返回 true=允许; abort/超时=拒绝并带原因) */
+static bool LuaWriteAsk(AiJob* j, const std::wstring& text, bool* stopped) {
+    AiUiJob* jb = new AiUiJob();
+    jb->kind = UIW_ASK_WRITE;
+    jb->s1 = text;
+    jb->waitMs = 90000;   /* 用户可能切屏后才发现确认框; 15s 默认会中途放弃 (框后点确认也不落盘) */
+    std::string out8;
+    std::wstring err = AgentUiCall(j, jb, &out8);
+    if (!err.empty()) { *stopped = err == L"已停止"; return false; }   /* 超时/停止 = 不写 */
+    Jv v = JsonParseW(W8(out8.c_str()));
+    const Jv* ok = v.Get(L"确认");
+    return ok && ok->t == 1 && ok->b;
+}
+static std::string ExecuteLuaWrites(AiJob* j, AiToolStep* st) {
+    std::vector<AiWriteItem> items;
+    std::string preNote;
+    EnterCriticalSection(&g_emitCs);
+    items.swap(g_writeBuf);
+    preNote.swap(g_writeNote);   /* 回调层拒绝/失败留痕 (登记为空时也要回喂) */
+    LeaveCriticalSection(&g_emitCs);
+    if (items.empty() && preNote.empty()) return "";
+    std::wstring note = W8(preNote.c_str());
+    for (auto& it : items) {
+        std::wstring path = it.path;
+        if (it.saveDlg) {   /* 保存对话框: 用户选定即授权, 已存在目标由系统对话框内建确认 */
+            AiUiJob* jb = new AiUiJob();
+            jb->kind = UIW_SAVE_DIALOG;
+            jb->s2 = it.path;   /* 默认文件名建议 */
+            jb->waitMs = 180000;   /* 用户找目录可能要很久, 15s 默认会中途放弃 (框后点保存也不落盘) */
+            std::string out8;
+            std::wstring err = AgentUiCall(j, jb, &out8);
+            if (!err.empty()) { note += L"保存对话框未完成 (" + err + L"): " + it.path + L"\n"; continue; }
+            Jv v = JsonParseW(W8(out8.c_str()));
+            std::wstring sel = v.S(L"path");
+            if (sel.empty()) { note += L"用户取消了保存: " + it.path + L"\n"; continue; }
+            path = sel;
+        } else {
+            bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+            int pol = InterlockedCompareExchange(&g_luaIoPolicy, 0, 0);
+            if (exists || pol == 2) {   /* 覆盖恒确认; 询问档写新文件也确认 */
+                bool stopped = false;
+                std::wstring what = exists ? (L"AI 想要覆盖已存在的文件:\n\n" + path +
+                                             L"\n\n覆盖后原内容无法恢复。覆盖它吗?\n(选「否」= 跳过这个文件, 其它文件继续)")
+                                           : (L"AI 请求写出新文件:\n\n" + path +
+                                             L"\n\n允许吗?\n(选「否」= 跳过这个文件)");
+                if (!LuaWriteAsk(j, what, &stopped)) {
+                    if (stopped) { note += L"已停止, 未写出的文件已跳过\n"; break; }
+                    note += L"用户未确认, 已跳过: " + path + L"\n";
+                    continue;
+                }
+            }
+        }
+        std::wstring werr = LuaWriteFileSync(path, it.data);
+        if (werr.empty()) {
+            st->wrote.push_back(path);
+            note += L"已写出 (" + std::to_wstring(it.data.size()) + L" 字节): " + path + L"\n";
+        } else {
+            note += L"写出失败: " + path + L" (" + werr + L")\n";
+        }
+    }
+    return U8(note);
 }
 
 /* open_file 实体: 打开/定位最近一次 run_search 样本中的文件 (走宿主打开行为)。
@@ -1761,17 +2238,28 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"（不带字段实参 = id+名称；字段名就是输出 JSON 的键）。行进工具结果 JSON 的 rows 数组，"
     L"**每行是只含请求字段的 JSON 对象**（如 {\"id\":123,\"大小\":1048576,\"名称\":\"a.docx\"}，时间=epoch 秒）；"
     L"索引未开启的字段整键省略（rows 首元素有提示），行数过多会截断。清单展示优先 ai.row，别用 ai.print 手拼行。\n"
+    L"- 文件导出（仅 lua_exec，仅 agent 工具环境）：**ai.read(路径)**=读文本文件返回内容（≤8MB，二进制拒绝）；"
+    L"**ai.write(路径, 内容)**=登记写出（脚本结束后系统自动完成写盘，结果在工具结果 JSON 的 writtenFiles/writesNote）；"
+    L"**ai.saveas(内容, \"默认文件名.csv\")**=弹系统保存对话框让用户选位置（用户选定=授权，取消=不写）。\n"
+    L"  内容格式自动判定：**二维表（表的表）→ CSV**（UTF-8 带 BOM，Excel 直开；子表为字典时取键并集做表头，"
+    L"统计/清单导出首选这种结构）；**其它表 → JSON**；**字符串/数字 → 原样文本**。返回值：成功=true，失败=nil+原因。\n"
+    L"  路径必须是**绝对路径**；导出位置建议 桌面/下载/文档 下用户能找到的目录；目标已存在时用户会收到"
+    L"覆盖确认（拒绝=该文件不写）；文件功能受用户\"文件操作\"权限档约束（禁用/只读=拒绝）。\n"
+    L"  **ai.write/ai.saveas 必须检查返回值**（本地 ret = ai.saveas(...)；ret 为 nil 时把原因如实告诉用户并停止宣称导出）。\n"
+    L"  是否真的写盘以**工具结果 JSON 的 writtenFiles（已写出清单）/ writesNote（取消·拒绝·失败经过）为准**——\n"
+    L"  结果里没有 writtenFiles 就**绝不可以说\"已导出/已保存\"**（弹窗可能被用户错过或权限被拒，诚实报告经过）。\n"
     L"return 硬规则：lua_exec 必须以**顶层 return ID 数组**结尾（插件静态校验，缺顶层 return 拒绝执行；"
     L"包在 if/function 里的 return 不算——主流程必须有兜底 return）；lua_filter 逐文件返回真值。\n"
     L"- 脚本沙箱删除了 io/os 等库；API 全集以文末附录规范为准，绝不虚构函数。\n"
     L"- **交给用户运行的脚本**（写在回答里的代码块或 xjs://search 链接，不经你执行）：必须写 return ID 数组"
-    L"（漏写 return 界面一条结果都不显示）；**禁止调用 ai.print**（用户侧没有这个函数，调用即报错）；"
+    L"（漏写 return 界面一条结果都不显示）；**禁止调用 ai.print / ai.read / ai.write / ai.saveas / ai.row"
+    L"（用户侧没有这些函数，调用即报错）——要把数据导出给用户就自己 lua_exec 跑 ai.write/ai.saveas；"
     L"过滤模式脚本没有用户侧入口（搜索框的 lua 模式就是执行模式），别生成 lua_filter 的搜索链接；"
     L"把脚本交给用户仅限用户明确要脚本本身的场合。\n";
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
   {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」或 5 分钟未确认则本次调用以失败返回; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
@@ -2611,6 +3099,7 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     dst.elapsedMs = local.elapsedMs;
                     dst.err = local.err;
                     dst.top = local.top;   /* open 展开态归泵/用户, 不覆盖 */
+                    dst.wrote = local.wrote;   /* 导出的文件 (卡片常显块+落库) */
                     dst.adj = local.adj;   /* 待应用的调整 (提案数据; 漏拷 = 卡片按钮区不渲染) */
                     j->stepsVersion++;
                 }

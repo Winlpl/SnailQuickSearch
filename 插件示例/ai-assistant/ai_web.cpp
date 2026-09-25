@@ -82,6 +82,7 @@ static picojson::value WebCfgValue() {
     o["reasoning"] = JB(g_cfg.reasoning);
     o["policy"] = JN(g_cfg.filePolicy);
     o["epolicy"] = JN(g_cfg.execPolicy);
+    o["sync"] = JB(g_cfg.syncResults);   /* 结果同步勾选 (输入区 chip 开关) */
     /* 多模态能力 (活动档案镜像): 输入区据此显隐附件入口 */
     o["img"] = JB(g_cfg.img);
     o["video"] = JB(g_cfg.video);
@@ -510,8 +511,14 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             cmd = !st.argz.empty() ? (st.name.empty() ? st.argz : st.name + L" " + st.argz)
                                    : (st.name.empty() ? L"工具" : st.name);
         }
-        swprintf(b, 64, L"<div class=\"step%s\" data-gi=\"%d\"", st.state == 3 ? L" failed" : L"", mi);
+        swprintf(b, 64, L"<div class=\"step%s\" data-gi=\"%d\" data-si=\"%d\"", st.state == 3 ? L" failed" : L"", mi, (int)si);
         *out += b;
+        /* data-mode = 搜索卡模式 (仅 run_search 卡): 卡片右键"执行语句"据此显隐 */
+        if (st.kind == 0 && !st.mode.empty()) {
+            *out += L" data-mode=\"";
+            HtmlEscape(out, st.mode);
+            *out += L"\"";
+        }
         /* data-q = 完整查询原文 (头部 .scmd 截 200 只供显示; 右键"复制查询语句"要全文) */
         *out += L" data-q=\"";
         HtmlEscape(out, cmd);
@@ -597,6 +604,21 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
                         L"<span class=\"abtn primary\" data-act=\"adjApplyAll\">全部应用</span></span>";
             }
             *out += L"</div></div>";
+        }
+        if (!st.wrote.empty()) {
+            /* 脚本导出的文件 = 常显块 (不随折叠收起 — "会话结束后显示写出了什么文件");
+               路径同样本: .ai-path 可点击 (单击打开/右键定位复制) */
+            wchar_t wb[96];
+            swprintf(wb, 96, L"<div class=\"swrote\">📄 已写出 %d 个文件 (点击打开):", (int)st.wrote.size());
+            *out += wb;
+            for (size_t wi = 0; wi < st.wrote.size(); wi++) {
+                *out += L"<div class=\"swrote-it\"><span class=\"ai-path\" data-path=\"";
+                HtmlEscape(out, st.wrote[wi]);
+                *out += L"\">";
+                HtmlEscape(out, st.wrote[wi]);
+                *out += L"</span></div>";
+            }
+            *out += L"</div>";
         }
         if (!st.top.empty()) {
             *out += L"<div class=\"ssamples\" style=\"display:none\">";
@@ -1199,12 +1221,15 @@ static picojson::value WebMsgValue(AiSess* s, const AiMsg& m, int mi, bool think
     }
     if (m.role == 2 && !m.steps.empty()) {   /* 步骤状态: 前端聚合头部计数用 (卡面视觉由 MsgHtmlOf 直出) */
         picojson::array steps;
+        picojson::array wrote;               /* 本条卡片写出的文件 (前端按回合聚合渲染导出块) */
         for (const AiToolStep& st : m.steps) {
             picojson::object so;
             so["state"] = JN(st.state);
+            for (const std::wstring& p : st.wrote) wrote.push_back(JS(p));
             steps.push_back(picojson::value(so));
         }
         o["steps"] = picojson::value(steps);
+        if (!wrote.empty()) o["wrote"] = picojson::value(wrote);
     }
     return picojson::value(o);
 }
@@ -1288,8 +1313,8 @@ static void WebUsagePush(AiSess* s) {
 
 static void WebConvsPushOne(AiSess* s) {
     picojson::array convs;
-    for (size_t i = g_hist.size(); i-- > 0;) {   /* 最新在前 (显示序) */
-        const AiConv& c = g_hist[i];
+    for (size_t i = g_hist.size(); i-- > 0;) {   /* 最新在前 (显示序); 索引只有元数据, 推送轻量 */
+        const AiConvRef& c = g_hist[i];
         picojson::object co;
         co["id"] = JN((long long)c.id);
         co["t"] = JN(c.t);
@@ -1316,7 +1341,7 @@ void WebTouch(AiSess* s) {
 static void WebPushBoot(AiSess* s) {
     picojson::array convs;
     for (size_t i = g_hist.size(); i-- > 0;) {
-        const AiConv& c = g_hist[i];
+        const AiConvRef& c = g_hist[i];
         picojson::object co;
         co["id"] = JN((long long)c.id);
         co["t"] = JN(c.t);
@@ -1905,6 +1930,41 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         return;
     }
+    if (c == L"sync") {   /* 结果同步勾选: run_search 完成后把结果 ID 重置进发起窗口的列表。
+                             持久落盘 + 在跑的作业即时跟进 (同 policy 的 live-update 口径),
+                             下一次工具搜索起按新值同步。 */
+        const Jv* v = msg.Get(L"v");
+        if (v && v->t == 2) {
+            g_cfg.syncResults = v->num != 0;
+            CfgSave();
+            if (s->job) {
+                InterlockedExchange(&s->job->syncRes, g_cfg.syncResults ? 1 : 0);
+                s->job->syncWin = g_cfg.syncResults ? AgentWindowResultOf(s->tok) : NULL;
+            }
+            CfgBroadcast();
+        }
+        return;
+    }
+    if (c == L"execstmt") {   /* 卡片右键"执行语句": 重放该卡的查询, 完成事件把结果 ID
+                                 推进窗口列表 (AgentManualExec 布防, 不占 UI 线程等完成)。
+                                 语句取 C++ 会话份步骤 (权威原文), 不信 DOM。 */
+        const Jv* gv = msg.Get(L"gi");
+        const Jv* sv = msg.Get(L"si");
+        if (gv && sv && gv->t == 2 && sv->t == 2) {
+            int mi = (int)gv->num, si = (int)sv->num;
+            if (mi >= 0 && mi < (int)s->msgs.size() && s->msgs[mi].role == 2 &&
+                si >= 0 && si < (int)s->msgs[mi].steps.size() &&
+                s->msgs[mi].steps[si].kind == 0) {
+                const AiToolStep& st = s->msgs[mi].steps[si];
+                std::wstring err = AgentManualExec(s->tok, st.mode, st.query);
+                if (!err.empty())
+                    WebToast(s, U8(err).c_str(), XJS_PLUGIN_TOAST_WARN);
+                else
+                    WebToast(s, "已执行, 结果将同步到窗口列表", XJS_PLUGIN_TOAST_SUCCESS);
+            }
+        }
+        return;
+    }
     if (c == L"pallow" || c == L"pdeny") {   /* 文件策略询问卡: 允许并继续 / 保持拒绝 (只碰文件卡, 不碰命令卡) */
         bool allow = c == L"pallow";
         if (allow) {
@@ -1999,8 +2059,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         WebTouch(s);
         WebSyncSession(s);   /* 即时重推 msgs (卡片按钮态刷新); 同 pallow 口径 */
-        SessSaveConv(s);     /* 当前会话先 upsert 进 g_hist (否则 HistSave 落的是旧副本) */
-        HistSave();
+        SessSaveConv(s);     /* 当前会话落盘 (HistUpsert 内含会话文件+索引) */
         return;
     }
     if (c == L"retry") {   /* 重试本轮: 截断到该轮提问之前再重发 (提问由 SendCurrent 重挂;
@@ -2031,16 +2090,14 @@ void WebCommand(AiSess* s, const Jv& msg) {
         s->msgs.erase(s->msgs.begin() + mi, s->msgs.begin() + end);
         if (s->stepBase > (int)s->msgs.size()) s->stepBase = (int)s->msgs.size();
         if (s->msgs.empty()) {
-            /* 删光 = 会话一并移出历史: SessSaveConv 对空会话跳过, 不删则旧内容残留 g_hist,
+            /* 删光 = 会话一并移出历史: SessSaveConv 对空会话跳过, 不删则旧内容残留索引,
                重开面板被删的问答又回来 — 与侧栏"删除对话"同口径 */
-            for (size_t i = 0; i < g_hist.size(); i++)
-                if (g_hist[i].id == s->curId) { g_hist.erase(g_hist.begin() + i); break; }
+            HistRemove(s->curId);
             s->curId = 0;
         }
         else {
-            SessSaveConv(s);   /* 先 upsert 修剪后的对话 (否则 HistSave 落的是旧副本) */
+            SessSaveConv(s);   /* 先落盘修剪后的对话 (HistUpsert 内含会话文件+索引) */
         }
-        HistSave();
         WebTouch(s);
         WebSyncSession(s);
         WebSyncHist();
@@ -2063,19 +2120,17 @@ void WebCommand(AiSess* s, const Jv& msg) {
     }
     if (c == L"load") {
         unsigned long long id = (unsigned long long)(msg.Get(L"id") ? msg.Get(L"id")->num : 0);
-        int idx = -1;
-        for (int i = 0; i < (int)g_hist.size(); i++)
-            if (g_hist[i].id == id) { idx = i; break; }
-        if (idx < 0) return;
+        AiConv conv;
+        if (!HistGet(id, conv)) return;   /* 按需读取: 会话正文此刻才从自己的文件载入 */
         AbortSend(s);
         SessSaveConv(s);
-        s->msgs = g_hist[idx].msgs;
+        s->msgs = std::move(conv.msgs);
         s->stepBase = (int)s->msgs.size();   /* 恢复的历史卡片不参与任何在途作业的步骤同步 */
         s->usageHas = false;
         s->uPrompt = s->uCompletion = s->uTotal = s->uCacheHit = s->uCacheWrite = 0;
         s->uLastPrompt = s->uLastCompletion = s->uLastCacheHit = 0;
         s->uTokPerSec = 0;
-        s->curId = g_hist[idx].id;
+        s->curId = conv.id;
         WebTouch(s);
         WebSyncSession(s);
         WebSyncHist();
@@ -2083,19 +2138,13 @@ void WebCommand(AiSess* s, const Jv& msg) {
     }
     if (c == L"del") {
         unsigned long long id = (unsigned long long)(msg.Get(L"id") ? msg.Get(L"id")->num : 0);
-        for (int i = 0; i < (int)g_hist.size(); i++) {
-            if (g_hist[i].id != id) continue;
-            g_hist.erase(g_hist.begin() + i);
-            HistSave();
-            if (s->curId == id) { s->curId = 0; s->msgs.clear(); WebTouch(s); WebSyncSession(s); }
-            WebSyncHist();
-            break;
-        }
+        HistRemove(id);   /* 正文文件 + 索引条目一并删除 */
+        if (s->curId == id) { s->curId = 0; s->msgs.clear(); WebTouch(s); WebSyncSession(s); }
+        WebSyncHist();
         return;
     }
     if (c == L"clearHist") {
-        g_hist.clear();
-        HistSave();
+        HistClearAll();   /* 每个会话的正文文件 + 索引一并清掉 */
         s->curId = 0;
         s->msgs.clear();
         s->usageHas = false;

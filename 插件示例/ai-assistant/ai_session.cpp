@@ -146,6 +146,9 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     j->tok = s->tok;   /* open_file 走宿主 OpenFile 的目标窗口 */
     InterlockedExchange(&j->policy, g_cfg.filePolicy);   /* 权限快照 (确认卡"允许"由 UI 更新) */
     InterlockedExchange(&j->execPolicy, g_cfg.execPolicy);
+    InterlockedExchange(&j->syncRes, g_cfg.syncResults ? 1 : 0);   /* 结果同步勾选快照 */
+    /* 同步目标窗结果对象 (UI 线程捕获; 完成事件回调用前自查 IsEffective) */
+    j->syncWin = g_cfg.syncResults ? AgentWindowResultOf(s->tok) : NULL;
     InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
     InterlockedExchange(&j->execDeny, 0);
     /* 对话快照 (只含 role 0/1; 有附件的 role 0 即使无文字也要进上下文; 工具往返由 worker 在循环中累计) */
@@ -256,6 +259,7 @@ static void PumpStreams() {
                                    m.steps[0].count != steps[seen].count ||
                                    m.steps[0].err != steps[seen].err ||
                                    m.steps[0].top != steps[seen].top ||
+                                   m.steps[0].wrote != steps[seen].wrote ||
                                    m.steps[0].name != steps[seen].name ||
                                    m.steps[0].mode != steps[seen].mode ||
                                    m.steps[0].query != steps[seen].query;

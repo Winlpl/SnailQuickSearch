@@ -681,6 +681,19 @@ static int ApiLangsList(XjsPluginCtx* ctx, char* buf, int cap) {
     return PluginBufOut(buf, cap, j);
 }
 
+/* ==================== window.result ====================
+ * 某窗口的结果对象裸指针 (照 OnEvent 的 result 口径: 直连引擎的插件自己调引擎,
+ * 典型 = 在私有结果 COMPLETE 事件回调里 xjs_result_ResetFileId 进窗口列表)。
+ * 只发指针不做包装 — 行缓存/重绘链是引擎结果对象自身的变化事件链, 宿主不代劳。 */
+static xjs_result* ApiWindowResult(XjsPluginCtx* ctx, XjsWindowToken window) {
+    int e;
+    if (XjsPluginApiGate(ctx, XPP_UI) != XJS_PLUGIN_OK) return NULL;
+    XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
+    if (!w) return NULL;
+    XjsWindowScope scope(w);
+    return g_result;
+}
+
 /* ==================== 名称解析器 (宿主表尾 QueryApi 的落点) ==================== */
 
 void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
@@ -705,6 +718,7 @@ void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
         { XJS_API_SKINS_LIST,    (void*)&ApiSkinsList },
         { XJS_API_WINDOW_SELECTION, (void*)&ApiWindowSelection },
         { XJS_API_LANGS_LIST,    (void*)&ApiLangsList },
+        { XJS_API_WINDOW_RESULT, (void*)&ApiWindowResult },
     };
     for (auto& t : T)
         if (!strcmp(t.name, name)) return t.fn;

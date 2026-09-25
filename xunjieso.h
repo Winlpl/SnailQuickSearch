@@ -112,6 +112,7 @@ enum xjs_event_type {
     XJS_EVENT_SYNC_START       = 14, /* 同步_启动 (实时同步监控线程启动成功; 重建数据库路径在重建数据库线程触发, 加载数据库路径在调用线程触发) */
     XJS_EVENT_SYNC_STOP        = 15, /* 同步_停止 (实时同步监控停止; 由调用停止同步的线程触发, 该事件位于引擎写锁内) */
     XJS_EVENT_SYNC_AFTER       = 16, /* 同步后_文件变化 (文件同步处理完成后触发, 文件同步线程, 引擎读锁内, 回调内禁止写库/等待锁; 参数: 变化JSON(UTF-8文本); 返回值忽略) */
+    XJS_EVENT_SYNC_PARTITION_REMOVED = 17, /* 同步_分区被移除 (检测到已索引分区从系统消失, U盘拔出/硬盘拔出等; 引擎已停该盘全部监听并清其排队同步事件; 文件同步线程触发, 回调内禁止写库/等待引擎锁; 参数: 盘符文本(UTF-8, 如 "E:"); 该盘文件行仍在库中, 是否清理由宿主决定(可调 xjs_db_DeletePath 传盘符根); 返回值忽略) */
     XJS_EVENT_RESULT_CREATE    = 20, /* 搜索结果_已创建 (调用线程触发, 通常为主线程) */
     XJS_EVENT_RESULT_DELETE    = 21  /* 搜索结果_即将销毁 (一律在内部异步删除线程触发, 不区分调用线程) */
 };
@@ -276,6 +277,11 @@ XJS_API BOOL XJS_CALL xjs_SetCallback(
                                 //        "旧路径":".."(重命名),"被删除子ID数量":n(删除目录),
                                 //        "大小前"/"大小后","修改时间前"/"修改时间后","创建时间前"/"创建时间后",
                                 //        "访问时间前"/"访问时间后","文件属性前"/"文件属性后"} (UTF-8)
+                            XJS_EVENT_SYNC_PARTITION_REMOVED (17):
+                                typedef INT (*SyncPartitionRemovedCallback)(void* userData, xjs_engine* engine, const char* driveLetter);
+                                // 分区被移除(拔出U盘/硬盘等): 文件同步线程触发, 回调内禁止写库/等待引擎锁, 返回值忽略
+                                // driveLetter: 盘符文本(UTF-8, 如 "E:"); 引擎已停止该盘全部监听并清理其排队同步事件;
+                                // 该盘的文件行仍在库中, 是否清理由宿主决定(可调 xjs_db_DeletePath 传盘符根)
                                 //        仅包含已开启的数据库字段; 时间为13位毫秒时间戳(自1970-01-01); 修改时"前"为同步前数据库旧值,"后"为磁盘新值
                             XJS_EVENT_RESULT_CREATE (20):
                                 typedef void (*ResultCreateCallback)(void* userData, xjs_engine* engine, xjs_result* result);

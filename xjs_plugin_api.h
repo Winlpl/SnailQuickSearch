@@ -9,7 +9,7 @@
  *
  * 三方分工:
  *   xjs_plugin.cpp    注册表/闸门/窗口令牌 (唯一事实源, 本模块经下面的薄包装取用)
- *   xjs_plugin_api.cpp QueryApi 解析器 + 12 个扩展 API + 运行时搜索模式存储
+ *   xjs_plugin_api.cpp QueryApi 解析器 + 各扩展 API + 运行时搜索模式存储
  *   xjs_plugin_sdk.h  插件作者可见面 (XJS_API_* 名称常量 + XjsApi* 函数指针类型)
  * ============================================================================ */
 

@@ -259,7 +259,7 @@ struct XjsPluginHost {
  * 权限 (清单 "权限"; 未声明调用 = ERR_PERM):
  *   免权限    = settings.get / settings.global.get / windows.enum / window.state /
  *               modes.list / skins.list / window.selection / langs.list
- *   "ui"      = window.cmd / window.create / modes.apply
+ *   "ui"      = window.cmd / window.create / modes.apply / window.result
  *   "settings"= settings.set / settings.global.set / modes.add / modes.remove
  * JSON 键为中文主键 (与 manifest/配置文件口径一致); 输出 = 调用方缓冲约定; 窗口令牌照旧
  * (0 = 默认窗口)。设置写入即时生效并落盘; 未知键/非法值 = ERR_ARG (不静默半套)。
@@ -365,6 +365,16 @@ typedef int (XJS_PLUGIN_CALL *XjsApiWindowSelection)(XjsPluginCtx*, XjsWindowTok
    + settings.set "皮肤") 同一套分工: 清单查有效值, 写入走设置白名单 */
 #define XJS_API_LANGS_LIST      "langs.list"
 typedef int (XJS_PLUGIN_CALL *XjsApiLangsList)(XjsPluginCtx*, char* buf, int cap);
+
+/* window.result: 某窗口的结果对象裸指针 ("ui" 权限, 仅 UI 线程; 2026-09-26 表尾追加)
+   → 所属窗口的 xjs_result* (列表数据即它)。直连引擎的插件拿它自己调引擎 (照 OnEvent
+   的 result 口径: xjs_result_GetCount/GetFileId/ResetFileId…), 典型用法 = 在私有结果
+   的 XJS_RESULT_EVENT_COMPLETE 回调里把 ID 全集 xjs_result_ResetFileId 进窗口列表。
+   返回 NULL = 窗口不存在/旧宿主/插件被禁用; 指针仅在窗口存活期有效, 跨线程使用前
+   自查 xjs_result_IsEffective (窗口销毁即失效, 不得长期缓存)。 */
+#define XJS_API_WINDOW_RESULT   "window.result"
+struct xjs_result;   /* 引擎结果对象 (typedef struct xjs_result xjs_result, 完整定义 xunjieso.h) */
+typedef xjs_result* (XJS_PLUGIN_CALL *XjsApiWindowResult)(XjsPluginCtx*, XjsWindowToken window);
 
 /* ==================== 插件导出面 ==================== */
 

@@ -12,8 +12,9 @@
  * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); 文件动作 [文件名](xjs://open|reveal?id=<FileId>)
  * 只带引擎 FileId — 路径由程序按 ID 解析, 前端不接触路径 (2026-09-25 用户口径); path 参数 =
  * 旧历史消息的路径版链接, 继续受理; 正文里确有绝对路径 (旧消息/ai.row 的路径字段) 仍自动识别为文件链接
- * (单击=打开, 右键=打开/定位/复制); 工具卡片 (.step, C++ 生成带 data-q=查询全文) 右键=复制查询语句
- * (2026-09-25; 头部 .scmd 只显示前 200 字, 复制走 data-q 全文); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
+ * (单击=打开, 右键=打开/定位/复制); 工具卡片 (.step, C++ 生成带 data-q=查询全文) 右键=
+ * 执行语句 (搜索卡 data-mode 在, 重放语句并把结果同步进窗口列表) + 复制查询语句
+ * (2026-09-26; 头部 .scmd 只显示前 200 字, 复制走 data-q 全文); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
  * 安全面: CSP 关 fetch/XHR/表单/外域; 模型输出永不产生活 HTML (C++ md4c 层转义裁剪);
  * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力 (右键菜单只在
  * 卡片/路径上接管为自绘菜单, 其余区域保留原生菜单 = 选区复制入口)。
@@ -420,6 +421,17 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .sout,.ssamples{margin:0;padding:6px 8px;max-height:200px;overflow:auto;border-top:1px solid var(--glass-border);
         background:color-mix(in srgb,var(--text-primary) 4%,transparent);font-family:Consolas,'Cascadia Mono',monospace;
         font-size:11px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
+/* lua 脚本导出的文件 (常显块 — 不随卡片折叠收起, 会话结束后仍可见; 路径 .ai-path 可点击) */
+.swrote{margin:6px 8px 8px;padding:6px 9px;border:1px solid color-mix(in srgb,var(--accent-violet) 35%,var(--glass-border));
+        border-radius:7px;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);
+        font-size:11px;line-height:1.6;color:var(--text-secondary)}
+.swrote-it{margin-top:3px;word-break:break-all}
+/* 本轮导出的文件 (挂在导出发生的回合组末尾 — 归属清晰, 继续对话不漂移; 路径可点击) */
+.sess-exports{margin:6px 0 2px;padding:7px 11px;border:1px dashed color-mix(in srgb,var(--accent-violet) 38%,var(--glass-border));
+        border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 6%,transparent);
+        font-size:11.5px;line-height:1.65;color:var(--text-secondary)}
+.sess-exports .se-head{color:var(--text-tertiary);margin-bottom:4px}
+.sess-exports .se-it{word-break:break-all}
 /* 策略询问 (卡上确认): 上分隔线 + 说明文字 + 允许/拒绝按钮 */
 .sask{padding:7px 8px 8px;border-top:1px solid var(--divider);color:var(--text-tertiary);font-size:11px;line-height:1.5}
 /* 待应用的调整 (AI 提案, 用户逐项 应用/忽略; 源样式对齐 .sask 一族) */
@@ -594,6 +606,10 @@ textarea,input{user-select:text;-webkit-user-select:text}
           background:color-mix(in srgb,var(--accent-amber) 16%,transparent);
           color:color-mix(in srgb,var(--accent-amber) 82%,var(--text-primary))}
 .ai-cmd-policy-button[data-policy="off"]{color:var(--text-secondary)}
+/* 结果同步勾选 (复用权限按钮外观; 开启=强调色勾+描边, 关闭=灰) */
+.ai-sync-btn[aria-pressed="true"]{border-color:color-mix(in srgb,var(--accent-violet) 45%,transparent);
+          background:color-mix(in srgb,var(--accent-violet) 14%,transparent);color:var(--accent-violet)}
+.ai-sync-btn[aria-pressed="false"] .ai-cmd-policy-icon{color:var(--text-tertiary)}
 .ai-cmd-policy-menu{position:absolute;left:0;bottom:calc(100% + 6px);z-index:16;display:grid;gap:4px;width:max-content;
           min-width:148px;max-width:280px;padding:4px;border-radius:7px;background:var(--surface-raised);
           box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.28);cursor:default;
@@ -653,6 +669,12 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}
 .ai-history-title{font-size:12px;color:var(--text-secondary)}
 .ai-history-clear{height:24px;padding:0 8px;font-size:11px}
+.ai-history-head-actions{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+/* 头部关闭钮: 与条目删除钮同几何 (22px 方格), 悬停中性提亮 (红色只保留给删除) */
+.ai-history-close{display:grid;flex:0 0 auto;width:22px;height:22px;place-items:center;border:none;border-radius:4px;
+          background:transparent;color:var(--text-tertiary);cursor:default;font-size:11px;
+          transition:background 120ms ease,color 120ms ease}
+.ai-history-close:hover{background:color-mix(in srgb,var(--text-primary) 10%,transparent);color:var(--text-primary)}
 .ai-history-list{display:flex;flex:1 1 auto;flex-direction:column;gap:4px;min-height:0;overflow-y:auto}
 .ai-history-item{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 10px;border:1px solid transparent;
           border-radius:6px;cursor:default;transition:background 120ms ease}
@@ -828,6 +850,10 @@ textarea,input{user-select:text;-webkit-user-select:text}
                   <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
               </div>
             </div>
+            <button class="ai-cmd-policy-button ai-sync-btn" id="syncBtn" type="button" aria-pressed="false">
+              <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE73E;</span>
+              <span id="syncLabel"></span>
+            </button>
             <button class="ai-usage" id="usageBtn" type="button" aria-expanded="false">
               <span class="ai-usage-bar" aria-hidden="true"><i class="ai-usage-bar-fill" id="ubarf"></i></span>
               <span class="ai-usage-brief" id="ubrief"></span>
@@ -844,7 +870,10 @@ textarea,input{user-select:text;-webkit-user-select:text}
   <aside class="ai-history-sidebar" id="side" aria-label="历史对话" hidden>
     <div class="ai-history-head">
       <span class="ai-history-title">历史对话</span>
-      <button class="ai-btn ai-history-clear" id="clearb" type="button" title="清空全部对话记录" hidden>清空记录</button>
+      <div class="ai-history-head-actions">
+        <button class="ai-btn ai-history-clear" id="clearb" type="button" title="清空全部对话记录" hidden>清空记录</button>
+        <button class="ai-history-close glyph" id="sideClose" type="button" title="关闭历史对话" aria-label="关闭历史对话">&#xE8BB;</button>
+      </div>
     </div>
     <div class="ai-history-list" id="sideList"></div>
     <div class="ai-history-empty" id="sideEmpty" hidden>暂无历史对话</div>
@@ -876,20 +905,34 @@ function histTime(t){if(!t)return '';const d=new Date(t*1000),now=new Date();
   return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
 )AIWEBUI"
            LR"AIWEBUI(
-/* ---- 空态示例提示词池 (36 条, 每次随机抽 6 条展示, 「换一批」重新抽取) ---- */
+/* ---- 空态示例提示词池 (46 条, 每次随机抽 6 条展示, 「换一批」重新抽取) ----
+ * 只收语义/意图类提问 — "文件名条件"类提问搜索框直接打更快, 不收 (2026-09-25 用户口径)。
+ * 条目可带 "文案->实际提示词" 映射: 按钮显示 -> 前的短文案, 填入 -> 后的完整提问 (无 -> 则原样);
+ * 点击 = 填入输入框不发送, 用户确认/修改后自己发 */
 const SUGGS=[
   '现在哪些大文件占用空间最多','找出一周内修改过的文档并列个清单','看看当前的文件分类和重复文件',
-  '哪些文件夹占用的空间最大','统计一下各个磁盘分区的空间占用','找出超过 1GB 的大视频文件',
-  '找出超过 100MB 的压缩包','列出最近三天新建的文件','把今天修改过的文件列出来',
-  '列出本月修改过的 Excel 表格','找出上周下载的文件','找出一年都没打开过的旧文档',
-  '今年拍摄的照片都有哪些','桌面上现在都有哪些文件','下载文件夹里有哪些安装包可以清理',
+  '哪些文件夹占用的空间最大','统计一下各个磁盘分区的空间占用',
+  '列出最近三天新建的文件',
+  '看看我今天做了什么->请告诉我，我今天具体做了哪些事情？请列出详细清单。','这周我都做了什么->请总结我本周的文件活动：新建、修改、下载了哪些文件，按天列出清单。',
+  '我上个月忙了些什么->请总结我上个月的文件活动：修改最多的文件类型与活跃时段，附代表性文件清单。','最近一小时电脑有什么动静->请列出最近 1 小时内新建或修改过的文件，并逐个说明它是什么。','哪些文件今天刚动过->把今天修改过的所有文件按时间先后列成清单，标出我最新编辑的一个。',
+  '我今天下载的文件->请列出我今天下载的所有文件，排除非人工主动下载的（软件自动更新、程序自己保存的缓存/日志），只保留我主动下载保存的，按时间先后列成清单。','这周我下载了什么->请列出本周我主动下载的文件（排除软件自动更新包、程序自动保存的缓存），按天分组展示。',
+  '昨天下载的文件放哪了->请列出昨天我主动下载的文件，标注每个文件现在所在的完整位置。','下载夹里攒了多少东西->请统计下载文件夹的文件数量和总大小，排除程序自动生成的缓存/日志，按类型归类并列出其中最大的 10 个。',
+  '找个文件但忘了名字->我找不到一个文件了，名字记不清了。请一步步问我线索（文件类型、大概什么时间的、名字里可能有的词），再按线索帮我搜出来。','上周写的方案->找出上周修改过的 Word/PPT/PDF 文档，按修改时间排序列出，帮我认出哪份是我在写的方案。',
+  '别人发我的文件->列出最近两周在下载/桌面/文档目录新出现的文件，帮我挑出可能是别人传给我的，列成清单。','帮我找张壁纸->找出分辨率较大、横版为主的图片文件，优先最近修改的，挑 10 张列出来让我选。',
+  '能发客户的 PDF->找出最近的 PDF 文件，排除帮助文档/软件说明类的，按修改时间列出，让我确认哪份可以外发。','照片都是哪天拍的->把我的照片文件按月份分组统计数量，每组给出一个示例文件名，帮我想起都拍过什么。',
+  '哪些文件命名很乱->找出文件名带"新建""副本""未标题""最终版"等字样的文件，列成清单，并给每个建议一个更清晰的名字。','同一文件存了多份->找出文件名相似、疑似同一文件的多个版本（带"副本"/"(1)"/日期后缀的），列出来让我合并清理。',
+  '版本太多分不清->找出名字里带 v1/v2/v3 或"旧版/新版"字样的文件，按名字分组列出，标出每组里最新修改的那份。','扫下敏感文件->找出文件名可能含 身份证/账号/密码/合同/简历 等字样的文件，列清单提醒我哪些要注意保管。',
+  '我的发票和账单->找出文件名带 发票/收据/订单/账单 字样的文件，按年份月份归类列出。','我的电子书在哪->找出 epub/mobi/pdf 里属于书籍的文件，按所在文件夹归类，列出总数和最大的几本。',
+  '装机要用的安装包->列出电脑里的安装程序（exe/msi 安装包），按所在文件夹分组，提醒哪些可能已经用不上了。','今天的电脑足迹->按小时整理今天新建或修改过的文件时间线，让我回顾这一天都处理了什么。','空的没用的->列出所有空文件夹和几乎为零的零散小文件，方便我一次清掉。',
+)AIWEBUI"
+           LR"AIWEBUI(
+  '列出本月修改过的 Excel 表格','找出一年都没打开过的旧文档',
   '哪些临时文件可以清理掉','找出内容相同的重复大文件','找出文件名重复的文件',
-  '统计每种扩展名的文件数量','找出文件名里带“简历”的文件','找出文件名里带“备份”的文件',
-  '找出所有叫“新建文件夹”的文件夹','找出名字最长的文件','找出没有扩展名的文件',
-  '列出所有 PDF 并按大小排序','列出电脑里所有的 Word 文档','找出所有的 PSD 设计源文件',
-  '列出系统里安装的字体文件','找出图片文件夹里的旧截图','统计一下音乐文件总共占了多少空间',
-  '找出 C 盘根目录下的大文件','找出路径层次特别深的文件','统计照片和视频各占多少空间',
-  '找出最近浏览过但很久没修改的文件','找出小文件特别多的文件夹','帮我把下载文件夹的文件按类型分个类'
+  '统计每种扩展名的文件数量','找出图片文件夹里的旧截图','统计一下音乐文件总共占了多少空间',
+  '找出路径层次特别深的文件','统计照片和视频各占多少空间',
+  '找出最近浏览过但很久没修改的文件','找出小文件特别多的文件夹','帮我把下载文件夹的文件按类型分个类',
+  '帮我整理桌面->看看我的桌面和下载文件夹，给出 3 条具体的整理建议，并说明每条大概能腾出多少空间。','该归档的旧项目->找出超过半年没修改过的项目类文件夹，列出来并建议我归档到哪里。',
+  '截图都散在哪->找出散落在各个目录的截图类图片，统计数量和位置，建议集中到一个文件夹。'
 ];
 /* 洗牌副本取前 6 (天然不重复); excl = 上一批, 池够大时优先避开, 保证「换一批」肉眼可见地全换掉 */
 function shuffleSuggs(excl){
@@ -899,7 +942,10 @@ function shuffleSuggs(excl){
   return out.slice(0,6);
 }
 let SUGG_CUR=shuffleSuggs(null);
-function suggsHtml(){return SUGG_CUR.map(q=>'<button class="ai-suggestion" type="button">'+esc(q)+'</button>').join('');}
+/* "文案->实际提示词" 映射: 按钮显示短文案, data-q 带完整提问 (无 -> 则两者相同) */
+function suggHtml(s){const i=s.indexOf('->');const l=i<0?s:s.slice(0,i),q=i<0?s:s.slice(i+2);
+  return '<button class="ai-suggestion" type="button" data-q="'+esc(q)+'">'+esc(l)+'</button>';}
+function suggsHtml(){return SUGG_CUR.map(suggHtml).join('');}
 function rerollSuggs(){
   SUGG_CUR=shuffleSuggs(SUGG_CUR);
   const box=$('suggBox');if(!box)return;
@@ -938,7 +984,7 @@ function epolicyMeta(v){for(const p of EPOLICY)if(p.v===v)return p;return EPOLIC
 
 /* ==================== 状态 ==================== */
 const S={
-  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,name:'',ctx:0,maxOut:0,active:'',profs:[],
+  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,sync:false,name:'',ctx:0,maxOut:0,active:'',profs:[],
        img:false,video:false,audio:false},
   pal:null, convs:[], msgs:[], cur:0,
   atts:[],          /* 待发送附件 [{u:dataUrl,k:kind,n:文件名}] (发送后清空) */
@@ -1205,6 +1251,20 @@ function turnPartHtml(m,mi,isFinal){
   }
   return inner;
 }
+/* 本轮导出的文件 (轮级归属 — 块挂在发生导出的回合组末尾, 继续对话不会漂移到最后一条下);
+ * 收集 [start,end) 内工具卡片消息的 wrote (C++ 随 steps 推送), 去重首现序 */
+function turnExportsHtml(start,end){
+  const seen=[];
+  for(let k=start;k<end;k++){
+    const m=S.msgs[k];
+    if(m.r!==2||!m.wrote)continue;
+    for(const p of m.wrote) if(seen.indexOf(p)<0) seen.push(p);
+  }
+  if(!seen.length)return '';
+  let h='<div class="sess-exports"><div class="se-head">📁 本轮导出的文件 ('+seen.length+')</div>';
+  for(const p of seen) h+='<div class="se-it"><span class="ai-path" data-path="'+esc(p)+'">'+esc(p)+'</span></div>';
+  return h+'</div>';
+}
 function turnGroupHtml(start){
   const end=turnEnd(start);
   const finalIdx=end-1;
@@ -1247,7 +1307,7 @@ function turnGroupHtml(start){
   if(finalIsBubble) main+=turnPartHtml(S.msgs[finalIdx],finalIdx,true);
   return '<div class="ai-msg ai-msg-assistant" data-mi="'+start+'">'
     +'<span class="ai-msg-avatar glyph" aria-hidden="true">&#xE99A;</span>'
-    +'<div class="ai-msg-main">'+main+'</div></div>';
+    +'<div class="ai-msg-main">'+main+turnExportsHtml(start,end)+'</div></div>';
 }
 /* 连续工具组: 头部 = 次数 + 聚合状态; 体 = 各卡片 (卡自身仍可单独展开看查询)。
  * 含待确认卡的组默认展开 (确认按钮必须可达), 其余默认折叠 */
@@ -1313,7 +1373,7 @@ function renderThread(keepScroll){
   let html='';
   for(let i=0;i<S.msgs.length;){
     if(S.msgs[i].r===0){ html+=userRowHtml(S.msgs[i],i); i++; continue; }
-    html+=turnGroupHtml(i);          /* 助手侧连续段 = 一个回合组 */
+    html+=turnGroupHtml(i);          /* 助手侧连续段 = 一个回合组 (导出块随所属回合) */
     i=turnEnd(i);
   }
   inner.innerHTML=html;
@@ -1775,7 +1835,10 @@ function bindThread(){
     const rf=e.target.closest('.ai-sugg-refresh');
     if(rf){rerollSuggs();return;}
     const sug=e.target.closest('.ai-suggestion');
-    if(sug){if(!S.sending)post({c:'send',text:sug.textContent});return;}
+    /* 示例提示词 = 起草不发送: 填入输入框让用户确认/修改后自己发 (2026-09-25 用户口径) */
+    if(sug){const ta=$('inputT');
+      if(ta&&!S.sending){ta.value=sug.getAttribute('data-q')||sug.textContent;autoSize();ta.focus();refreshSendState();}
+      return;}
     const dnt=e.target.closest('.ai-donate');
     if(dnt){if(!S.sending)post({c:'send',text:dnt.getAttribute('data-q')||'关于作者'});return;}
     /* 有非折叠选区 = 用户在拖选复制, 不当作点击 (路径误开防线)。
@@ -1905,13 +1968,18 @@ function bindThread(){
       ],e.clientX,e.clientY);
       return;
     }
-    /* 工具卡片 (.step): 右键 = 复制查询语句全文 (data-q 为未截断原文, .scmd 只显示前 200 字)。
+    /* 工具卡片 (.step): 右键 = 执行语句 (搜索卡: 重放该语句并把结果同步进窗口列表)
+       + 复制查询语句全文 (data-q 为未截断原文, .scmd 只显示前 200 字)。
        落在此分支前, 卡内样本路径已被 .ai-path 分支接走; 其余区域保留原生菜单 = 选区复制入口 */
     const stp=e.target.closest('.step');
     if(stp){
       e.preventDefault();
       const q=stp.getAttribute('data-q')||'';
-      if(q)showCtx([{t:'复制查询语句',fn:()=>post({c:'copy',text:q})}],e.clientX,e.clientY);
+      const mode=stp.getAttribute('data-mode')||'';
+      const items=[];
+      if(q&&mode)items.push({t:'执行语句',fn:()=>post({c:'execstmt',gi:+stp.getAttribute('data-gi'),si:+stp.getAttribute('data-si')})});
+      if(q)items.push({t:'复制查询语句',fn:()=>post({c:'copy',text:q})});
+      if(items.length)showCtx(items,e.clientX,e.clientY);
       return;
     }
   });
@@ -1989,6 +2057,7 @@ function renderComposer(){
   refreshSendState();
   renderPolicy();
   renderEpolicy();
+  renderSync();
   renderUsage();
 }
 /* ---- 多模态附件 (粘贴 / 📎 选择; 图片压到 ≤1568px, 视频/音频原样 data URL) ---- */
@@ -2161,6 +2230,15 @@ function epolicySetOpen(open){
   },90);
 }
 
+/* ---- 结果同步勾选 (run_search 结果 → 左侧搜索结果列表; 单击切换, 无下拉) ---- */
+function renderSync(){
+  const on=!!S.cfg.sync;
+  const b=$('syncBtn');
+  b.setAttribute('aria-pressed',on?'true':'false');
+  b.title=on?'结果同步已开启：AI 每次工具搜索（含 Lua 脚本选中的文件）的结果会同步显示到左侧搜索结果列表，点此关闭'
+           :'结果同步已关闭：开启后 AI 工具搜索的结果会同步显示到左侧搜索结果列表';
+}
+
 /* ---- 用量简况 + 详情浮层 ---- */
 function renderUsage(){
   const u=S.usage;
@@ -2287,6 +2365,8 @@ function bind(){
   const ta=$('inputT');   /* 输入框引用提前: 下方粘贴/附件接线同帧就要用到 (const 有暂时性死区) */
   $('b-set').addEventListener('click',()=>cfgToggle(!S.cfgOpen));
   $('b-hist').addEventListener('click',()=>sideToggle(!S.sideOpen));
+  /* 侧栏头部 ✕ = 显式关闭入口 (停靠模式下没有点外收起, 必须有可见的关闭钮) */
+  $('sideClose').addEventListener('click',()=>sideToggle(false));
   $('b-new').addEventListener('click',()=>post({c:'new'}));
   $('b-close').addEventListener('click',()=>post({c:'close'}));
   $('b-cancel').addEventListener('click',()=>cfgToggle(false));
@@ -2383,7 +2463,8 @@ function bind(){
     if(e.target.closest('button')||e.target.closest('.ai-usage-panel')||e.target===ta)return;
     e.preventDefault();ta.focus();
   });
-  $('policyBtn').addEventListener('click',()=>policySetOpen(!S.policyOpen));
+)AIWEBUI"
+           LR"AIWEBUI(  $('policyBtn').addEventListener('click',()=>policySetOpen(!S.policyOpen));
   $('policyMenu').addEventListener('click',e=>{
     const op=e.target.closest('.ai-cmd-policy-option');
     if(!op)return;
@@ -2396,6 +2477,12 @@ function bind(){
     if(!op)return;
     epolicySetOpen(false);
     post({c:'epolicy',v:+op.getAttribute('data-epolicy')});
+  });
+  /* 结果同步: 单击即切换 (宿主落盘+广播, 在跑作业即时跟进) — 本地先落账保持跟手 */
+  $('syncBtn').addEventListener('click',()=>{
+    S.cfg.sync=!S.cfg.sync;
+    renderSync();
+    post({c:'sync',v:S.cfg.sync?1:0});
   });
   $('usageBtn').addEventListener('click',()=>usageSetOpen(!S.usageOpen));
   /* 清空记录 = 两步确认 (与删除模型档案同一套语言): 首击进入待确认, 4s 内再击才清空 */

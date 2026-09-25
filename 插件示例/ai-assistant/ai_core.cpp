@@ -200,6 +200,7 @@ void CfgSave() {
     root["reasoning"] = JB(g_cfg.reasoning);
     root["filePolicy"] = JN(g_cfg.filePolicy);
     root["execPolicy"] = JN(g_cfg.execPolicy);
+    root["syncResults"] = JB(g_cfg.syncResults);
     root["activeId"] = JS(g_cfg.activeId);
     picojson::array profs;
     for (const AiProfile& p : g_cfg.profiles) {
@@ -299,6 +300,8 @@ void CfgLoad() {
             const Jv* ep = v.Get(L"execPolicy");
             if (ep && ep->t == 2 && ep->num >= 0 && ep->num <= 3)
                 g_cfg.execPolicy = (ep->num == 1) ? 2 : (int)ep->num;
+            const Jv* sy = v.Get(L"syncResults");
+            if (sy && sy->t == 1) g_cfg.syncResults = sy->b;
             const Jv* av = v.Get(L"activeId");
             if (av && av->t == 3) g_cfg.activeId = av->str;
             const Jv* ps = v.Get(L"profiles");
@@ -351,99 +354,233 @@ void CfgLoad() {
     if (firstRun) CfgSave();
 }
 
-/* ==================== 多对话历史 (存储键 "历史"; 上限 30 会话/每会话 200 条) ==================== */
+/* ==================== 多对话历史 (按会话拆分: 索引键 "历史索引" + 每会话一个正文文件
+ * "会话-<id>.json"; 上限 30 会话/每会话 200 条。索引只存元数据 [{"会话标题","文件名","id","时间"}],
+ * 打开面板零消息体载入; 会话正文在 load/落库时按需读写 — 旧版"所有会话堆一个文件"废弃,
+ * 旧全量键 "历史" 在索引缺失时一次性搬入分文件+索引后删除) ==================== */
 
-std::vector<AiConv> g_hist;
+std::vector<AiConvRef> g_hist;
 static unsigned long long g_nextConvId = 1;
 
+static std::wstring HistConvFile(unsigned long long id) {   /* 会话正文文件名 (索引."文件名" 同源) */
+    return L"会话-" + std::to_wstring(id) + L".json";
+}
 static std::wstring ConvTitleOf(const std::wstring& firstUser) {
     std::wstring t = TrimW(firstUser);
     if (t.size() > 30) { t = t.substr(0, 30); t += L"…"; }
     return t;
 }
-void HistSave() {
-    if (!g_host) return;
-    picojson::array convs;
-    for (const AiConv& c : g_hist) {
-        picojson::array msgs;
-        for (const AiMsg& m : c.msgs) {
-            picojson::object om;
-            if (m.role == 2) {
-                /* 工具卡片组: query/err 截到 512 字符 (绘制端同款上限, 存整段脚本无展示出口) */
-                om["r"] = JN(2);
-                picojson::array steps;
-                for (const AiToolStep& t : m.steps) {
-                    picojson::object os;
-                    os["k"] = JN(t.kind);
-                    os["st"] = JN(t.state);
-                    os["n"] = JN(t.count);
-                    os["ms"] = JN(t.elapsedMs);
-                    os["name"] = JS(t.name);
-                    if (!t.argz.empty()) os["argz"] = JS(t.argz);
-                    if (!t.mode.empty()) os["mode"] = JS(t.mode);
-                    if (!t.query.empty()) os["query"] = JS(t.query.substr(0, 512));
-                    if (!t.err.empty()) os["err"] = JS(t.err.substr(0, 512));
-                    if (!t.adj.items.empty()) {
-                        /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
-                        picojson::object oa;
-                        oa["kind"] = JN(t.adj.kind);
-                        oa["win"] = JS(t.adj.win);
-                        picojson::array items;
-                        for (const AiAdjustItem& it : t.adj.items) {
-                            picojson::object oi;
-                            oi["key"] = JS(it.key);
-                            oi["val"] = JS(it.val);
-                            oi["json"] = JS(W8(it.json.c_str()));
-                            oi["st"] = JN(it.state);
-                            if (!it.err.empty()) oi["err"] = JS(it.err.substr(0, 200));
-                            items.push_back(picojson::value(oi));
-                        }
-                        oa["items"] = picojson::value(items);
-                        os["adj"] = picojson::value(oa);
+
+/* ---- 会话正文 ↔ JSON (分会话文件与旧全量迁移共用; 写侧 picojson, 读侧 Jv) ---- */
+static void HistConvToJson(const AiConv& c, picojson::object& oc) {
+    picojson::array msgs;
+    for (const AiMsg& m : c.msgs) {
+        picojson::object om;
+        if (m.role == 2) {
+            /* 工具卡片组: query/err 截到 512 字符 (绘制端同款上限, 存整段脚本无展示出口) */
+            om["r"] = JN(2);
+            picojson::array steps;
+            for (const AiToolStep& t : m.steps) {
+                picojson::object os;
+                os["k"] = JN(t.kind);
+                os["st"] = JN(t.state);
+                os["n"] = JN(t.count);
+                os["ms"] = JN(t.elapsedMs);
+                os["name"] = JS(t.name);
+                if (!t.argz.empty()) os["argz"] = JS(t.argz);
+                if (!t.mode.empty()) os["mode"] = JS(t.mode);
+                if (!t.query.empty()) os["query"] = JS(t.query.substr(0, 512));
+                if (!t.err.empty()) os["err"] = JS(t.err.substr(0, 512));
+                if (!t.adj.items.empty()) {
+                    /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
+                    picojson::object oa;
+                    oa["kind"] = JN(t.adj.kind);
+                    oa["win"] = JS(t.adj.win);
+                    picojson::array items;
+                    for (const AiAdjustItem& it : t.adj.items) {
+                        picojson::object oi;
+                        oi["key"] = JS(it.key);
+                        oi["val"] = JS(it.val);
+                        oi["json"] = JS(W8(it.json.c_str()));
+                        oi["st"] = JN(it.state);
+                        if (!it.err.empty()) oi["err"] = JS(it.err.substr(0, 200));
+                        items.push_back(picojson::value(oi));
                     }
+                    oa["items"] = picojson::value(items);
+                    os["adj"] = picojson::value(oa);
+                }
                     if (!t.top.empty()) {
                         picojson::array top;
                         for (const std::wstring& p : t.top) top.push_back(JS(p));
                         os["top"] = picojson::value(top);
                     }
-                    steps.push_back(picojson::value(os));
-                }
-                om["steps"] = picojson::value(steps);
-                msgs.push_back(picojson::value(om));
-                continue;
+                    if (!t.wrote.empty()) {   /* 脚本导出的文件 (会话结束后仍可见/可点) */
+                        picojson::array wf;
+                        for (const std::wstring& p : t.wrote) wf.push_back(JS(p));
+                        os["w"] = picojson::value(wf);
+                    }
+                steps.push_back(picojson::value(os));
             }
-            om["r"] = JN(m.role);
-            om["text"] = JS(m.text);
-            if (!m.atts.empty()) {
-                /* 多模态附件 (dataUrl 可能已被 HistUpsert 的存储预算清空 = 占位, 照存) */
-                picojson::array atts;
-                for (const AiAttach& a : m.atts) {
-                    picojson::object oa;
-                    oa["k"] = JN(a.kind);
-                    oa["n"] = JS(a.name);
-                    oa["u"] = JS(a.dataUrl);
-                    atts.push_back(picojson::value(oa));
-                }
-                om["att"] = picojson::value(atts);
-            }
-            if (!m.reason.empty()) om["reason"] = JS(m.reason);
+            om["steps"] = picojson::value(steps);
             msgs.push_back(picojson::value(om));
+            continue;
         }
-        picojson::object oc;
-        oc["id"] = JN((long long)c.id);
-        oc["t"] = JN(c.t);
-        oc["title"] = JS(c.title);
-        oc["msgs"] = picojson::value(msgs);
-        convs.push_back(picojson::value(oc));
+        om["r"] = JN(m.role);
+        om["text"] = JS(m.text);
+        if (!m.atts.empty()) {
+            /* 多模态附件 (dataUrl 可能已被 HistUpsert 的存储预算清空 = 占位, 照存) */
+            picojson::array atts;
+            for (const AiAttach& a : m.atts) {
+                picojson::object oa;
+                oa["k"] = JN(a.kind);
+                oa["n"] = JS(a.name);
+                oa["u"] = JS(a.dataUrl);
+                atts.push_back(picojson::value(oa));
+            }
+            om["att"] = picojson::value(atts);
+        }
+        if (!m.reason.empty()) om["reason"] = JS(m.reason);
+        msgs.push_back(picojson::value(om));
     }
-    std::string u8 = picojson::value(convs).serialize();
-    g_host->StorageSet(g_ctx, "历史", u8.c_str(), (int)u8.size());
+    oc["id"] = JN((long long)c.id);
+    oc["t"] = JN(c.t);
+    oc["title"] = JS(c.title);
+    oc["msgs"] = picojson::value(msgs);
 }
-void HistLoad() {
-    g_hist.clear();
+static bool HistConvFromJson(const Jv& jc, AiConv& c) {
+    if (jc.t != 5) return false;
+    c.id = (unsigned long long)jc.S(L"id").empty() ? (unsigned long long)(jc.Get(L"id") ? jc.Get(L"id")->num : 0)
+                                                   : (unsigned long long)wcstoull(jc.S(L"id").c_str(), NULL, 10);
+    const Jv* jt = jc.Get(L"t");
+    if (jt && jt->t == 2) c.t = (long long)jt->num;
+    c.title = jc.S(L"title");
+    const Jv* jm = jc.Get(L"msgs");
+    if (jm && jm->t == 4) {
+        for (auto& jmsg : jm->arr) {
+            if (jmsg.t != 5) continue;
+            AiMsg m;
+            const Jv* jr = jmsg.Get(L"r");
+            if (jr && jr->num == 2) {
+                m.role = 2;
+                const Jv* js = jmsg.Get(L"steps");
+                if (js && js->t == 4) {
+                    for (auto& jst : js->arr) {
+                        if (jst.t != 5) continue;
+                        AiToolStep t;
+                        auto num = [&jst](const wchar_t* k, int def) {
+                            const Jv* v2 = jst.Get(k);
+                            return (v2 && v2->t == 2) ? (int)v2->num : def;
+                        };
+                        t.kind = num(L"k", 0);
+                        t.state = num(L"st", 2);
+                        t.count = num(L"n", -1);
+                        const Jv* vm = jst.Get(L"ms");
+                        t.elapsedMs = (vm && vm->t == 2) ? (long long)vm->num : -1;
+                        t.name = jst.S(L"name");
+                        t.argz = jst.S(L"argz");
+                        t.mode = jst.S(L"mode");
+                        t.query = jst.S(L"query");
+                        t.err = jst.S(L"err");
+                        const Jv* jtp = jst.Get(L"top");
+                        if (jtp && jtp->t == 4)
+                            for (auto& jp : jtp->arr) if (jp.t == 3) t.top.push_back(jp.str);
+                        const Jv* jw = jst.Get(L"w");
+                        if (jw && jw->t == 4)
+                            for (auto& jw2 : jw->arr) if (jw2.t == 3) t.wrote.push_back(jw2.str);
+                        const Jv* ja = jst.Get(L"adj");
+                        if (ja && ja->t == 5) {
+                            const Jv* jk = ja->Get(L"kind");
+                            t.adj.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
+                            t.adj.win = ja->S(L"win");
+                            const Jv* ji = ja->Get(L"items");
+                            if (ji && ji->t == 4)
+                                for (auto& jai : ji->arr) {
+                                    if (jai.t != 5) continue;
+                                    AiAdjustItem it;
+                                    it.key = jai.S(L"key");
+                                    it.val = jai.S(L"val");
+                                    it.json = U8(jai.S(L"json"));
+                                    const Jv* js2 = jai.Get(L"st");
+                                    it.state = (js2 && js2->t == 2) ? (int)js2->num : 0;
+                                    it.err = jai.S(L"err");
+                                    t.adj.items.push_back(std::move(it));
+                                }
+                        }
+                        if (t.state < 2) {   /* 存档时的在途步骤 = 进程已结束, 折算为已中止 */
+                            t.state = 3;
+                            if (t.err.empty()) t.err = L"已中止";
+                        }
+                        m.steps.push_back(t);
+                    }
+                }
+                if (m.steps.empty()) continue;
+            } else {
+                m.role = (jr && jr->num == 1) ? 1 : 0;
+                m.text = jmsg.S(L"text");
+                m.reason = jmsg.S(L"reason");
+                const Jv* ja2 = jmsg.Get(L"att");
+                if (ja2 && ja2->t == 4) {
+                    for (auto& jatt : ja2->arr) {
+                        if (jatt.t != 5) continue;
+                        AiAttach a;
+                        const Jv* jk = jatt.Get(L"k");
+                        a.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
+                        if (a.kind < 0 || a.kind > 2) a.kind = 0;
+                        a.name = jatt.S(L"n");
+                        a.dataUrl = jatt.S(L"u");
+                        m.atts.push_back(std::move(a));
+                    }
+                }
+                if (m.text.empty() && m.reason.empty() && m.atts.empty()) continue;
+            }
+            if (c.msgs.size() < AI_MSG_MAX) c.msgs.push_back(m);
+        }
+    }
+    return !c.msgs.empty();
+}
+/* 索引落盘 ([{"会话标题","文件名","id","时间"}]) — 只有元数据, 恒为几 KB */
+static void HistIdxSave() {
     if (!g_host) return;
-    /* 两步读 (先查长度再取): 多模态附件随历史落库后, 会话包远超旧估的 16MB —
-     * 固定上限缓冲读截断 = JSON 解析失败 = 全部历史一次丢光 (CfgLoad 同口径) */
+    picojson::array arr;
+    for (const AiConvRef& r : g_hist) {
+        picojson::object o;
+        o["会话标题"] = JS(r.title);
+        o["文件名"] = JS(r.file);
+        o["id"] = JN((long long)r.id);
+        o["时间"] = JN(r.t);
+        arr.push_back(picojson::value(o));
+    }
+    std::string u8 = picojson::value(arr).serialize();
+    g_host->StorageSet(g_ctx, "历史索引", u8.c_str(), (int)u8.size());
+}
+
+/* 按需读取一个会话正文 (侧栏 load 的唯一入口): 此刻才从该会话自己的文件读盘解析。
+ * file 取索引条目, 条目缺席时按 id 推导; 文件缺失/解析失败/无消息 = false。 */
+bool HistGet(unsigned long long id, AiConv& out) {
+    out = AiConv();
+    if (!g_host || !id) return false;
+    std::wstring file;
+    for (const AiConvRef& r : g_hist)
+        if (r.id == id) { file = r.file; break; }
+    if (file.empty()) file = HistConvFile(id);
+    /* 两步读 (先查长度再取): 附件随会话落库后单会话文件可达几十 MB,
+       固定上限缓冲读截断 = JSON 解析失败 = 该会话打不开 (CfgLoad 同口径) */
+    int n = g_host->StorageGet(g_ctx, U8(file).c_str(), NULL, 0);
+    if (n <= 0) return false;
+    std::string buf((size_t)n + 1, '\0');
+    n = g_host->StorageGet(g_ctx, U8(file).c_str(), &buf[0], n);
+    if (n <= 0) return false;
+    buf.resize((size_t)n);
+    buf.push_back(0);
+    Jv v = JsonParseW(W8(buf.c_str()));
+    if (v.t != 5 || !HistConvFromJson(v, out)) return false;
+    out.id = id;   /* 身份以索引/请求方为准 (文件自带 id 仅作展示冗余) */
+    return true;
+}
+
+/* 旧版全量键 "历史" (所有会话堆一个 JSON 数组) → 一次性搬成 每会话文件 + 索引, 搬完删旧键。
+ * 只在索引缺失/为空时走一次; 旧键不在 = 首次运行, 什么都不做。 */
+static void MigrateHistFromLegacy() {
     int n = g_host->StorageGet(g_ctx, "历史", NULL, 0);
     if (n <= 0) return;
     std::string buf((size_t)n + 1, '\0');
@@ -452,102 +589,69 @@ void HistLoad() {
     buf.resize((size_t)n);
     buf.push_back(0);
     Jv v = JsonParseW(W8(buf.c_str()));
-    if (v.t != 4) return;
-    for (auto& jc : v.arr) {
-        if (jc.t != 5) continue;
-        AiConv c;
-        c.id = (unsigned long long)jc.S(L"id").empty() ? (unsigned long long)(jc.Get(L"id") ? jc.Get(L"id")->num : 0)
-                                                       : (unsigned long long)wcstoull(jc.S(L"id").c_str(), NULL, 10);
-        const Jv* jt = jc.Get(L"t");
-        if (jt && jt->t == 2) c.t = (long long)jt->num;
-        c.title = jc.S(L"title");
-        const Jv* jm = jc.Get(L"msgs");
-        if (jm && jm->t == 4) {
-            for (auto& jmsg : jm->arr) {
-                if (jmsg.t != 5) continue;
-                AiMsg m;
-                const Jv* jr = jmsg.Get(L"r");
-                if (jr && jr->num == 2) {
-                    m.role = 2;
-                    const Jv* js = jmsg.Get(L"steps");
-                    if (js && js->t == 4) {
-                        for (auto& jst : js->arr) {
-                            if (jst.t != 5) continue;
-                            AiToolStep t;
-                            auto num = [&jst](const wchar_t* k, int def) {
-                                const Jv* v2 = jst.Get(k);
-                                return (v2 && v2->t == 2) ? (int)v2->num : def;
-                            };
-                            t.kind = num(L"k", 0);
-                            t.state = num(L"st", 2);
-                            t.count = num(L"n", -1);
-                            const Jv* vm = jst.Get(L"ms");
-                            t.elapsedMs = (vm && vm->t == 2) ? (long long)vm->num : -1;
-                            t.name = jst.S(L"name");
-                            t.argz = jst.S(L"argz");
-                            t.mode = jst.S(L"mode");
-                            t.query = jst.S(L"query");
-                            t.err = jst.S(L"err");
-                            const Jv* jtp = jst.Get(L"top");
-                            if (jtp && jtp->t == 4)
-                                for (auto& jp : jtp->arr) if (jp.t == 3) t.top.push_back(jp.str);
-                            const Jv* ja = jst.Get(L"adj");
-                            if (ja && ja->t == 5) {
-                                const Jv* jk = ja->Get(L"kind");
-                                t.adj.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
-                                t.adj.win = ja->S(L"win");
-                                const Jv* ji = ja->Get(L"items");
-                                if (ji && ji->t == 4)
-                                    for (auto& jai : ji->arr) {
-                                        if (jai.t != 5) continue;
-                                        AiAdjustItem it;
-                                        it.key = jai.S(L"key");
-                                        it.val = jai.S(L"val");
-                                        it.json = U8(jai.S(L"json"));
-                                        const Jv* js2 = jai.Get(L"st");
-                                        it.state = (js2 && js2->t == 2) ? (int)js2->num : 0;
-                                        it.err = jai.S(L"err");
-                                        t.adj.items.push_back(std::move(it));
-                                    }
-                            }
-                            if (t.state < 2) {   /* 存档时的在途步骤 = 进程已结束, 折算为已中止 */
-                                t.state = 3;
-                                if (t.err.empty()) t.err = L"已中止";
-                            }
-                            m.steps.push_back(t);
-                        }
-                    }
-                    if (m.steps.empty()) continue;
-                } else {
-                    m.role = (jr && jr->num == 1) ? 1 : 0;
-                    m.text = jmsg.S(L"text");
-                    m.reason = jmsg.S(L"reason");
-                    const Jv* ja2 = jmsg.Get(L"att");
-                    if (ja2 && ja2->t == 4) {
-                        for (auto& jatt : ja2->arr) {
-                            if (jatt.t != 5) continue;
-                            AiAttach a;
-                            const Jv* jk = jatt.Get(L"k");
-                            a.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
-                            if (a.kind < 0 || a.kind > 2) a.kind = 0;
-                            a.name = jatt.S(L"n");
-                            a.dataUrl = jatt.S(L"u");
-                            m.atts.push_back(std::move(a));
-                        }
-                    }
-                    if (m.text.empty() && m.reason.empty() && m.atts.empty()) continue;
+    if (v.t == 4) {
+        for (auto& jc : v.arr) {
+            AiConv c;
+            if (!HistConvFromJson(jc, c) || !c.id) continue;
+            picojson::object oc;
+            HistConvToJson(c, oc);
+            std::string u8 = picojson::value(oc).serialize();
+            g_host->StorageSet(g_ctx, U8(HistConvFile(c.id)).c_str(), u8.c_str(), (int)u8.size());
+            AiConvRef r;
+            r.id = c.id;
+            r.t = c.t;
+            r.title = c.title;
+            r.file = HistConvFile(c.id);
+            g_hist.push_back(std::move(r));
+        }
+        HistIdxSave();
+    }
+    g_host->StorageRemove(g_ctx, "历史");   /* 解析失败也删: 半截数据救不回来, 留着只会反复重迁 */
+}
+void HistLoad() {
+    g_hist.clear();
+    if (!g_host) return;
+    /* 只读索引 (元数据, 恒几 KB): 会话正文留在各自文件里, load 时 HistGet 按需取 */
+    int n = g_host->StorageGet(g_ctx, "历史索引", NULL, 0);
+    if (n > 0) {
+        std::string buf((size_t)n + 1, '\0');
+        n = g_host->StorageGet(g_ctx, "历史索引", &buf[0], n);
+        if (n > 0) {
+            buf.resize((size_t)n);
+            buf.push_back(0);
+            Jv v = JsonParseW(W8(buf.c_str()));
+            if (v.t == 4) {
+                for (auto& je : v.arr) {
+                    if (je.t != 5) continue;
+                    AiConvRef r;
+                    const Jv* ji = je.Get(L"id");
+                    r.id = (ji && ji->t == 2) ? (unsigned long long)ji->num
+                          : (unsigned long long)wcstoull(je.S(L"id").c_str(), NULL, 10);
+                    if (!r.id) continue;   /* 无 id 不可寻址, 丢弃 */
+                    r.file = je.S(L"文件名");
+                    if (r.file.empty()) r.file = HistConvFile(r.id);   /* 旧索引缺文件名 = 推导兜底 */
+                    r.title = je.S(L"会话标题");
+                    const Jv* jt = je.Get(L"时间");
+                    if (jt && jt->t == 2) r.t = (long long)jt->num;
+                    bool dup = false;   /* 同 id 重复条目取先出现的 (后写覆盖前写为 upsert 语义) */
+                    for (const AiConvRef& x : g_hist)
+                        if (x.id == r.id) { dup = true; break; }
+                    if (!dup) g_hist.push_back(std::move(r));
                 }
-                if (c.msgs.size() < AI_MSG_MAX) c.msgs.push_back(m);
             }
         }
-        if (!c.msgs.empty()) {
-            g_hist.push_back(c);
-            if (c.id >= g_nextConvId) g_nextConvId = c.id + 1;
-        }
     }
-    while (g_hist.size() > AI_CONV_MAX) g_hist.erase(g_hist.begin());   /* 最旧丢弃 */
+    if (g_hist.empty()) MigrateHistFromLegacy();   /* 索引缺席 = 首次运行或旧版数据, 一次性搬入 */
+    while (g_hist.size() > AI_CONV_MAX) {          /* 最旧丢弃 (索引层兜底; 正常落盘时已裁) */
+        if (!g_hist.front().file.empty())
+            g_host->StorageRemove(g_ctx, U8(g_hist.front().file).c_str());
+        g_hist.erase(g_hist.begin());
+    }
+    for (const AiConvRef& r : g_hist)
+        if (r.id >= g_nextConvId) g_nextConvId = r.id + 1;
 }
-/* 当前会话落库 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具卡片组 (role==2) 一并落库。
+/* 当前会话落盘 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具卡片组 (role==2) 一并落库。
+ * 落盘 = 会话正文写自己的文件 (HistConvFile) + 索引条目原位更新/追加 (HistIdxSave)。
  * 存储预算: 会话内全部附件 dataUrl 总量超 AI_ATT_HIST_BUDGET 时, 最旧的先清成占位
  * (kind/name 留着渲染"已清理", dataUrl 清空 = 不再上请求) — 防大视频把存储值撑失控。 */
 unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>& msgs) {
@@ -584,13 +688,54 @@ unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>
             budget = 0;
         }
     }
-    for (size_t i = 0; i < g_hist.size(); i++) {
-        if (g_hist[i].id == c.id) { g_hist[i] = c; HistSave(); return c.id; }
+    /* 会话正文写自己的文件 (只动这一个会话, 别的会话文件不重写) */
+    if (g_host) {
+        picojson::object oc;
+        HistConvToJson(c, oc);
+        std::string u8 = picojson::value(oc).serialize();
+        g_host->StorageSet(g_ctx, U8(HistConvFile(c.id)).c_str(), u8.c_str(), (int)u8.size());
     }
-    g_hist.push_back(c);
-    while (g_hist.size() > AI_CONV_MAX) g_hist.erase(g_hist.begin());
-    HistSave();
+    for (size_t i = 0; i < g_hist.size(); i++) {
+        if (g_hist[i].id != c.id) continue;
+        g_hist[i].t = c.t;   /* 索引原位更新 (正文已在上面落盘) */
+        g_hist[i].title = c.title;
+        HistIdxSave();
+        return c.id;
+    }
+    AiConvRef r;
+    r.id = c.id;
+    r.t = c.t;
+    r.title = c.title;
+    r.file = HistConvFile(c.id);
+    g_hist.push_back(std::move(r));
+    while (g_hist.size() > AI_CONV_MAX) {   /* 挤出最旧 = 连它的正文文件一起删 */
+        if (g_host && !g_hist.front().file.empty())
+            g_host->StorageRemove(g_ctx, U8(g_hist.front().file).c_str());
+        g_hist.erase(g_hist.begin());
+    }
+    HistIdxSave();
     return c.id;
+}
+
+/* 删除会话 (侧栏删除 / 手动删光当前问答): 正文文件 + 索引条目一并移除 */
+void HistRemove(unsigned long long id) {
+    for (size_t i = 0; i < g_hist.size(); i++) {
+        if (g_hist[i].id != id) continue;
+        if (g_host && !g_hist[i].file.empty())
+            g_host->StorageRemove(g_ctx, U8(g_hist[i].file).c_str());
+        g_hist.erase(g_hist.begin() + i);
+        HistIdxSave();
+        return;
+    }
+}
+
+/* 清空历史: 每个会话的正文文件 + 索引一并清掉 */
+void HistClearAll() {
+    if (g_host)
+        for (const AiConvRef& r : g_hist)
+            if (!r.file.empty()) g_host->StorageRemove(g_ctx, U8(r.file).c_str());
+    g_hist.clear();
+    HistIdxSave();
 }
 
 /* ---- 颜色 ---- */
