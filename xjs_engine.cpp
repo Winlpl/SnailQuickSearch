@@ -1114,7 +1114,7 @@ bool XjsFilterConfigApply(const std::vector<XjsFilterItem>& rows) {
     if (!g_engine) return false;
     std::string json = XjsFilterJsonMake(rows);
     /* sync=FALSE (正式版口径): 仅对之后入库的文件生效, 已入库文件的分类需重建索引才重算 */
-    if (xjs_filter_SetFilterJSON(g_engine, json.c_str(), FALSE) == FALSE) return false;
+    if (xjs_filter_SetFilterJSON(g_engine, json.c_str(), FALSE, FALSE) == FALSE) return false;
     g_savedFilterJson = json;
     XjsSaveConfig();
     return true;
@@ -1125,7 +1125,7 @@ bool XjsAliasConfigApply(const std::vector<XjsAliasItem>& rows) {
     std::string json = XjsAliasJsonMake(rows);
     /* sync=TRUE (正式版口径 "保存后立即生效"): 命中新配置且当前无别名的已入库行立即写入;
        大库同步遍历可能耗时数百毫秒~数秒, 遍历/保存/加载期间引擎拒绝 (35) */
-    if (xjs_alias_SetAliasJSON(g_engine, json.c_str(), TRUE) == FALSE) return false;
+    if (xjs_alias_SetAliasJSON(g_engine, json.c_str(), TRUE, TRUE) == FALSE) return false;
     g_savedAliasJson = json;
     XjsSaveConfig();
     return true;
@@ -1155,11 +1155,11 @@ void XjsEngineApplySavedConfigs() {
     std::string filterJson = g_savedFilterJson;
     bool filterFromFile = filterJson.empty();
     if (filterFromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Config\\Filter.json", &filterJson);
-    if (!filterJson.empty() && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), FALSE)) {
+    if (!filterJson.empty() && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), FALSE, FALSE)) {
         /* 首次播种追加 sync=TRUE (别名同款): 一次性回填已入库行的分类; 35=忙 只废播种不废
            配置, 下次启动重试。成功即把词典原文存进 "文件分类" 键 —— 此后键非空不再走文件,
            一次全库回填的成本不逐启动重付 */
-        if (filterFromFile && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), TRUE)) {
+        if (filterFromFile && xjs_filter_SetFilterJSON(g_engine, filterJson.c_str(), TRUE, TRUE)) {
             g_savedFilterJson = filterJson;
             XjsSaveConfig();
         }
@@ -1171,13 +1171,13 @@ void XjsEngineApplySavedConfigs() {
     bool fromFile = alias.empty();
     if (fromFile) XjsReadUtf8File(XjsGetExeDir() + L"\\Config\\Alias.json", &alias);
     if (alias.empty()) return;
-    if (!xjs_alias_SetAliasJSON(g_engine, alias.c_str(), FALSE)) return;   /* 引擎拒绝 = 配置不下发, 下次启动重试 */
+    if (!xjs_alias_SetAliasJSON(g_engine, alias.c_str(), FALSE, FALSE)) return;   /* 引擎拒绝 = 配置不下发, 下次启动重试 */
     if (!fromFile) return;
     /* 首次播种追加 sync=TRUE: 一次性回填已入库且"无别名"的行 (正式版设置页保存同款; 否则旧库
        必须重建索引才见别名)。35=忙 (扫描/保存并发) 只废回填不废配置, 下次启动重试;
        成功即把词典原文存进 "路径别名" 键 —— 此后键非空不再走文件 (正式版以回写后的
        Alias.json 为源, 等效), 全库遍历的一次性成本也不逐启动重付 */
-    if (xjs_alias_SetAliasJSON(g_engine, alias.c_str(), TRUE)) {
+    if (xjs_alias_SetAliasJSON(g_engine, alias.c_str(), TRUE, TRUE)) {
         g_savedAliasJson = alias;
         XjsSaveConfig();
     }

@@ -49,8 +49,11 @@ static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
 static CRITICAL_SECTION g_emitCs;
 static std::string g_emitBuf;
 static bool g_emitCut = false;
+static size_t g_emitDrop = 0;    /* 截断丢弃的字节量 (读取点取走, 精确省略量回喂模型 —
+                                    dsh output-retention 口径: 省略数恒给精确值) */
 static std::string g_rowBuf;     /* ai.row 数据行 (逗号衔接的 JSON 行, 完成后包成 [..] 回喂; 同锁同封顶) */
 static bool g_rowCut = false;
+static int g_rowDrop = 0;        /* 装不下的行数 (精确省略行数回喂模型) */
 static std::string g_srchSet8;   /* g_agentRes 搜索设置 JSON 快照 (创建时取一次, 注入系统提示词; 经 g_emitCs 护) */
 
 /* UI 编组在飞登记 (声明提前 — AgentToolInit/Shutdown 在此就触碰; 机制本体见下方"宿主扩展 API"节) */
@@ -61,9 +64,12 @@ static void EmitAppendLine(const std::string& line) {
     EnterCriticalSection(&g_emitCs);
     if (g_emitBuf.size() + line.size() <= 16384) {
         g_emitBuf += line;
-    } else if (!g_emitCut) {
+    } else if (g_emitCut) {
+        g_emitDrop += line.size();   /* 已截断过: 整行计弃 (首行按整行算, 误差一次以内) */
+    } else {
         g_emitCut = true;
         g_emitBuf += "\n... (ai.print 输出过长, 已截断)";
+        g_emitDrop += line.size();
     }
     LeaveCriticalSection(&g_emitCs);
 }
@@ -113,7 +119,8 @@ static int AgentLuaRow(void* L) {
     if (id <= 0) return 0;
     xjs_engine* eng = xjs_GetDefaultEngine();
     if (!eng) return 0;
-    std::string row = "{\"id\":" + std::to_string(id);
+    picojson::object row;
+    row["id"] = JN(id);
     bool miss[ROWF_COUNT] = { false };
     int fn = n >= 2 ? n - 1 : 1;   /* 字段实参个数; 无实参 = 缺省"名称" */
     for (int k = 0; k < fn; k++) {
@@ -122,63 +129,58 @@ static int AgentLuaRow(void* L) {
         const std::string s(f);
         if (s == "名称") {
             const char* v = xjs_db_GetName(eng, (int)id);
-            row += ",\"名称\":";
-            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+            if (v) row["名称"] = JS(W8(v));
         } else if (s == "路径") {
             const char* v = xjs_db_GetPath(eng, (int)id);
-            row += ",\"路径\":";
-            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+            if (v) row["路径"] = JS(W8(v));
         } else if (s == "大小") {
             if (xjs_db_IsFieldEnabled(eng, "文件大小"))
-                row += ",\"大小\":" + std::to_string(xjs_db_GetFileSize(eng, (int)id));
+                row["大小"] = JN(xjs_db_GetFileSize(eng, (int)id));
             else miss[ROWF_SZ] = true;
         } else if (s == "修改时间") {
             if (xjs_db_IsFieldEnabled(eng, "修改时间"))
-                row += ",\"修改时间\":" + std::to_string(xjs_db_GetModifyTime(eng, (int)id) / 1000);
+                row["修改时间"] = JN(xjs_db_GetModifyTime(eng, (int)id) / 1000);
             else miss[ROWF_MT] = true;
         } else if (s == "创建时间") {
             if (xjs_db_IsFieldEnabled(eng, "创建时间"))
-                row += ",\"创建时间\":" + std::to_string(xjs_db_GetCreateTime(eng, (int)id) / 1000);
+                row["创建时间"] = JN(xjs_db_GetCreateTime(eng, (int)id) / 1000);
             else miss[ROWF_CT] = true;
         } else if (s == "访问时间") {
             if (xjs_db_IsFieldEnabled(eng, "访问时间"))
-                row += ",\"访问时间\":" + std::to_string(xjs_db_GetAccessTime(eng, (int)id) / 1000);
+                row["访问时间"] = JN(xjs_db_GetAccessTime(eng, (int)id) / 1000);
             else miss[ROWF_AT] = true;
         } else if (s == "扩展名") {
             const char* v = xjs_db_GetFileExt(eng, (int)id);
-            row += ",\"扩展名\":";
-            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+            if (v) row["扩展名"] = JS(W8(v));
         } else if (s == "目录") {
-            row += ",\"目录\":";
-            row += xjs_db_IsDir(eng, (int)id) ? "true" : "false";
+            row["目录"] = JB(xjs_db_IsDir(eng, (int)id) != 0);
         } else if (s == "类型") {
             const char* v = xjs_db_GetFileTypeStr(eng, (int)id);
-            row += ",\"类型\":";
-            row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+            if (v) row["类型"] = JS(W8(v));
         } else if (s == "属性") {
             if (xjs_db_IsFieldEnabled(eng, "文件属性"))
-                row += ",\"属性\":" + std::to_string(xjs_db_GetFileAttributes(eng, (int)id));
+                row["属性"] = JN(xjs_db_GetFileAttributes(eng, (int)id));
             else miss[ROWF_ATTR] = true;
         } else if (s == "别名") {
             if (xjs_db_IsFieldEnabled(eng, "别名")) {
                 const char* v = xjs_db_GetAlias(eng, (int)id);
-                row += ",\"别名\":";
-                row += v ? JsonEscapeUtf8(W8(v)) : std::string("\"\"");
+                if (v) row["别名"] = JS(W8(v));
             } else miss[ROWF_ALIAS] = true;
         } else if (s == "评分") {
             if (xjs_db_IsFieldEnabled(eng, "文件评分"))
-                row += ",\"评分\":" + std::to_string(xjs_db_GetRating(eng, (int)id));
+                row["评分"] = JN(xjs_db_GetRating(eng, (int)id));
             else miss[ROWF_RATING] = true;
         }
         /* 未识别的字段名静默忽略 (有效名单在提示词/描述里) */
     }
-    row += '}';
     EnterCriticalSection(&g_emitCs);
-    if (g_rowBuf.size() + row.size() <= 16384) {
+    std::string row8 = picojson::value(row).serialize();
+    if (g_rowBuf.size() + row8.size() <= 16384) {
         if (!g_rowBuf.empty()) g_rowBuf += ',';
-        g_rowBuf += row;
+        g_rowBuf += row8;
     } else {
         g_rowCut = true;
+        g_rowDrop++;   /* 精确省略行数 (回喂时告知模型) */
     }
     for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = g_rowMiss[f] || miss[f];
     LeaveCriticalSection(&g_emitCs);
@@ -196,8 +198,10 @@ void AgentToolShutdown() {
     g_agentTopIds.clear();
     g_emitBuf.clear();   /* 到此工作线程已全部 join, 无并发 */
     g_emitCut = false;
+    g_emitDrop = 0;
     g_rowBuf.clear();
     g_rowCut = false;
+    g_rowDrop = 0;
     for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
     for (auto* jb : s_inflight) {   /* 投递后无人认领的编组作业 (消息窗口先没了) 代为回收 */
         if (jb->done) CloseHandle(jb->done);
@@ -289,41 +293,6 @@ template <class F> static void ApiCallRc(std::wstring* err, F fn) {
     if (rc != XJS_PLUGIN_OK) *err = ApiErrText(rc);
 }
 
-/* Jv → 宽 JSON 文本 (合并读结果 / 发给同伴插件的载荷序列化用) */
-static void JvAppend(const Jv& v, std::wstring* out) {
-    switch (v.t) {
-        case 0: *out += L"null"; break;
-        case 1: *out += v.b ? L"true" : L"false"; break;
-        case 2: {
-            wchar_t nb[40];
-            swprintf(nb, 40, L"%.17g", v.num);
-            *out += nb;
-            break;
-        }
-        case 3: *out += W8(JsonEscapeUtf8(v.str).c_str()); break;
-        case 4: {
-            *out += L"[";
-            bool f = true;
-            for (auto& e : v.arr) { if (!f) *out += L","; f = false; JvAppend(e, out); }
-            *out += L"]";
-            break;
-        }
-        case 5: {
-            *out += L"{";
-            bool f = true;
-            for (auto& kv : v.obj) {
-                if (!f) *out += L",";
-                f = false;
-                *out += W8(JsonEscapeUtf8(kv.first).c_str());
-                *out += L":";
-                JvAppend(kv.second, out);
-            }
-            *out += L"}";
-            break;
-        }
-    }
-}
-
 /* 窗口名称 → 令牌 (UI 线程; 名称空 = 默认令牌=对话所在窗)。查无 = *err 设描述, 返 0 */
 static long long UiWindowToken(const std::wstring& name, long long defTok, std::wstring* err) {
     if (name.empty()) return defTok;
@@ -349,24 +318,13 @@ static void UiStateMerged(long long tok, std::string* out, std::wstring* err) {
     if (!err->empty()) return;
     std::wstring e2;
     ApiCallOut(&se8, &e2, [&](char* b, int c) { return g_api.settingsGet(g_ctx, (XjsWindowToken)tok, b, c); });
-    Jv a = JsonParseW(W8(st8.c_str()));
-    Jv b = e2.empty() ? Jv() : JsonParseW(W8(se8.c_str()));
-    std::wstring m = L"{";
-    bool first = true;
-    auto put = [&](const std::wstring& k, const Jv& val) {
-        if (!first) m += L",";
-        first = false;
-        m += W8(JsonEscapeUtf8(k).c_str());
-        m += L":";
-        JvAppend(val, &m);
-    };
-    if (a.t == 5)
-        for (auto& kv : a.obj) put(kv.first, kv.second);
-    if (b.t == 5)
-        for (auto& kv : b.obj)
-            if (a.t != 5 || !a.Get(kv.first.c_str())) put(kv.first, kv.second);
-    m += L"}";
-    *out = U8(m);
+    picojson::value va, vb;
+    if (!JParseU8(va, st8) || !va.is<picojson::object>()) { *err = L"窗口状态解析失败"; return; }
+    picojson::object m = va.get<picojson::object>();
+    if (!e2.empty() && JParseU8(vb, se8) && vb.is<picojson::object>())
+        for (auto& kv : vb.get<picojson::object>())
+            if (!m.count(kv.first)) m[kv.first] = kv.second;   /* 后者只补前者没有的键 */
+    *out = picojson::value(m).serialize();
 }
 
 /* UI 线程分派 (g_msgwnd wndproc 调; 全部宿主扩展 API/宿主表 UI 函数都在这条线上) */
@@ -477,10 +435,11 @@ static void UiDispatchRun(AiUiJob* jb) {
             std::wstring wname = o.S(L"窗口名称");
             std::wstring code = o.S(L"语言");
             if (code.empty()) { jb->err = L"宿主未返回语言设置 (宿主版本过旧?)"; return; }
-            std::wstring j2 = L"{\"窗口名称\":" + W8(JsonEscapeUtf8(wname).c_str());
-            j2 += L",\"语言\":" + W8(JsonEscapeUtf8(code).c_str());
-            j2 += L",\"说明\":\"auto=跟随系统; 切换用 set_language\"}";
-            jb->out8 = U8(j2);
+            picojson::object o2;
+            o2[U8(L"窗口名称")] = JS(wname);
+            o2[U8(L"语言")] = JS(code);
+            o2[U8(L"说明")] = JS(L"auto=跟随系统; 切换用 set_language");
+            jb->out8 = picojson::value(o2).serialize();
             return;
         }
         case UIW_LIST_LANGS:
@@ -596,16 +555,14 @@ static std::wstring ProposeAdjustCard(AiToolStep* st, int kind, const std::wstri
     }
     st->argz = L"待应用: " + list;
     if (st->argz.size() > 200) { st->argz.resize(200); st->argz += L"…"; }   /* 卡头截 200 (同 ArgzCut, 定义在其后故内联) */
-    std::wstring j = L"{\"状态\":\"待用户应用\",\"条目\":[";
-    for (size_t i = 0; i < st->adj.items.size(); i++) {
-        if (i) j += L",";
-        j += L"\"";
-        j += W8(JsonEscapeUtf8(st->adj.items[i].key + L" → " + st->adj.items[i].val).c_str());
-        j += L"\"";
-    }
-    j += L"],\"说明\":\"改动已列在\\\"待应用的调整\\\"卡片, 用户点\\\"应用\\\"才会生效;"
-         L"用一句话请用户到卡片上确认 (可逐项应用或忽略), 绝不宣称已生效, 不要重复提交相同调整\"}";
-    st->res8 = U8(j);
+    picojson::object o;
+    o[U8(L"状态")] = JS(L"待用户应用");
+    picojson::array items8;
+    for (auto& it : st->adj.items) items8.push_back(JS(it.key + L" → " + it.val));
+    o[U8(L"条目")] = picojson::value(items8);
+    o[U8(L"说明")] = JS(L"改动已列在\"待应用的调整\"卡片, 用户点\"应用\"才会生效;"
+                        L"用一句话请用户到卡片上确认 (可逐项应用或忽略), 绝不宣称已生效, 不要重复提交相同调整");
+    st->res8 = picojson::value(o).serialize();
     return L"";
 }
 
@@ -772,8 +729,10 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         EnterCriticalSection(&g_emitCs);
         g_emitBuf.clear();
         g_emitCut = false;
+        g_emitDrop = 0;
         g_rowBuf.clear();
         g_rowCut = false;
+        g_rowDrop = 0;
         for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
         LeaveCriticalSection(&g_emitCs);
         /* 临时调试观察口: 先落盘再提交 (VM 可能 Query 返回即开跑) */
@@ -827,6 +786,9 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         emit8 = g_emitBuf;
         g_emitBuf.clear();
         g_emitCut = false;
+        size_t emitDrop = g_emitDrop;   /* 精确省略量随缓冲一并取走 */
+        g_emitDrop = 0;
+        int rowDrop = g_rowDrop;
         std::string missNote;
         for (int f = 0; f < ROWF_COUNT; f++) {
             if (!g_rowMiss[f]) continue;
@@ -839,7 +801,9 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
             wrapped += g_rowBuf;
             if (g_rowCut) {
                 if (!g_rowBuf.empty()) wrapped += ',';
-                wrapped += "\"(行数过多, 后续已截断)\"";
+                wrapped += "\"(行数过多, 后续已截断";
+                if (rowDrop > 0) wrapped += ", 丢弃 " + std::to_string(rowDrop) + " 行";
+                wrapped += ")\"";
             }
             wrapped += "]";
             rowsRaw = wrapped;   /* 合法 JSON, 拼装时直接并入不再转义 */
@@ -847,14 +811,19 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
         g_rowBuf.clear();
         g_rowCut = false;
+        g_rowDrop = 0;
         LeaveCriticalSection(&g_emitCs);
+        if (emitDrop > 0) {   /* 截断附精确丢弃量 (模型可自行决定缩小输出重跑) */
+            emit8 += "\n(输出过长被截断, 丢弃约 " + std::to_string(emitDrop) + " 字节; "
+                     "需要时把统计拆小或分批输出重跑)";
+        }
     }
     /* 样本 TOP 20: 完整路径进 st->top (卡片展开显示/历史落库用); 喂模型的 JSON 现场拼进
      * res8 — 模型只拿 [FileId,文件名], **不拿路径** (回答里的文件链接只写 ID, 打开/定位/
      * 复制路径由程序按 ID 解析; GetPath/GetName 指针为线程本地缓存, 必须立即拷贝) */
     g_agentTopIds.clear();
     st->top.clear();
-    std::wstring files;
+    picojson::array files;
     int n = st->count < 20 ? st->count : 20;
     for (int i = 0; i < n; i++) {
         int fid = xjs_result_GetFileId(g_agentRes, i);
@@ -863,28 +832,23 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         const char* p = xjs_db_GetPath(eng, fid);
         st->top.push_back(p ? W8(p) : L"(路径不可用)");
         const char* nm = xjs_db_GetName(eng, fid);
-        if (!files.empty()) files += L",";
-        wchar_t nb[32];
-        swprintf(nb, 32, L"%d", fid);
-        files += L"[" + std::wstring(nb) + L",\"";
-        files += W8(JsonEscapeUtf8(W8(nm && *nm ? nm : "(未命名)")).c_str());
-        files += L"\"]";
+        picojson::array pair;
+        pair.push_back(JN(fid));
+        pair.push_back(JS(nm && *nm ? W8(nm) : L"(未命名)"));
+        files.push_back(picojson::value(pair));
     }
-    wchar_t head[128];
-    swprintf(head, 128, L"{\"count\":%d,\"elapsedMs\":%lld,\"files\":[", st->count, st->elapsedMs);
-    std::wstring feed = head;
-    feed += files;
-    feed += L"]";
+    picojson::object feed;
+    feed["count"] = JN(st->count);
+    feed["elapsedMs"] = JN(st->elapsedMs);
+    feed["files"] = picojson::value(files);
     if (!emit8.empty()) {   /* lua 脚本 ai.print 的过程/统计输出 */
-        feed += L",\"output\":";
-        feed += W8(JsonEscapeUtf8(W8(emit8.c_str())).c_str());
+        feed["output"] = JS(W8(emit8.c_str()));
     }
-    if (!rowsRaw.empty()) {   /* lua 脚本 ai.row 数据行 */
-        feed += L",\"rows\":";
-        feed += W8(rowsRaw.c_str());
+    if (!rowsRaw.empty()) {   /* lua 脚本 ai.row 数据行 (拼装时已是合法 JSON 数组文本, 原样并入) */
+        picojson::value rows;
+        if (JParseU8(rows, rowsRaw)) feed["rows"] = rows;
     }
-    feed += L"}";
-    st->res8 = U8(feed);
+    st->res8 = picojson::value(feed).serialize();
     return L"";
 }
 
@@ -917,6 +881,346 @@ static std::wstring AgentToolCopyPaths() {
     return L"";
 }
 
+/* ==================== run_command: 执行外部程序 (cmd/powershell) ====================
+ * 管线口径对齐 DeepSeek Harness (dsh) 的 shell 执行器:
+ *   - 进程树防孤儿 = kill-on-close Job Object; CREATE_SUSPENDED 先挂起、入 Job、再恢复
+ *     (消除"子进程先拉孙进程再被入 Job"的竞态窗口), 终止 = TerminateJobObject 一次杀整棵树
+ *     (Windows 没有优雅终止, dsh 同款立即强杀);
+ *   - stdio = 匿名管道 (子端开继承位, 父端立即关子侧副本), stdout/stderr 各一条读线程阻塞
+ *     ReadFile (管道死锁的第一防线是"父进程别攥着子端句柄", 第二是读不占等待循环);
+ *   - 输出 = 每流 32KB 保尾弃头 (错误与最终结果聚在尾部, dsh tail-keep 口径), 丢弃量精确回喂;
+ *   - 结果 = stdout 原文 + [stderr] 分节 + 末行 [exit code: N] (仅非零, dsh render 契约);
+ *   - 凭据不外泄: 子进程环境剔除名字含 KEY/PASSWORD/SECRET/TOKEN/密钥/密码 的变量
+ *     (dsh scrubbedParentEnv 口径), 另补 NO_COLOR=1 防颜色码污染解析。
+ * 编码: cmd 前缀 chcp 65001 统一输出编码 (/d 跳过 AutoRun 脚本); powershell 用
+ * -EncodedCommand (base64 UTF-16LE) 免引号转义地狱 + [Console]::OutputEncoding 前导;
+ * 解码先按 UTF-8 严格试, 失败回落 OEM 页 (老工具不理会控制台码页时仍能读)。
+ * 权限三道闸: ① manifest "exec" 权限 (宿主启用确认框告知) ② execPolicy 用户档位
+ * (禁用/询问/允许, 询问 = 每条命令出确认卡) ③ 高危特征扫描 (ExecRiskText, 结果挂卡)。
+ * "允许一次"只放行完全相同的调用键一次 (AiJob::execGrant), 不持久放权 — dsh 审批
+ * 全部一次性 (allowed-once) 的口径。 */
+static const size_t EXEC_STREAM_CAP = 32768;   /* 每流保尾字节量 */
+
+static std::string B64EncStr(const unsigned char* d, size_t n) {   /* RFC 4648 (EncodedCommand 载荷) */
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string r;
+    r.reserve((n + 2) / 3 * 4);
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)d[i] << 16;
+        if (i + 1 < n) v |= (unsigned)d[i + 1] << 8;
+        if (i + 2 < n) v |= (unsigned)d[i + 2];
+        r += T[(v >> 18) & 63];
+        r += T[(v >> 12) & 63];
+        r += (i + 1 < n) ? T[(v >> 6) & 63] : '=';
+        r += (i + 2 < n) ? T[v & 63] : '=';
+    }
+    return r;
+}
+
+/* 单流收集: 读线程独写 Push, 主线程收尾 Take (解码 UTF-8 → OEM 回落) */
+struct ExecStream {
+    CRITICAL_SECTION cs;
+    std::string tail;
+    size_t dropped = 0;                  /* 丢弃头部字节量 (精确回喂) */
+    void Init() { InitializeCriticalSectionAndSpinCount(&cs, 100); }
+    void Term() { DeleteCriticalSection(&cs); }
+    void Push(const char* d, size_t n) {
+        EnterCriticalSection(&cs);
+        tail.append(d, n);
+        if (tail.size() > EXEC_STREAM_CAP) {
+            dropped += tail.size() - EXEC_STREAM_CAP;
+            tail.erase(0, tail.size() - EXEC_STREAM_CAP);
+        }
+        LeaveCriticalSection(&cs);
+    }
+    std::wstring Take(size_t* droppedOut) {
+        EnterCriticalSection(&cs);
+        std::string raw = tail;
+        size_t dp = dropped;
+        LeaveCriticalSection(&cs);
+        *droppedOut = dp;
+        if (raw.empty()) return L"";
+        int wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.data(), (int)raw.size(), NULL, 0);
+        if (wl > 0) {
+            std::wstring w((size_t)wl, 0);
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.data(), (int)raw.size(), &w[0], wl);
+            return w;
+        }
+        UINT oem = GetOEMCP();
+        wl = MultiByteToWideChar(oem, 0, raw.data(), (int)raw.size(), NULL, 0);
+        std::wstring w(wl > 0 ? (size_t)wl : 0, 0);
+        if (wl > 0) MultiByteToWideChar(oem, 0, raw.data(), (int)raw.size(), &w[0], wl);
+        return w;
+    }
+};
+
+/* 子进程环境块: 继承父环境但剔除疑似密钥变量, 补 NO_COLOR=1; 按 key 小写排序去重
+ * (CreateProcessW 的 Unicode 环境块要求排序), 双 \0 结尾 */
+static std::wstring BuildChildEnv() {
+    auto lowStr = [](const std::wstring& s) {
+        std::wstring r = s;
+        for (auto& c : r) c = towlower(c);
+        return r;
+    };
+    std::vector<std::pair<std::wstring, std::wstring>> kv;
+    wchar_t* blk = GetEnvironmentStringsW();
+    if (blk) {
+        const wchar_t* p = blk;
+        while (*p) {
+            const wchar_t* eq = wcschr(p, L'=');
+            if (eq && eq != p) {
+                std::wstring up = lowStr(std::wstring(p, eq));
+                /* 名字含任一敏感词即剔 — 宁可错杀 (monkey 之类误伤无害) */
+                if (up.find(L"key") == std::wstring::npos &&
+                    up.find(L"password") == std::wstring::npos &&
+                    up.find(L"secret") == std::wstring::npos &&
+                    up.find(L"token") == std::wstring::npos &&
+                    up.find(L"密钥") == std::wstring::npos &&
+                    up.find(L"密码") == std::wstring::npos)
+                    kv.emplace_back(std::wstring(p, eq), std::wstring(eq + 1));
+            }
+            p += wcslen(p) + 1;
+        }
+        FreeEnvironmentStringsW(blk);
+    }
+    kv.emplace_back(L"NO_COLOR", L"1");
+    std::sort(kv.begin(), kv.end(), [&lowStr](auto& a, auto& b) { return lowStr(a.first) < lowStr(b.first); });
+    std::wstring out;
+    for (size_t i = 0; i < kv.size(); i++) {
+        if (i && lowStr(kv[i].first) == lowStr(kv[i - 1].first)) continue;
+        out += kv[i].first;
+        out += L'=';
+        out += kv[i].second;
+        out += L'\0';
+    }
+    out += L'\0';
+    return out;
+}
+
+/* 高危命令特征扫描 (dsh 没有这层 — 它靠沙箱强隔离; 本插件与主程序同权限运行, 必须自建):
+ * 命中即把特征挂上确认卡帮用户快速定位危险点, 只警示不替代用户判断 (小写子串匹配,
+ * 误报可接受, 漏报由确认卡兜底)。 */
+static std::wstring ExecRiskText(const std::wstring& cmdRaw) {
+    static const struct { const wchar_t* pat; const wchar_t* why; } RISK[] = {
+        { L"format ", L"格式化磁盘" },
+        { L"shutdown", L"关机/重启" },
+        { L"diskpart", L"磁盘分区操作" },
+        { L"bcdedit", L"改启动配置" },
+        { L"vssadmin", L"卷影副本(快照)操作" },
+        { L"cipher /w", L"抹除磁盘空闲空间" },
+        { L"reg add", L"写注册表" },
+        { L"reg delete", L"删注册表" },
+        { L"regedit /s", L"静默导入注册表" },
+        { L"reg unload", L"卸载注册表配置单元" },
+        { L"del /s", L"递归删除文件" },
+        { L"rd /s", L"递归删除目录" },
+        { L"rmdir /s", L"递归删除目录" },
+        { L"remove-item", L"删除文件/目录 (PowerShell)" },
+        { L"net user", L"用户账户操作" },
+        { L"net localgroup", L"用户组操作" },
+        { L"sc delete", L"删除系统服务" },
+        { L"sc config", L"改系统服务配置" },
+        { L"taskkill", L"强制结束进程" },
+        { L"stop-process", L"强制结束进程 (PowerShell)" },
+        { L"schtasks", L"计划任务操作" },
+        { L"takeown", L"夺取文件所有权" },
+        { L"icacls", L"改文件 ACL 权限" },
+        { L"set-executionpolicy", L"改 PowerShell 脚本执行策略" },
+        { L"invoke-expression", L"动态执行字符串代码" },
+        { L"-encodedcommand", L"嵌套编码命令 (混淆特征)" },
+        { L"start-process", L"拉起新进程" },
+        { L"certutil -urlcache", L"从网络下载" },
+        { L"bitsadmin /transfer", L"从网络下载" },
+        { L"invoke-webrequest", L"从网络下载" },
+        { L"invoke-restmethod", L"从网络下载" },
+        { L"curl ", L"从网络下载" },
+        { L"curl.exe", L"从网络下载" },
+        { L"wget ", L"从网络下载" },
+    };
+    std::wstring s = cmdRaw;
+    for (auto& c : s) c = towlower(c);
+    std::wstring hits;
+    for (auto& r : RISK) {
+        if (s.find(r.pat) != std::wstring::npos) {
+            if (!hits.empty()) hits += L"、";
+            hits += r.why;
+        }
+    }
+    return hits;
+}
+
+/* run_command 实体 (agent 工作线程直跑, 不碰引擎不持 g_agentCs)。返回错误描述
+ * (空=成功; 超时/输出截断不算错误, 标记写进输出文本回喂模型)。 */
+static std::wstring AgentToolRunCommand(AiJob* j, const std::wstring& shell,
+                                        const std::wstring& command, const std::wstring& workdir,
+                                        long long timeoutMs, AiToolStep* st) {
+    if (command.empty()) return L"command 不能为空";
+    if (shell != L"cmd" && shell != L"powershell") return L"shell 只接受 cmd | powershell";
+    if (timeoutMs <= 0) timeoutMs = 120000;
+    if (timeoutMs < 3000) timeoutMs = 3000;
+    if (timeoutMs > 600000) timeoutMs = 600000;
+
+    /* 工作目录: 必填时必须存在且是目录; 缺省落临时目录 (可写, 误操作伤害最小 —
+     * 命令里的相对路径操作都发生在那里, description 已告知模型) */
+    std::wstring cwd = workdir;
+    if (!cwd.empty()) {
+        DWORD at = GetFileAttributesW(cwd.c_str());
+        if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY))
+            return L"workdir 不存在或不是目录: " + cwd;
+    } else {
+        wchar_t tp[MAX_PATH + 1];
+        DWORD n = GetTempPathW(MAX_PATH, tp);
+        if (n > 0 && n <= MAX_PATH) cwd = tp;
+    }
+
+    std::wstring cmdline;
+    if (shell == L"cmd") {
+        cmdline = L"cmd.exe /d /s /c \"chcp 65001>nul & " + command + L"\"";
+    } else {
+        std::wstring ps = L"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command;
+        cmdline = L"powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+                  + W8(B64EncStr((const unsigned char*)ps.c_str(), ps.size() * sizeof(wchar_t)).c_str());
+    }
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
+    if (!CreatePipe(&outR, &outW, &sa, 0) || !CreatePipe(&errR, &errW, &sa, 0)) {
+        if (outR) CloseHandle(outR);
+        if (outW) CloseHandle(outW);
+        if (errR) CloseHandle(errR);
+        if (errW) CloseHandle(errW);
+        return L"管道创建失败";
+    }
+    /* 子端写句柄开继承, 父端读句柄关继承 (父侧多线程 + 孙进程都不该攥着读端, 否则 EOF 永不来) */
+    SetHandleInformation(outW, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    SetHandleInformation(errW, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
+
+    /* kill-on-close Job 先建好 (建失败 = 失去树杀能力, 进程不放行) */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    bool jobOk = false;
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim = {};
+        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        jobOk = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim)) != FALSE;
+    }
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = NULL;   /* 无 stdin: 误等输入的命令读到无效句柄即失败返回, 不会挂死 */
+    si.hStdOutput = outW;
+    si.hStdError = errW;
+
+    std::wstring envBlk = BuildChildEnv();
+    PROCESS_INFORMATION pi = {};
+    BOOL created = CreateProcessW(NULL, &cmdline[0], NULL, NULL, TRUE,
+                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                                  (LPVOID)envBlk.c_str(), cwd.c_str(), &si, &pi);
+    /* 父侧立即关子端写副本 — 不关的话子进程退出后管道也等不到 EOF (dsh 同款第一防线) */
+    CloseHandle(outW); outW = NULL;
+    CloseHandle(errW); errW = NULL;
+    if (!created) {
+        DWORD err = GetLastError();
+        wchar_t msg[128];
+        swprintf(msg, 128, L"进程创建失败 (Win32 错误 %lu; 命令不存在/路径有误?)", (unsigned long)err);
+        CloseHandle(outR); CloseHandle(errR);
+        if (job) CloseHandle(job);
+        return msg;
+    }
+    if (!jobOk || AssignProcessToJobObject(job, pi.hProcess) == FALSE) {
+        TerminateProcess(pi.hProcess, 1);   /* 入 Job 失败 = 杀不了树, 宁可不放行 */
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(outR); CloseHandle(errR);
+        if (job) CloseHandle(job);
+        return L"进程约束 (Job Object) 建立失败, 已终止该进程";
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    ExecStream so, se;
+    so.Init();
+    se.Init();
+    struct Rw { HANDLE h; ExecStream* s; };
+    auto reader = [](void* pv) -> DWORD {
+        Rw* r = (Rw*)pv;
+        char buf[8192];
+        for (;;) {
+            DWORD got = 0;
+            if (!ReadFile(r->h, buf, sizeof(buf), &got, NULL) || got == 0) break;
+            r->s->Push(buf, got);
+        }
+        CloseHandle(r->h);   /* 读端由读线程关闭 (EOF 后) */
+        return 0;
+    };
+    Rw ro = { outR, &so }, re = { errR, &se };
+    HANDLE tOut = CreateThread(NULL, 0, reader, &ro, 0, NULL);
+    HANDLE tErr = CreateThread(NULL, 0, reader, &re, 0, NULL);
+    if (!tOut) { CloseHandle(outR); }   /* 线程建失败: 手动关读端防泄漏 (该流视为空) */
+    if (!tErr) { CloseHandle(errR); }
+
+    /* 等待: 停止/超时 → TerminateJobObject 杀整棵树; 正常退出后给残余孙进程 2 秒排水窗
+     * (它们可能还攥着管道写端), 超窗同样杀树让读线程拿到 EOF */
+    ULONGLONG t0 = GetTickCount64();
+    ULONGLONG deadline = t0 + (ULONGLONG)timeoutMs;
+    bool timedOut = false, stopped = false;
+    for (;;) {
+        if (InterlockedCompareExchange(&j->abort, 0, 0)) { stopped = true; break; }
+        if (WaitForSingleObject(pi.hProcess, 40) == WAIT_OBJECT_0) break;
+        if (GetTickCount64() >= deadline) { timedOut = true; break; }
+    }
+    if (timedOut || stopped) TerminateJobObject(job, 1);
+    else {
+        ULONGLONG drainT0 = GetTickCount64();
+        while (GetTickCount64() - drainT0 < 2000) {
+            bool outDone = !tOut || WaitForSingleObject(tOut, 0) == WAIT_OBJECT_0;
+            bool errDone = !tErr || WaitForSingleObject(tErr, 0) == WAIT_OBJECT_0;
+            if (outDone && errDone) break;
+            Sleep(20);
+        }
+        TerminateJobObject(job, 1);
+    }
+    if (tOut) { WaitForSingleObject(tOut, 4000); CloseHandle(tOut); }
+    if (tErr) { WaitForSingleObject(tErr, 4000); CloseHandle(tErr); }
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(job);
+
+    size_t dropO = 0, dropE = 0;
+    std::wstring outTxt = so.Take(&dropO);
+    std::wstring errTxt = se.Take(&dropE);
+    so.Term();
+    se.Term();
+    if (stopped) return L"已停止";
+    std::wstring out = outTxt;
+    if (!errTxt.empty()) {
+        if (!out.empty()) out += L'\n';
+        out += L"[stderr]\n" + errTxt;
+    }
+    if (dropO > 0)
+        out += L"\n(stdout 过长已截断: 仅保留尾部 32KB, 丢弃头部 " + std::to_wstring(dropO) +
+               L" 字节 — 请改用更精确的命令缩小输出)";
+    if (dropE > 0)
+        out += L"\n(stderr 过长已截断: 仅保留尾部 32KB, 丢弃头部 " + std::to_wstring(dropE) + L" 字节)";
+    if (out.empty()) out = L"(无输出)";
+    if (timedOut) {
+        wchar_t tb[96];
+        swprintf(tb, 96, L"\n[timed out after %lld ms, 已终止进程树]", timeoutMs);
+        out += tb;
+    } else if (exitCode != 0) {   /* dsh render 契约: exit 标记仅非零出现, 恒为末行 */
+        wchar_t eb[48];
+        swprintf(eb, 48, L"\n[exit code: %lu]", (unsigned long)exitCode);
+        out += eb;
+    }
+    st->res8 = U8(out);
+    st->elapsedMs = (long long)(GetTickCount64() - t0);
+    return L"";
+}
+
 /* ==================== 工具结果省 token (向成熟 agent harness 口径看齐) ====================
  * ① 旧轮工具输出中段裁剪 (ToolOutputPrune): 一轮对话里早先回喂过的超长输出 (get_lua_spec
  *   规范全文/大段 ai.print), 后续每轮重发时只留头尾+占位标记 — 原文已经送达过一次,
@@ -934,9 +1238,12 @@ static size_t PruneUtf8Floor(const std::string& s, size_t pos) {
 }
 static std::string ToolOutputPrune(const std::string& s) {
     if (s.size() <= PRUNE_THRESHOLD) return s;
-    std::string r = s.substr(0, PruneUtf8Floor(s, PRUNE_HEAD));
-    r += "\n…[中段已省略以节约上下文; 此前已完整回喂过, 需要时重新调用该工具]…\n";
-    r += s.substr(PruneUtf8Floor(s, s.size() - PRUNE_TAIL));
+    size_t headEnd = PruneUtf8Floor(s, PRUNE_HEAD);
+    size_t tailBegin = PruneUtf8Floor(s, s.size() - PRUNE_TAIL);
+    std::string r = s.substr(0, headEnd);
+    r += "\n…[中间省略 " + std::to_string(tailBegin - headEnd) +
+         " 字节; 该输出此前已完整回喂过, 需要时重新调用同一工具取回]…\n";
+    r += s.substr(tailBegin);
     return r;
 }
 
@@ -1012,27 +1319,28 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         st->argz = L"作者与捐赠";
         bool w = !DonateQrDataUrl(0).empty();
         bool a = !DonateQrDataUrl(1).empty();
-        std::wstring j = L"{\"软件\":\"蜗牛快搜 SnailQuickSearch — Windows 本地文件即时搜索工具:"
-                         L"全盘索引, 输入即搜, 秒级定位, 同规模索引下常驻内存更低;"
-                         L"纯 Direct2D 自绘界面, 内置可编程插件系统\"";
-        j += L",\"授权\":\"免费软件: 个人与商业环境均可免费使用; 成品层源码开放查看/修改/二次开发;"
-             L"内置 xunjieso 搜索引擎为版权人自研闭源组件, 随软件免费授权使用\"";
-        j += L",\"特性\":\"输入即搜(无防抖)/全盘索引/低内存占用/五种搜索模式(wildcard,regex,sql,lua过滤,lua执行)/"
-             L"多搜索窗口(每窗独立设置)/原生插件系统/六种语言界面/预览面板/文件操作(重命名,别名,剪切粘贴,拖出,定位打开)\"";
-        j += L",\"捐赠话术\":\"如果蜗牛快搜帮到了你, 欢迎请作者喝杯咖啡 — 捐赠完全自愿, 金额随意, 软件本身永久免费\"";
+        picojson::object j;
+        j[U8(L"软件")] = JS(L"蜗牛快搜 SnailQuickSearch — Windows 本地文件即时搜索工具:"
+                            L"全盘索引, 输入即搜, 秒级定位, 同规模索引下常驻内存更低;"
+                            L"纯 Direct2D 自绘界面, 内置可编程插件系统");
+        j[U8(L"授权")] = JS(L"免费软件: 个人与商业环境均可免费使用; 成品层源码开放查看/修改/二次开发;"
+                            L"内置 xunjieso 搜索引擎为版权人自研闭源组件, 随软件免费授权使用");
+        j[U8(L"特性")] = JS(L"输入即搜(无防抖)/全盘索引/低内存占用/五种搜索模式(wildcard,regex,sql,lua过滤,lua执行)/"
+                            L"多搜索窗口(每窗独立设置)/原生插件系统/六种语言界面/预览面板/文件操作(重命名,别名,剪切粘贴,拖出,定位打开)");
+        j[U8(L"捐赠话术")] = JS(L"如果蜗牛快搜帮到了你, 欢迎请作者喝杯咖啡 — 捐赠完全自愿, 金额随意, 软件本身永久免费");
         if (w || a) {
-            j += L",\"可用二维码\":[";
-            if (w) j += L"\"微信\"";
-            if (a) j += (w ? L"," : L"") + std::wstring(L"\"支付宝\"");
-            j += L"],\"二维码如何展示\":\"在回答正文里用图片语法引用 (只引上面列出的可用项):"
+            picojson::array qr;
+            if (w) qr.push_back(JS(L"微信"));
+            if (a) qr.push_back(JS(L"支付宝"));
+            j[U8(L"可用二维码")] = picojson::value(qr);
+            j[U8(L"二维码如何展示")] = JS(L"在回答正文里用图片语法引用 (只引上面列出的可用项):"
                  L" ![微信捐赠码](xjs://donate?kind=wechat) 或 ![支付宝捐赠码](xjs://donate?kind=alipay)。"
                  L"二维码会竖排显示在对话页, 微信优先放最前; 用户没点名要支付宝时可以只放微信。"
-                 L"不要把 base64/文件路径写进回答, 不要用普通链接语法\"";
+                 L"不要把 base64/文件路径写进回答, 不要用普通链接语法");
         } else {
-            j += L",\"二维码\":\"暂不可用 (安装目录缺二维码图片), 如实告知用户即可\"";
+            j[U8(L"二维码")] = JS(L"暂不可用 (安装目录缺二维码图片), 如实告知用户即可");
         }
-        j += L"}";
-        st->res8 = U8(j);
+        st->res8 = picojson::value(j).serialize();
         return L"";
     }
 
@@ -1059,10 +1367,9 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
             AiAdjustItem it;
             it.key = kv.first;
             it.val = AdjustValueText(kv.first, kv.second);
-            std::wstring one = L"{\"" + W8(JsonEscapeUtf8(kv.first).c_str()) + L"\":";
-            JvAppend(kv.second, &one);
-            one += L"}";
-            it.json = U8(one);
+            picojson::object one;
+            one[U8(kv.first)] = JvToP(kv.second);
+            it.json = picojson::value(one).serialize();
             items.push_back(std::move(it));
         }
         return ProposeAdjustCard(st, 0, win, std::move(items));
@@ -1081,10 +1388,9 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
             AiAdjustItem it;
             it.key = kv.first;
             it.val = AdjustValueText(kv.first, kv.second);
-            std::wstring one = L"{\"" + W8(JsonEscapeUtf8(kv.first).c_str()) + L"\":";
-            JvAppend(kv.second, &one);
-            one += L"}";
-            it.json = U8(one);
+            picojson::object one;
+            one[U8(kv.first)] = JvToP(kv.second);
+            it.json = picojson::value(one).serialize();
             items.push_back(std::move(it));
         }
         return ProposeAdjustCard(st, 1, L"", std::move(items));
@@ -1112,24 +1418,22 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         const Jv* tv = o.Get(L"选中数");
         if (tv && tv->t == 2) total = (long long)tv->num;
         /* 紧凑回喂: files=[[FileId,文件名],…] (同 run_search 口径: 模型不拿路径,
-         * 引用文件一律用 ID。键名/逐对象包装对 200 条上限的清单是白烧 token) */
-        std::wstring out = L"{\"win\":\"" + W8(JsonEscapeUtf8(o.S(L"窗口名称")).c_str()) + L"\"";
-        out += L",\"total\":" + std::to_wstring(total);
-        out += L",\"files\":[";
-        bool first = true;
+           引用文件一律用 ID。键名/逐对象包装对 200 条上限的清单是白烧 token) */
+        picojson::object out;
+        out[U8(L"win")] = JS(o.S(L"窗口名称"));
+        out["total"] = JN(total);
+        picojson::array fs;
         for (auto& f : arr->arr) {
             if (f.t != 2) continue;
             int fid = (int)f.num;
             const char* nm = xjs_db_GetName(eng, fid);
-            if (!first) out += L",";
-            first = false;
-            wchar_t nb[32];
-            swprintf(nb, 32, L"%d", fid);
-            out += L"[" + std::wstring(nb) + L",\"";
-            out += W8(JsonEscapeUtf8(W8(nm && *nm ? nm : "(未命名)")).c_str()) + L"\"]";
+            picojson::array pair;
+            pair.push_back(JN(fid));
+            pair.push_back(JS(nm && *nm ? W8(nm) : L"(未命名)"));
+            fs.push_back(picojson::value(pair));
         }
-        out += L"]}";
-        st->res8 = U8(out);
+        out["files"] = picojson::value(fs);
+        st->res8 = picojson::value(out).serialize();
         return L"";
     }
     if (name8 == "list_languages") {
@@ -1152,8 +1456,11 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         it.key = L"语言";
         Jv lv; lv.t = 3; lv.str = code;
         it.val = AdjustValueText(L"语言", lv);
-        std::wstring one = L"{\"语言\":\"" + code + L"\"}";
-        it.json = U8(one);
+        {
+            picojson::object one;
+            one[U8(L"语言")] = JS(code);
+            it.json = picojson::value(one).serialize();
+        }
         std::vector<AiAdjustItem> items;
         items.push_back(std::move(it));
         return ProposeAdjustCard(st, 0, win, std::move(items));
@@ -1225,22 +1532,13 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         if (mtype.empty()) mtype = L"wildcard";
         if (mtype != L"wildcard" && mtype != L"regex" && mtype != L"sql" && mtype != L"lua")
             return L"type 只接受 wildcard | regex | sql | lua";
-        Jv d;
-        d.t = 5;
-        auto put = [&d](const wchar_t* k, const std::wstring& val) {
-            Jv x;
-            x.t = 3;
-            x.str = val;
-            d.obj.push_back({ k, x });
-        };
-        put(L"名称", mname);
-        if (!mdesc.empty()) put(L"简介", mdesc);
-        put(L"类型", mtype);
-        put(L"模板", mtpl);
-        std::wstring dj;
-        JvAppend(d, &dj);
+        picojson::object d;
+        d[U8(L"名称")] = JS(mname);
+        if (!mdesc.empty()) d[U8(L"简介")] = JS(mdesc);
+        d[U8(L"类型")] = JS(mtype);
+        d[U8(L"模板")] = JS(mtpl);
         st->argz = mname + L" (" + mtype + L")";
-        return AgentToolUi(j, UIW_ADD_MODE, tok, dj, L"", L"", 0, 0, st);
+        return AgentToolUi(j, UIW_ADD_MODE, tok, W8(picojson::value(d).serialize().c_str()), L"", L"", 0, 0, st);
     }
     if (name8 == "remove_search_mode") {
         st->kind = 6;
@@ -1260,7 +1558,7 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         if (pid.empty()) return L"plugin_id 不能为空 (list_plugins 查\"标识\")";
         const Jv* pv = v.Get(L"payload");
         std::wstring pay;
-        if (pv && pv->t == 5) JvAppend(*pv, &pay);
+        if (pv && pv->t == 5) pay = JDumpW(JvToP(*pv));
         else if (pv && pv->t == 3) pay = pv->str;   /* 字符串载荷原样 (约定为 JSON 文本) */
         else return L"payload 参数缺失 (JSON 对象)";
         st->argz = pid;
@@ -1274,12 +1572,10 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
  * run_search/get_window_selection 的结果 JSON 在各自完成时已拼进 res8 (样本只含
  * [FileId,文件名], 路径不回喂); 其余工具 res8 = 宿主扩展 API 原样, 空 = 无返回值。 */
 static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st) {
-    std::wstring j;
     if (!err.empty()) {
-        j = L"{\"error\":";
-        j += W8(JsonEscapeUtf8(err).c_str());
-        j += L"}";
-        return U8(j);
+        picojson::object o;
+        o["error"] = JS(err);
+        return picojson::value(o).serialize();
     }
     if (!st.res8.empty()) return st.res8;
     return "{\"ok\":true}";
@@ -1302,6 +1598,9 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"不符合就换口径再搜（先粗筛再精筛），绝不凭空编造结果；需要给用户看文件用 open_file，给路径清单用 copy_paths。\n"
     L"- 统计类必须**自己跑到出数**再回答（用户要的是数字与结论，不是脚本）；只有确实多次失败，"
     L"才把可粘贴的搜索式/脚本交给用户并说明卡在哪一步。\n"
+    L"- run_command 是真实执行在用户机器上的命令：先想清楚再提交；权限为「询问」时该调用会**暂停等用户在确认卡上裁决**"
+    L"（允许=自动继续执行并拿到输出，拒绝或 5 分钟未确认=本次调用失败）——等待期间不要重复调用同一工具；"
+    L"被拒绝就放弃该思路并如实告知，绝不换写法绕过。\n"
     L"- 改设置/换皮肤/切语言/窗口管理：用对应代办工具提交——这类改动**不会直接生效**，而是列进\"待应用的调整\"卡片，"
     L"用户逐项点\"应用\"才执行。提交后用一句话请用户到卡片上确认，**绝不宣称已生效**，"
     L"**用户没让改就不要替用户提交任何调整**。搜索模式管理与任务类操作（搜索/打开文件/复制路径）仍直接执行。\n"
@@ -1313,6 +1612,8 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- get_lua_spec：重新取 Lua 脚本规范全文（规范已内置在本提示词文末附录，写脚本前先读附录；一般无需调用）——"
     L"只在脚本报错要重读规范、或怀疑附录被截断时调用。\n"
     L"- run_search：引擎内执行一次搜索（5 种模式，语法见《搜索语法速查》；Lua 统计经 ai.print、数据行经 ai.row 回传）。\n"
+    L"- run_command：执行一条 Windows 命令（cmd/powershell）拿真实输出——诊断、系统信息、搜索覆盖不到的批量操作；"
+    L"受用户\"命令执行\"权限档约束（禁用=拒绝，询问=命令出确认卡、用户点允许后自动继续执行，允许=直接执行）。\n"
     L"- open_file / copy_paths：把搜索样本中的文件打开/定位给用户看 / 复制路径清单到剪贴板。\n"
     L"- get_author_and_donate：关于作者/软件背景的权威介绍；用户想捐赠/赞赏时也用它取二维码引用（竖排显示在对话页）。\n"
     L"- list_windows / get_window_state / set_window_settings / control_window / create_window：窗口查看与代办（改动经\"待应用的调整\"卡片，用户点应用才生效）。\n"
@@ -1355,7 +1656,10 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"   样本只给前 20 条：排在其后的文件你**没有 ID**，不放链接，如实写明\"仅列前 20\"即可。\n"
     L"   确实需要路径细节时（如按目录写脚本）用 ai.row(id,\"路径\") 让脚本自取，回答里仍只放 ID 链接。\n"
     L"4. 工具结果里确实存在的完整绝对路径（如 ai.row 请求了\"路径\"字段）直接写出也会自动渲染为\n"
-    L"   可点击链接：单击=打开，右键=打开/定位/复制路径。\n"
+    L"   可点击链接：单击=打开，右键=打开/定位/复制路径。**路径是精确数据，逐字符照抄，绝不缩写**——\n"
+    L"   不得用 ... / … 省略中间字符、不得增删空格或改写标点、不得繁简/全半角转换；表格再挤也写全\n"
+    L"   （必要时让该列换行）。缩写过的路径在磁盘上不存在，点击打不开，等于没给。\n"
+    L"   表格/清单里要可点击的条目优先用第 2 条的 ID 链接，不受路径精确性约束。\n"
     L"5. 网页链接照常 [标题](https://...)，点击用系统浏览器打开。\n"
     L"\n"
     L"## 搜索语法速查（run_search 的 mode）\n"
@@ -1430,6 +1734,7 @@ static const wchar_t* AI_INSTRUCTIONS =
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」或 5 分钟未确认则本次调用以失败返回; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"open_file","description":"打开最近一次 run_search 样本列表中的某个文件 (在用户屏幕上打开/定位), 用于让用户直接看到该文件。","parameters":{"type":"object","properties":{"index":{"type":"integer","description":"样本列表序号 (1 起)"},"reveal":{"type":"boolean","description":"true=只在资源管理器中定位, 不打开"}},"required":["index"]}},
@@ -1567,6 +1872,16 @@ static AiCall* AgentCallSlot(std::vector<AiCall>* v, const Jv* oi) {
     return &v->back();
 }
 
+/* tools 数组常量 → picojson 值 (进程一次; 线程安全 magic-static, BuildBody 直接嵌入) */
+static const picojson::value& ToolsP() {
+    static picojson::value p = [] {
+        picojson::value v;
+        JParseU8(v, AI_TOOLS_JSON);
+        return v;
+    }();
+    return p;
+}
+
 /* 每轮请求体: input = 对话快照 + 已发生的工具往返 (call→output 交错) + 环境快照 +
    循环护栏提醒 + 本轮模型产出; withTools=false = 收尾轮 (省略 tools 并明示直接回答)。
    省两个大头的口径 (见"工具结果省 token"节):
@@ -1577,71 +1892,114 @@ static AiCall* AgentCallSlot(std::vector<AiCall>* v, const Jv* oi) {
 static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
                                   const std::vector<std::string>& accOuts, size_t liveFrom,
                                   const std::wstring& inject, bool withTools) {
-    std::wstring body = L"{\"model\":";
-    body += W8(JsonEscapeUtf8(g_cfg.model).c_str());
-    if (g_cfg.maxOut > 0) {   /* 档案指定了最大输出才发送 (0 = 服务端默认); 与 model 同处请求头
-                                 部稳定段, 只在切档案时一起变, 前缀缓存不受损 */
-        body += L",\"max_output_tokens\":" + std::to_wstring(g_cfg.maxOut);
-    }
-    body += L",\"input\":[";
-    bool first = true;
-    auto sep = [&]() { if (!first) body += L","; first = false; };
+    auto userItem = [](const std::wstring& text) {   /* 注入型 user 项 (环境快照/护栏提醒) */
+        picojson::object content;
+        content["type"] = picojson::value("input_text");
+        content["text"] = JS(text);
+        picojson::array ca;
+        ca.push_back(picojson::value(content));
+        picojson::object item;
+        item["role"] = picojson::value("user");
+        item["content"] = picojson::value(ca);
+        return picojson::value(item);
+    };
+    picojson::array input;
     for (auto& m : j->hist) {
-        sep();
-        body += m.role ? L"{\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":"
-                       : L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
-        body += W8(JsonEscapeUtf8(m.text).c_str());
-        body += L"}]}";
+        picojson::object content;
+        content["type"] = picojson::value(m.role ? "output_text" : "input_text");
+        content["text"] = JS(m.text);
+        picojson::array ca;
+        ca.push_back(picojson::value(content));
+        picojson::object item;
+        item["role"] = picojson::value(m.role ? "assistant" : "user");
+        item["content"] = picojson::value(ca);
+        input.push_back(picojson::value(item));
     }
     for (size_t i = 0; i < accCalls.size() && i < accOuts.size(); i++) {
-        sep();
-        body += L"{\"type\":\"function_call\",\"call_id\":";
-        body += W8(JsonEscapeUtf8(W8(accCalls[i].callId.c_str())).c_str());
-        body += L",\"name\":";
-        body += W8(JsonEscapeUtf8(W8(accCalls[i].name.c_str())).c_str());
-        body += L",\"arguments\":";
-        body += W8(JsonEscapeUtf8(W8(accCalls[i].args.c_str())).c_str());
-        body += L"}";
-        sep();
+        picojson::object call;
+        call["type"] = picojson::value("function_call");
+        call["call_id"] = JS(W8(accCalls[i].callId.c_str()));
+        call["name"] = JS(W8(accCalls[i].name.c_str()));
+        call["arguments"] = JS(W8(accCalls[i].args.c_str()));
+        input.push_back(picojson::value(call));
         std::string out8 = i < liveFrom ? ToolOutputPrune(accOuts[i]) : accOuts[i];
-        body += L"{\"type\":\"function_call_output\",\"call_id\":";
-        body += W8(JsonEscapeUtf8(W8(accCalls[i].callId.c_str())).c_str());
-        body += L",\"output\":";
-        body += W8(JsonEscapeUtf8(W8(out8.c_str())).c_str());
-        body += L"}";
+        picojson::object out;
+        out["type"] = picojson::value("function_call_output");
+        out["call_id"] = JS(W8(accCalls[i].callId.c_str()));
+        out["output"] = JS(W8(out8.c_str()));
+        input.push_back(picojson::value(out));
     }
-    sep();   /* 环境快照 = 注入型 user 项, 恒在工具往返之后、一切提示之前 (缓存只伤最尾) */
-    body += L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
-    body += W8(JsonEscapeUtf8(L"(以下为系统自动注入的环境快照, 非用户发言)" + BuildEnvSnapshot()).c_str());
-    body += L"}]}";
-    if (!inject.empty()) {
-        sep();
-        body += L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
-        body += W8(JsonEscapeUtf8(inject).c_str());
-        body += L"}]}";
-    }
-    if (!withTools) {
-        sep();
-        body += L"{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
-        body += W8(JsonEscapeUtf8(L"(工具调用次数已达上限，请直接根据已获得的信息回答)").c_str());
-        body += L"}]}";
-    }
-    body += L"],\"stream\":true,\"instructions\":";
-    body += W8(JsonEscapeUtf8(W8(g_instrA.c_str())).c_str());   /* 恒定字节 = 跨请求前缀缓存的事实源 */
-    if (withTools) {
-        body += L",\"tools\":";
-        body += W8(AI_TOOLS_JSON);
-    }
-    body += L",\"reasoning\":{\"effort\":\"";
-    body += g_cfg.reasoning ? L"high" : L"none";
-    body += L"\"}}";
-    return U8(body);
+    input.push_back(userItem(L"(以下为系统自动注入的环境快照, 非用户发言)" + BuildEnvSnapshot()));
+    if (!inject.empty()) input.push_back(userItem(inject));
+    if (!withTools)
+        input.push_back(userItem(L"(工具调用次数已达上限，请直接根据已获得的信息回答)"));
+    picojson::object body;
+    body["model"] = JS(g_cfg.model);
+    if (g_cfg.maxOut > 0)   /* 档案指定了最大输出才发送 (0 = 服务端默认); 与 model 同处请求
+                               头部稳定段, 只在切档案时一起变, 前缀缓存不受损 */
+        body["max_output_tokens"] = JN(g_cfg.maxOut);
+    body["input"] = picojson::value(input);
+    body["stream"] = JB(true);
+    body["instructions"] = JS(W8(g_instrA.c_str()));   /* 恒定字节 = 跨请求前缀缓存的事实源 */
+    if (withTools) body["tools"] = ToolsP();
+    picojson::object reasoning;
+    reasoning["effort"] = picojson::value(g_cfg.reasoning ? "high" : "none");
+    body["reasoning"] = picojson::value(reasoning);
+    return picojson::value(body).serialize();
 }
 
-/* 退避等待: 500ms·2^attempt 封顶 4s, 期间响应"停止" (立即返回, 由重试环顶部判 abort) */
-static void HttpRetryWait(AiJob* j, int attempt) {
-    DWORD ms = 500u << (attempt > 3 ? 3 : attempt);
-    if (ms > 4000) ms = 4000;
+/* ±10% 抖动 (dsh retry-policy jitterRatio 口径): 多窗同时被限流时退避不齐锋 */
+static DWORD JitterMs(DWORD ms) {
+    if (ms <= 100) return ms;
+    DWORD span = ms / 5;
+    return ms - span / 2 + GetTickCount() % (span + 1);
+}
+
+/* 过程状态条 (重试/自愈中; 空 = 清除): 写 j->note 并回泵一次, 前端在打字气泡/
+ * 过程面板摘要处显示 — "长等待可观测" (dsh llm/retry 事件口径: 重试不许看起来像静默卡死) */
+static void JobNote(AiJob* j, const std::wstring& t) {
+    EnterCriticalSection(&j->cs);
+    j->note = t;
+    LeaveCriticalSection(&j->cs);
+    if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+}
+
+/* 丢弃本轮已收到的半截文本并推进世代 (泵据此把尾部气泡文本重置为空,
+ * 上一轮残文不留): 传输中断重试 / 空响应重发 / 超限自愈重试 共用 */
+static void DiscardTurnText(AiJob* j) {
+    EnterCriticalSection(&j->cs);
+    j->out.clear();
+    j->reason.clear();
+    j->gen++;
+    LeaveCriticalSection(&j->cs);
+    if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+}
+
+/* HTTP 400 错误文本是否为上下文超限 (各家签名不一, 按常见措辞识别; 中文按
+ * UTF-8 字节匹配 — 源码 /utf-8 编译, 服务端中文报错也是 UTF-8) */
+static bool CtxOverflowMsg(const std::string& e) {
+    if (e.empty()) return false;
+    std::string l = e;
+    for (auto& c : l) c = (char)tolower((unsigned char)c);
+    return l.find("context length") != std::string::npos ||
+           l.find("maximum context") != std::string::npos ||
+           l.find("too many tokens") != std::string::npos ||
+           l.find("reduce the length") != std::string::npos ||
+           l.find("input length") != std::string::npos ||
+           e.find("上下文长度") != std::string::npos ||
+           e.find("超出上下文") != std::string::npos;
+}
+
+/* 退避等待: 500ms·2^attempt 封顶 4s, forceMs>0 = 服务端 Retry-After 指定 (仅 ≤4s 时
+ * 传入, 更长的照常退避 — dsh retry-policy 口径: 不早于服务端要求, 也不无限等);
+ * 期间响应"停止" (立即返回, 由重试环顶部判 abort) */
+static void HttpRetryWait(AiJob* j, int attempt, DWORD forceMs = 0) {
+    DWORD ms = forceMs;
+    if (!ms) {
+        ms = 500u << (attempt > 3 ? 3 : attempt);
+        if (ms > 4000) ms = 4000;
+        ms = JitterMs(ms);
+    }
     ULONGLONG t0 = GetTickCount64();
     while (GetTickCount64() - t0 < ms) {
         if (InterlockedCompareExchange(&j->abort, 0, 0)) return;
@@ -1650,12 +2008,13 @@ static void HttpRetryWait(AiJob* j, int attempt) {
 }
 
 /* 一轮对话: 发请求 → SSE 读流 → 文本增量进 j->out/reason, function_call 攒进 turnCalls。
-   返回 false = 网络/HTTP 失败 (errMsg 已设); *failed = 流内协议失败 */
+   返回 false = 网络/HTTP 失败 (errMsg 已设); *failed = 流内协议失败;
+   *transient = 传输级瞬态失败 (流中途断掉), 调用方可整轮重试 */
 static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accCalls,
                          const std::vector<std::string>& accOuts, size_t liveFrom,
                          const std::wstring& repNote, bool withTools,
                          std::vector<AiCall>* turnCalls, bool* aborted, bool* truncated,
-                         bool* failed, std::string* errMsg) {
+                         bool* failed, bool* transient, std::string* errMsg) {
     turnCalls->clear();
     std::string body = AgentBuildBody(j, accCalls, accOuts, liveFrom, repNote, withTools);
     /* 临时诊断 (2026-09-25 空答复排查): 每轮请求体/响应原文落 data\调试请求/调试响应 (后者只留
@@ -1692,12 +2051,26 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
             hr = NULL;
             if (stopHit) { *aborted = true; ok = false; break; }
             if (attempt >= 3) { *errMsg = "send/receive failed"; ok = false; break; }
+            wchar_t nb[96];
+            swprintf(nb, 96, L"连接异常, 正在重试 (第 %d/3 次)…", attempt + 1);
+            JobNote(j, nb);
             HttpRetryWait(j, attempt);
+            JobNote(j, L"");
             continue;
         }
         DWORD status = 0, sz = sizeof(status);
         WinHttpQueryHeaders(hr, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sz, NULL);
         if (status == 429 || (status >= 500 && status <= 599)) {
+            /* Retry-After 只在 ≤4s 时尊重 (更长的照常退避, dsh retry-policy 口径:
+             * 不早于服务端要求, 也不按它无限等); 等待对前端可见 */
+            DWORD raMs = 0;
+            wchar_t ra[32] = {};
+            DWORD ras = sizeof(ra);
+            if (status == 429 &&
+                WinHttpQueryHeaders(hr, WINHTTP_QUERY_RETRY_AFTER, NULL, ra, &ras, NULL) && ra[0]) {
+                int sec = _wtoi(ra);
+                if (sec > 0 && sec <= 4) raMs = (DWORD)sec * 1000;
+            }
             EnterCriticalSection(&j->cs);
             if (j->hReq == hr) j->hReq = NULL;
             LeaveCriticalSection(&j->cs);
@@ -1711,7 +2084,14 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                 ok = false;
                 break;
             }
-            HttpRetryWait(j, attempt);
+            wchar_t nb[128];
+            if (raMs > 0) swprintf(nb, 128, L"请求过于频繁, 等待 %u 秒后重试 (第 %d/3 次)…",
+                                   raMs / 1000, attempt + 1);
+            else swprintf(nb, 128, L"服务繁忙 (HTTP %lu), 稍候自动重试 (第 %d/3 次)…",
+                          (unsigned long)status, attempt + 1);
+            JobNote(j, nb);
+            HttpRetryWait(j, attempt, raMs);
+            JobNote(j, L"");
             continue;
         }
         if (status != 200) {
@@ -1752,11 +2132,22 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
         for (;;) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; break; }
             DWORD avail = 0;
-            if (!WinHttpQueryDataAvailable(hr, &avail)) break;
+            if (!WinHttpQueryDataAvailable(hr, &avail)) {
+                /* "停止"会并发关句柄把读打断 — 先查 abort 归类, 真断流才算瞬态
+                 * (dsh TIMEOUT/TRANSPORT 口径: 传输失败可整轮重试; 流卡死由既有
+                 * WinHttpSetTimeouts 收超时 120s 兜底, 这里只做失败归类不做计时) */
+                if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; }
+                else { *failed = true; *transient = true; *errMsg = "connection lost during stream"; }
+                break;
+            }
             if (!avail) break;
             std::string chunk((size_t)avail, 0);
             DWORD rd = 0;
-            if (!WinHttpReadData(hr, &chunk[0], avail, &rd)) break;
+            if (!WinHttpReadData(hr, &chunk[0], avail, &rd)) {
+                if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; }
+                else { *failed = true; *transient = true; *errMsg = "connection lost during stream"; }
+                break;
+            }
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; break; }
             chunk.resize(rd);
             buf += chunk;
@@ -1880,21 +2271,13 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
 }
 
 /* 重复调用护栏的链键: 工具名 + 键名字典序规范化后的参数 (键序无关, dsh repeat-tool-reminder
- * 口径: {"a":1,"b":2} 与 {"b":2,"a":1} 视为同一次调用); 参数解析失败保留原文, 同文重复照样命中 */
+ * 口径: {"a":1,"b":2} 与 {"b":2,"a":1} 视为同一次调用); picojson::object 本身就是 std::map,
+ * 序列化天然按键字典序 (含嵌套层); 参数解析失败保留原文, 同文重复照样命中 */
 static std::string AgentCallKey(const std::string& name8, const std::string& args8) {
-    Jv v = JsonParseW(W8(args8.c_str()));
+    picojson::value v;
     std::string canon;
-    if (v.t == 5) {
-        std::sort(v.obj.begin(), v.obj.end(),
-                  [](const std::pair<std::wstring, Jv>& a, const std::pair<std::wstring, Jv>& b) {
-                      return a.first < b.first;
-                  });
-        std::wstring can;
-        JvAppend(v, &can);
-        canon = U8(can);
-    } else {
-        canon = args8;
-    }
+    if (JParseU8(v, args8) && v.is<picojson::object>()) canon = v.serialize();
+    else canon = args8;
     return name8 + "|" + canon;
 }
 
@@ -1921,19 +2304,59 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
         int repCount = 0;
         std::wstring repNote;               /* 命中阈值 → 下一轮请求末尾注入的提醒 (随请求消费即清) */
         int emptyRetry = 0;                 /* 空响应 (无工具调用也无文本) 原样重发次数 */
+        int txRetry = 0;                    /* 传输中断整轮重试计数 (成功轮归零) */
+        bool overflowRetried = false;       /* 上下文超限自愈每作业只做一次 (dsh maxOverflowRetries=1) */
         for (int turn = 0; turn < AI_AGENT_MAX_TURNS; turn++) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { aborted = true; break; }
             bool lastTurn = turn == AI_AGENT_MAX_TURNS - 1;
             std::vector<AiCall> turnCalls;
             ULONGLONG turnT0 = GetTickCount64();
+            bool transient = false;
             bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, liveFrom, repNote, !lastTurn, &turnCalls,
-                                       &aborted, &truncated, &failed, &errMsg);
+                                       &aborted, &truncated, &failed, &transient, &errMsg);
+            JobNote(j, L"");   /* 请求已返回, 状态条清掉 */
             repNote.clear();   /* 已随请求消费 */
             EnterCriticalSection(&j->cs);
             j->turnOutMs = GetTickCount64() - turnT0;   /* 速度 = 本轮输出 / 本轮耗时 (含首 token 等待) */
             LeaveCriticalSection(&j->cs);
             if (!okTurn) failed = true;
-            if (aborted || failed) break;
+            if (aborted) break;
+            if (failed) {
+                /* 瞬态传输失败 (流中途断; 卡死由既有 WinHTTP 收超时兜底, 这里只归类):
+                   丢半截流整轮重发 ≤3 次 (dsh TIMEOUT/TRANSPORT 口径; 重试可见 — note 推前端,
+                   不许像静默卡死) */
+                if (transient && txRetry < 3) {
+                    txRetry++;
+                    wchar_t nb[96];
+                    swprintf(nb, 96, L"连接中断, 正在重新生成 (第 %d/3 次)…", txRetry);
+                    JobNote(j, nb);
+                    DiscardTurnText(j);
+                    HttpRetryWait(j, txRetry - 1);
+                    JobNote(j, L"");
+                    failed = false;
+                    errMsg.clear();
+                    if (InterlockedCompareExchange(&j->abort, 0, 0)) { aborted = true; break; }
+                    turn--;   /* 重跑同一轮 */
+                    continue;
+                }
+                /* 上下文超限 (HTTP 400): 全部工具输出进入裁剪范围再试一次 (dsh overflow
+                 * recovery 口径: 先做无模型的剪枝, 重试受 generations 推进闸约束 = 只一次;
+                 * 仍超限 = 真失败, 用户看到原始报错) */
+                if (!transient && !overflowRetried && !accCalls.empty() && CtxOverflowMsg(errMsg)) {
+                    overflowRetried = true;
+                    liveFrom = 0;
+                    repNote = L"(系统提示: 上一次请求超出模型上下文上限, 早期工具输出已压缩为头尾摘要; "
+                              L"若关键数据缺失请重新调用工具获取, 或直接基于已有信息作答)";
+                    JobNote(j, L"上下文超限, 已压缩早期工具输出, 正在重试…");
+                    DiscardTurnText(j);
+                    failed = false;
+                    errMsg.clear();
+                    turn--;
+                    continue;
+                }
+                break;
+            }
+            txRetry = 0;   /* 成功轮归零: 瞬态预算按"连续失败"计 */
             if (truncated) break;   /* 截断轮 (max-tokens): 半截 arguments 绝不执行 (dsh assembler 口径) */
             if (turnCalls.empty()) {
                 /* 空响应防线 (dsh EMPTY_RESPONSE 口径): 流正常结束但无工具调用也无文本 = 退化完成,
@@ -1945,11 +2368,11 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 outNow = j->out;
                 LeaveCriticalSection(&j->cs);
                 if (TrimW(outNow).empty() && !lastTurn && emptyRetry < 2) {
-                    EnterCriticalSection(&j->cs);
-                    j->out.clear();
-                    j->reason.clear();
-                    LeaveCriticalSection(&j->cs);
                     emptyRetry++;
+                    wchar_t nb[80];
+                    swprintf(nb, 80, L"回复为空, 正在重新生成 (第 %d/2 次)…", emptyRetry);
+                    JobNote(j, nb);
+                    DiscardTurnText(j);
                     repNote = L"(系统提醒: 你上一条回复没有输出任何文字内容。若任务未完成请继续调用工具, "
                               L"若已完成请直接给出面向用户的最终回答)";
                     continue;
@@ -1974,6 +2397,31 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 AiToolStep local;
                 local.state = 1;
                 local.name = W8(c.name.c_str());
+                /* 卡片字段在入队前先填好 — 曾在入队后才解析 run_command 参数, 挂起等裁决期
+                 * 镜像里 kind 还是 0, 卡片渲染成"搜索 run_command"+文件询问按钮, 命令全文
+                 * 看不见, 用户只能盲批 (2026-09-25 实锤) */
+                int pol = InterlockedCompareExchange(&j->policy, 0, 0);
+                int epol = InterlockedCompareExchange(&j->execPolicy, 0, 0);
+                bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
+                bool execTool = (c.name == "run_command");
+                std::wstring exShell, exCmd, exDir, exDesc;
+                long long exTimeout = 120000;
+                if (execTool) {
+                    Jv cv = JsonParseW(W8(c.args.c_str()));
+                    exCmd = TrimW(cv.S(L"command"));
+                    exShell = TrimW(cv.S(L"shell"));
+                    if (exShell.empty()) exShell = L"cmd";
+                    exDir = TrimW(cv.S(L"workdir"));
+                    exDesc = TrimW(cv.S(L"description"));
+                    const Jv* tv = cv.Get(L"timeoutMs");
+                    if (tv && tv->t == 2 && tv->num >= 3000 && tv->num <= 600000)
+                        exTimeout = (long long)tv->num;
+                    local.kind = 11;
+                    local.mode = exShell;
+                    local.query = exCmd;
+                    local.argz = exDesc;
+                    ArgzCut(&local.argz);
+                }
                 int sidx = -1;
                 EnterCriticalSection(&j->cs);
                 j->steps.push_back(local);
@@ -1983,24 +2431,98 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
                 /* 文件操作权限闸 (对齐参考实现"命令行权限"): 禁用/只读直接拒绝并回喂模型;
                    询问 = 先拒绝 + 卡片转询问态给确认按钮, 用户点"允许"后本作业后续调用放行 */
-                int pol = InterlockedCompareExchange(&j->policy, 0, 0);
-                bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
                 std::wstring err;
                 std::string output;
                 if (dup) {
                     /* 同批完全重复 (模型惊慌连发): 只执行首个, 其余回执指向前一次结果 —
                        否则 N 份等量大结果原样回喂直接撑爆上下文 (get_lua_spec 9 连发实锤) */
                     local.state = 2;
-                    output = "{\"duplicate\":true,\"note\":\"与本批次中前面一次调用完全相同, 已去重未重复执行; 以上一次的执行结果为准\"}";
+                    {
+                        picojson::object d;
+                        d["duplicate"] = JB(true);
+                        d["note"] = JS(L"与本批次中前面一次调用完全相同, 已去重未重复执行; 以上一次的执行结果为准");
+                        output = picojson::value(d).serialize();
+                    }
                 } else if (fileTool && pol == 0) {
-                    err = L"权限策略为「禁用」, 已拒绝文件操作";
+                    /* 拒绝回执写成可恢复指引 (dsh 口径: 拒绝原因要告诉模型怎么继续),
+                       只描述事实 + 恢复路径, 不代用户做决定 */
+                    err = L"已拒绝: 文件操作权限当前为「禁用」。请告知用户在对话输入框下方的"
+                          L"文件操作权限选择器切换到「允许」或「询问」后, 再重新调用本工具";
                     local.state = 3;
                 } else if (fileTool && pol == 1) {
-                    err = L"权限策略为「只读」, 已拒绝文件操作";
+                    err = L"已拒绝: 文件操作权限当前为「只读」。请告知用户把权限切换到「允许」"
+                          L"(或「询问」逐次确认)后, 再重新调用本工具";
                     local.state = 3;
                 } else if (fileTool && pol == 2) {
                     err = L"等待用户确认文件操作 (在下方卡片选择「允许」后我会重试)";
                     local.state = 4;
+                } else if (execTool && epol == 0) {
+                    err = L"已拒绝: 命令执行权限当前为「禁用」。请告知用户在对话输入框下方的"
+                          L"命令执行权限选择器切换到「允许」或「询问」后, 再重新调用本工具";
+                    local.state = 3;
+                } else if (execTool && epol == 2) {
+                    /* 询问档 = 挂起等用户裁决 (dsh approval 口径: 审批暂停回合、答复恢复 —
+                     * 不做"先拒绝再指望模型自己重试"的死胡同: 模型被拒即结束回合说"请点允许",
+                     * 之后无论点什么都没有执行体了)。卡片转询问态, worker 在此轮询
+                     * 允许/拒绝/停止/超时; 允许 → 接着执行并回喂输出, 拒绝/超时 → 作为
+                     * 工具失败回喂, 模型当场就能得体收尾。 */
+                    std::wstring risk = ExecRiskText(exCmd);
+                    local.state = 4;
+                    local.err = L"等待用户确认命令执行" +
+                                (exDesc.empty() ? std::wstring()
+                                                : (L" · AI 说明: " + exDesc)) +
+                                (risk.empty() ? std::wstring()
+                                              : (L"; ⚠ 检测到高危特征: " + risk));
+                    EnterCriticalSection(&j->cs);
+                    InterlockedExchange(&j->execGrant, 0);
+                    InterlockedExchange(&j->execDeny, 0);
+                    if (sidx >= 0 && sidx < (int)j->steps.size()) {   /* 询问卡立即可见 (不等执行完的统一回写) */
+                        j->steps[sidx].state = 4;
+                        j->steps[sidx].err = local.err;
+                        j->stepsVersion++;
+                    }
+                    LeaveCriticalSection(&j->cs);
+                    if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+                    bool granted = false;
+                    bool stoppedAsk = false;
+                    ULONGLONG askT0 = GetTickCount64();
+                    for (;;) {
+                        if (InterlockedCompareExchange(&j->abort, 0, 0)) { stoppedAsk = true; break; }
+                        bool denied = false;
+                        EnterCriticalSection(&j->cs);
+                        if (j->execGrant) { j->execGrant = 0; granted = true; }
+                        denied = j->execDeny != 0;
+                        LeaveCriticalSection(&j->cs);
+                        if (granted || denied || GetTickCount64() - askT0 > 300000) break;
+                        Sleep(40);
+                    }
+                    if (stoppedAsk) {
+                        err = L"已停止";
+                        local.state = 3;
+                    } else if (granted) {
+                        local.state = 1;   /* 卡片转执行中 (执行完由尾部统一回写为完成/失败) */
+                        local.err.clear();
+                    } else if (InterlockedCompareExchange(&j->execDeny, 0, 0)) {
+                        err = L"用户拒绝执行这条命令 — 不要再尝试相同或同类命令, 如实说明并按用户指示继续";
+                        local.state = 3;
+                    } else {
+                        err = L"等待用户确认超时 (5 分钟未响应), 本次执行已取消 — "
+                              L"可告知用户放行后重新提出";
+                        local.state = 3;
+                    }
+                    /* 卡片即时转执行中/失败 (不等执行完) */
+                    EnterCriticalSection(&j->cs);
+                    if (sidx >= 0 && sidx < (int)j->steps.size()) {
+                        j->steps[sidx].state = local.state;
+                        j->steps[sidx].err = local.err;
+                        j->stepsVersion++;
+                    }
+                    LeaveCriticalSection(&j->cs);
+                    if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+                    if (granted)
+                        err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
+                } else if (execTool) {   /* 允许档: 直接执行 */
+                    err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
                 } else {
                     err = AgentToolExec(j, c.name, c.args, j->tok, &local);
                 }
@@ -2034,12 +2556,21 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 if (k == repKey) repCount++;
                 else { repKey = k; repCount = 1; }
                 if (repCount == 3 || repCount == 6) {
-                    repNote = repCount == 3
-                        ? L"(系统提醒: 你正用完全相同的参数重复调用同一个工具, 这不会产生新信息 — "
-                          L"先仔细分析上一次结果, 换不同参数/不同口径再试; 若信息已足够就直接作答)"
-                        : (L"(系统提醒: 工具 " + W8(c.name.c_str()) + L" 已用完全相同的参数连续调用 " +
-                           std::to_wstring(repCount) + L" 次。这些重复调用没有进展, 不要再用这些参数调用它 — "
-                           L"检查最近一次结果, 改用不同参数/不同工具/不同搜索模式, 或基于已有信息直接作答)");
+                    if (repCount == 3) {
+                        repNote = L"(系统提醒: 你正用完全相同的参数重复调用同一个工具, 这不会产生新信息 — "
+                                  L"先仔细分析上一次结果, 换不同参数/不同口径再试; 若信息已足够就直接作答)";
+                    } else {
+                        /* 详细档带参数预览 (dsh argumentsPreviewChars 口径: 检测用全量,
+                         * 只截模型可见的引用) */
+                        std::string prev = c.args;
+                        if (prev.size() > 200) prev.resize(PruneUtf8Floor(prev, 200));
+                        repNote = L"(系统提醒: 工具 " + W8(c.name.c_str()) + L" 已用完全相同的参数连续调用 " +
+                                  std::to_wstring(repCount) + L" 次。这些重复调用没有进展, 不要再用这些参数调用它 — "
+                                  L"检查最近一次结果, 改用不同参数/不同工具/不同搜索模式, 或基于已有信息直接作答";
+                        if (!prev.empty())
+                            repNote += L"。最近一次参数: " + W8(prev.c_str());
+                        repNote += L")";
+                    }
                 }
                 if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
             }

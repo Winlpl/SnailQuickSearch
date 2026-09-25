@@ -47,74 +47,63 @@ std::wstring ColHexA(const Gdiplus::Color& c) {
     return b;
 }
 
-std::wstring WebPaletteJson(AiSess* s) {
+static picojson::value WebPalValue(AiSess* s) {
     AiPal p = PalOf(s);
     /* 键 = ai_web_ui.cpp :root 的 CSS 变量名; 8 位 #rrggbbaa 浏览器原样可解析 */
-    std::wstring j = L"{";
-    auto add = [&](const wchar_t* k, const std::wstring& v) {
-        if (j.size() > 1) j += L",";
-        j += std::wstring(L"\"") + k + L"\":" + W8(JsonEscapeUtf8(v).c_str());
-    };
-    add(L"bg", ColHex(p.bg));
-    add(L"panel", ColHex(p.panel));
-    add(L"text", ColHex(p.text));
-    add(L"dim", ColHex(p.dim));
-    add(L"accent", ColHex(p.accent));
-    add(L"t3", ColHexA(p.t3));
-    add(L"hover", ColHexA(p.hover));
-    add(L"divider", ColHexA(p.divider));
-    add(L"border", ColHexA(p.border));
-    add(L"borderStrong", ColHexA(p.borderStrong));
-    add(L"cyan", ColHex(p.cyan));
-    add(L"emerald", ColHex(p.emerald));
-    add(L"amber", ColHex(p.amber));
-    add(L"red", ColHex(p.red));
-    add(L"ok", ColHex(p.ok));
-    add(L"userAcc", ColHex(p.userAcc));
-    j += L"}";
-    return j;
+    picojson::object o;
+    auto add = [&](const char* k, const std::wstring& v) { o[k] = JS(v); };
+    add("bg", ColHex(p.bg));
+    add("panel", ColHex(p.panel));
+    add("text", ColHex(p.text));
+    add("dim", ColHex(p.dim));
+    add("accent", ColHex(p.accent));
+    add("t3", ColHexA(p.t3));
+    add("hover", ColHexA(p.hover));
+    add("divider", ColHexA(p.divider));
+    add("border", ColHexA(p.border));
+    add("borderStrong", ColHexA(p.borderStrong));
+    add("cyan", ColHex(p.cyan));
+    add("emerald", ColHex(p.emerald));
+    add("amber", ColHex(p.amber));
+    add("red", ColHex(p.red));
+    add("ok", ColHex(p.ok));
+    add("userAcc", ColHex(p.userAcc));
+    return picojson::value(o);
 }
 
-std::wstring WebCfgJson() {
+static picojson::value WebCfgValue() {
     AiProfile* act = CfgActive();
-    std::wstring j = L"{\"url\":";
-    j += W8(JsonEscapeUtf8(g_cfg.baseUrl).c_str());
-    j += L",\"model\":";
-    j += W8(JsonEscapeUtf8(g_cfg.model).c_str());
-    j += L",\"hasKey\":";
-    j += g_cfg.apiKey.empty() ? L"false" : L"true";
-    j += L",\"reasoning\":";
-    j += g_cfg.reasoning ? L"true" : L"false";
-    j += L",\"policy\":";
-    j += std::to_wstring(g_cfg.filePolicy);
+    picojson::object o;
+    o["url"] = JS(g_cfg.baseUrl);
+    o["model"] = JS(g_cfg.model);
+    o["hasKey"] = JB(!g_cfg.apiKey.empty());
+    o["reasoning"] = JB(g_cfg.reasoning);
+    o["policy"] = JN(g_cfg.filePolicy);
+    o["epolicy"] = JN(g_cfg.execPolicy);
     /* 活动档案显示名: 状态点与工具栏模型按钮用它 (与前端兜底同款: name||model||未命名模型) */
-    j += L",\"name\":";
-    j += W8(JsonEscapeUtf8(CfgDisplayName(act)).c_str());
-    j += L",\"ctx\":" + std::to_wstring(g_cfg.ctx);
-    j += L",\"maxOut\":" + std::to_wstring(g_cfg.maxOut);
-    j += L",\"active\":";
-    j += W8(JsonEscapeUtf8(g_cfg.activeId).c_str());
+    o["name"] = JS(CfgDisplayName(act));
+    o["ctx"] = JN(g_cfg.ctx);
+    o["maxOut"] = JN(g_cfg.maxOut);
+    o["active"] = JS(g_cfg.activeId);
     /* 档案表整包下发 (密钥只出 hasKey, 明文不出宿主) */
-    j += L",\"profs\":[";
-    for (size_t i = 0; i < g_cfg.profiles.size(); i++) {
-        AiProfile& p = g_cfg.profiles[i];
-        if (i) j += L",";
-        j += L"{\"id\":";
-        j += W8(JsonEscapeUtf8(p.id).c_str());
-        j += L",\"name\":";
-        j += W8(JsonEscapeUtf8(p.name).c_str());
-        j += L",\"url\":";
-        j += W8(JsonEscapeUtf8(p.baseUrl).c_str());
-        j += L",\"model\":";
-        j += W8(JsonEscapeUtf8(p.model).c_str());
-        j += L",\"hasKey\":";
-        j += p.apiKey.empty() ? L"false" : L"true";
-        j += L",\"ctx\":" + std::to_wstring(p.ctx);
-        j += L",\"maxOut\":" + std::to_wstring(p.maxOut) + L"}";
+    picojson::array profs;
+    for (AiProfile& p : g_cfg.profiles) {
+        picojson::object po;
+        po["id"] = JS(p.id);
+        po["name"] = JS(p.name);
+        po["url"] = JS(p.baseUrl);
+        po["model"] = JS(p.model);
+        po["hasKey"] = JB(!p.apiKey.empty());
+        po["ctx"] = JN(p.ctx);
+        po["maxOut"] = JN(p.maxOut);
+        profs.push_back(picojson::value(po));
     }
-    j += L"]}";
-    return j;
+    o["profs"] = picojson::value(profs);
+    return picojson::value(o);
 }
+
+std::wstring WebPaletteJson(AiSess* s) { return JDumpW(WebPalValue(s)); }
+std::wstring WebCfgJson() { return JDumpW(WebCfgValue()); }
 
 /* ==================== markdown → HTML (md4c; 表格/任务列表/删除线) ====================
  * 模型裸 HTML 一律丢弃 (MD_TEXT_HTML/IMG), 实体原文透传, 其余文本转义 — 输出永不携带
@@ -490,6 +479,7 @@ static const wchar_t* StepBadge(int kind) {
         case 8: return L"皮肤";
         case 9: return L"规范";
         case 10: return L"关于";
+        case 11: return L"命令";
     }
     return L"工具";
 }
@@ -500,14 +490,26 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
     wchar_t b[64];
     for (size_t si = 0; si < m.steps.size(); si++) {
         const AiToolStep& st = m.steps[si];
-        swprintf(b, 64, L"<div class=\"step%s\" data-gi=\"%d\">", st.state == 3 ? L" failed" : L"", mi);
+        /* 卡片命令串 = kind 0/11 用查询原文 (11 = 待确认的命令, 用户要审的就是它;
+         * 前缀 shell 名), 其余 工具名+参数 (显示截断 200, data-q 存全文) */
+        std::wstring cmd;
+        if (st.kind == 11 && !st.query.empty()) {
+            cmd = L"[" + (st.mode.empty() ? L"cmd" : st.mode) + L"] " + st.query;
+        } else if (st.kind == 0 && !st.query.empty()) {
+            cmd = st.query;
+        } else {
+            cmd = !st.argz.empty() ? (st.name.empty() ? st.argz : st.name + L" " + st.argz)
+                                   : (st.name.empty() ? L"工具" : st.name);
+        }
+        swprintf(b, 64, L"<div class=\"step%s\" data-gi=\"%d\"", st.state == 3 ? L" failed" : L"", mi);
         *out += b;
+        /* data-q = 完整查询原文 (头部 .scmd 截 200 只供显示; 右键"复制查询语句"要全文) */
+        *out += L" data-q=\"";
+        HtmlEscape(out, cmd);
+        *out += L"\">";
         *out += L"<div class=\"shead\"><span class=\"sbadge\">";
         HtmlEscape(out, StepBadge(st.kind));
         *out += L"</span><span class=\"scmd\">";
-        std::wstring cmd = (st.kind == 0 && !st.query.empty()) ? st.query
-                         : (!st.argz.empty() ? (st.name.empty() ? st.argz : st.name + L" " + st.argz)
-                                             : (st.name.empty() ? L"工具" : st.name));
         if (cmd.size() > 200) { cmd.resize(200); cmd += L"…"; }
         HtmlEscape(out, cmd);
         *out += L"</span><span class=\"sst";
@@ -517,11 +519,22 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
         /* 折叠/展开箭头 (点击头部切换; 样本列表默认收起) */
         *out += L"</span><span class=\"sarr glyph\">&#xE70D;</span></div>";
         if (st.state == 4) {
-            /* 策略询问: 允许 (转允许并放行后续) / 保持拒绝 */
-            *out += L"<div class=\"sask\">";
-            HtmlEscape(out, st.err.empty() ? L"等待用户确认文件操作" : st.err);
-            *out += L"<br/><span class=\"abtn primary\" data-act=\"authallow\">允许并继续</span>";
-            *out += L"<span class=\"abtn\" data-act=\"authdeny\">保持拒绝</span></div>";
+            if (st.kind == 11) {
+                /* 命令执行确认卡: 允许一次 = 只放行这条命令的完全相同重试 (不持久放权);
+                   data-mi/si 供 eallow 回传定位 (凭据按 shell|command 键比对) */
+                wchar_t ab[48];
+                swprintf(ab, 48, L"<div class=\"sask\" data-mi=\"%d\" data-si=\"%d\">", mi, (int)si);
+                *out += ab;
+                HtmlEscape(out, st.err.empty() ? L"等待用户确认命令执行" : st.err);
+                *out += L"<br/><span class=\"abtn primary\" data-act=\"execallow\">允许一次</span>";
+                *out += L"<span class=\"abtn\" data-act=\"execdeny\">拒绝</span></div>";
+            } else {
+                /* 策略询问: 允许 (转允许并放行后续) / 保持拒绝 */
+                *out += L"<div class=\"sask\">";
+                HtmlEscape(out, st.err.empty() ? L"等待用户确认文件操作" : st.err);
+                *out += L"<br/><span class=\"abtn primary\" data-act=\"authallow\">允许并继续</span>";
+                *out += L"<span class=\"abtn\" data-act=\"authdeny\">保持拒绝</span></div>";
+            }
         } else if (st.state == 3 && !st.err.empty()) {
             *out += L"<div class=\"sout\">";
             HtmlEscape(out, st.err);
@@ -637,6 +650,7 @@ struct AiWebCtx {
     /* 推送缓存 (status/usage 变化判定; boot 后有效) */
     bool stSending = false;
     int stNet = -1, stPhase = -1;
+    std::wstring stNote;                    /* 过程状态条 (重试/自愈中; 变化才推) */
     bool uHas = false;
     long long uUp = -1, uUo = -1, uUt = -1, uUch = -1, uLp = -1, uLc = -1;
     double uTps = -1;
@@ -776,7 +790,11 @@ static void WebFocusApply(AiSess* s, bool has) {
     if (has == w->focusBorrowed) return;   /* 值不变不重发 */
     w->focusBorrowed = has;
     g_host->PanelSetFocus(g_ctx, s->tok, has ? 1 : 0);
-    if (!has) WebPost(s, "{\"t\":\"blur\"}");
+    if (!has) {
+        picojson::object b;
+        b["t"] = picojson::value("blur");
+        WebPost(s, picojson::value(b).serialize());
+    }
 }
 
 static void WebFocusTick(AiSess* s) {
@@ -1075,89 +1093,87 @@ static void WebPost(AiSess* s, const std::string& jsonUtf8) {
  * 提示一律推给页面画 (kind = XJS_PLUGIN_TOAST_*, 前端按 0info/1ok/2warn/3err 着色) */
 void WebToast(AiSess* s, const char* utf8, int kind) {
     if (!s->web || !s->bootDone) return;
-    std::string j = "{\"t\":\"toast\",\"msg\":";
-    j += JsonEscapeUtf8(W8(utf8));
-    j += ",\"k\":";
-    j += std::to_string(kind >= XJS_PLUGIN_TOAST_INFO && kind <= XJS_PLUGIN_TOAST_ERROR
-                            ? kind : XJS_PLUGIN_TOAST_WARN);
-    j += "}";
-    WebPost(s, j);
+    picojson::object o;
+    o["t"] = picojson::value("toast");
+    o["msg"] = JS(W8(utf8));
+    o["k"] = JN(kind >= XJS_PLUGIN_TOAST_INFO && kind <= XJS_PLUGIN_TOAST_ERROR
+                    ? kind : XJS_PLUGIN_TOAST_WARN);
+    WebPost(s, picojson::value(o).serialize());
 }
 
-static void WebStatusObj(AiSess* s, std::string* out) {
+/* 作业过程状态条 (重试/自愈中; worker 写, 变化才推) */
+static std::wstring JobNoteOf(AiSess* s) {
+    if (!s->job) return std::wstring();
+    EnterCriticalSection(&s->job->cs);
+    std::wstring n = s->job->note;
+    LeaveCriticalSection(&s->job->cs);
+    return n;
+}
+
+static picojson::value WebStatusValue(AiSess* s) {
     int phase = 0;
     if (s->job) {
         EnterCriticalSection(&s->job->cs);
         phase = s->job->phase;
         LeaveCriticalSection(&s->job->cs);
     }
-    char b[128];
-    snprintf(b, 128, "{\"sending\":%s,\"net\":%d,\"phase\":%d}",
-             s->sending ? "true" : "false", s->netStatus, phase);
-    *out += b;
+    picojson::object o;
+    o["sending"] = JB(s->sending);
+    o["net"] = JN(s->netStatus);
+    o["phase"] = JN(phase);
+    std::wstring note = JobNoteOf(s);
+    if (!note.empty()) o["note"] = JS(note);
+    return picojson::value(o);
 }
 
-/* 单条消息 → JSON 对象 (msgs/last 共用; html=气泡, t=原始 Markdown 供"复制",
+/* 单条消息 → JSON 值 (msgs/last 共用; html=气泡, t=原始 Markdown 供"复制",
    reason=原始推理文本由前端渲染折叠块) */
-void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, std::string* out) {
+static picojson::value WebMsgValue(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml) {
     (void)s;
     (void)mi;
     (void)thinking;
-    char head[64];
-    snprintf(head, 64, "{\"r\":%d", m.role);
-    *out += head;
+    picojson::object o;
+    o["r"] = JN(m.role);
     if (withHtml) {
         std::wstring html;
         MsgHtmlOf(s, m, mi, false, &html);
-        *out += ",\"html\":";
-        *out += JsonEscapeUtf8(html);
+        o["html"] = JS(html);
     }
-    if (m.role == 1 && !m.text.empty()) {   /* 原始 Markdown: 复制按钮的事实源 (渲染 HTML 抽文本会丢块级换行) */
-        *out += ",\"t\":";
-        *out += JsonEscapeUtf8(m.text);
-    }
-    if (!m.reason.empty()) {
-        *out += ",\"reason\":";
-        *out += JsonEscapeUtf8(m.reason);
-    }
-    if (m.err) *out += ",\"err\":true";
+    if (m.role == 1 && !m.text.empty())   /* 原始 Markdown: 复制按钮的事实源 (渲染 HTML 抽文本会丢块级换行) */
+        o["t"] = JS(m.text);
+    if (!m.reason.empty()) o["reason"] = JS(m.reason);
+    if (m.err) o["err"] = JB(true);
     /* empty = 没有正文 (推理不算正文): 过程区只画推理行 — 若按旧口径 (正文+推理都空才算
        empty), 推理轮的 &nbsp; 占位气泡会照渲染, 过程面板里每轮跟一条空行 (2026-09-25 实锤) */
-    if (m.role == 1 && m.text.empty()) *out += ",\"empty\":true";
-    if (m.role == 0) {
-        *out += ",\"q\":";
-        std::wstring q = m.text.size() > 200 ? m.text.substr(0, 200) : m.text;
-        *out += JsonEscapeUtf8(q);
-    }
+    if (m.role == 1 && m.text.empty()) o["empty"] = JB(true);
+    if (m.role == 0)
+        o["q"] = JS(m.text.size() > 200 ? m.text.substr(0, 200) : m.text);
     if (m.role == 2 && !m.steps.empty()) {   /* 步骤状态: 前端聚合头部计数用 (卡面视觉由 MsgHtmlOf 直出) */
-        *out += ",\"steps\":[";
-        for (size_t i = 0; i < m.steps.size(); i++) {
-            if (i) *out += ",";
-            *out += "{\"state\":";
-            *out += std::to_string(m.steps[i].state);
-            *out += "}";
+        picojson::array steps;
+        for (const AiToolStep& st : m.steps) {
+            picojson::object so;
+            so["state"] = JN(st.state);
+            steps.push_back(picojson::value(so));
         }
-        *out += "]";
+        o["steps"] = picojson::value(steps);
     }
-    *out += "}";
+    return picojson::value(o);
+}
+
+void WebMsgObj(AiSess* s, const AiMsg& m, int mi, bool thinking, bool withHtml, std::string* out) {
+    *out += WebMsgValue(s, m, mi, thinking, withHtml).serialize();
 }
 
 static void WebMsgsPush(AiSess* s) {
-    std::string j = "{\"t\":\"msgs\",\"cur\":";
-    {
-        char b[32];
-        snprintf(b, 32, "%llu", s->curId);
-        j += b;
-    }
-    j += ",\"msgs\":[";
-    for (size_t i = 0; i < s->msgs.size(); i++) {
-        if (i) j += ",";
-        WebMsgObj(s, s->msgs[i], (int)i, false, true, &j);
-    }
-    j += "],\"st\":";
-    WebStatusObj(s, &j);
-    j += "}";
-    WebPost(s, j);
+    picojson::object o;
+    o["t"] = picojson::value("msgs");
+    o["cur"] = JN((long long)s->curId);
+    picojson::array msgs;
+    for (size_t i = 0; i < s->msgs.size(); i++)
+        msgs.push_back(WebMsgValue(s, s->msgs[i], (int)i, false, true));
+    o["msgs"] = picojson::value(msgs);
+    o["st"] = WebStatusValue(s);
+    WebPost(s, picojson::value(o).serialize());
     s->syncN = (int)s->msgs.size();
     s->syncStamp = s->pushStamp;
     s->syncText = s->msgs.empty() ? 0 : s->msgs.back().text.size();
@@ -1166,27 +1182,24 @@ static void WebMsgsPush(AiSess* s) {
 
 static void WebLastPush(AiSess* s) {
     if (s->msgs.empty()) return;
-    std::string j = "{\"t\":\"last\",\"m\":";
-    WebMsgObj(s, s->msgs.back(), (int)s->msgs.size() - 1, true, true, &j);
-    j += ",\"st\":";
-    WebStatusObj(s, &j);
-    j += "}";
-    WebPost(s, j);
+    picojson::object o;
+    o["t"] = picojson::value("last");
+    o["m"] = WebMsgValue(s, s->msgs.back(), (int)s->msgs.size() - 1, true, true);
+    o["st"] = WebStatusValue(s);
+    WebPost(s, picojson::value(o).serialize());
     s->syncText = s->msgs.back().text.size();
     s->syncReason = s->msgs.back().reason.size();
 }
 
 static void WebStatusPush(AiSess* s) {
     AiWebCtx* w = (AiWebCtx*)s->web;
-    std::string j = "{\"t\":\"status\",";
-    std::string st;
-    WebStatusObj(s, &st);
-    j += st.substr(1);   /* 去掉 '{' 并入 */
-    j += "}";
-    WebPost(s, j);
+    picojson::value sv = WebStatusValue(s);
+    sv.get<picojson::object>()["t"] = picojson::value("status");
+    WebPost(s, sv.serialize());
     if (w) {
         w->stSending = s->sending;
         w->stNet = s->netStatus;
+        w->stNote = JobNoteOf(s);
         int phase = 0;
         if (s->job) {
             EnterCriticalSection(&s->job->cs);
@@ -1199,13 +1212,19 @@ static void WebStatusPush(AiSess* s) {
 
 static void WebUsagePush(AiSess* s) {
     AiWebCtx* w = (AiWebCtx*)s->web;
-    char b[320];
-    snprintf(b, 320,
-             "{\"t\":\"usage\",\"u\":{\"has\":%s,\"up\":%lld,\"uo\":%lld,\"ut\":%lld,\"uch\":%lld,"
-             "\"lp\":%lld,\"lc\":%lld,\"tps\":%.1f}}",
-             s->usageHas ? "true" : "false", s->uPrompt, s->uCompletion, s->uTotal, s->uCacheHit,
-             s->uLastPrompt, s->uLastCompletion, s->uTokPerSec);
-    WebPost(s, b);
+    picojson::object u;
+    u["has"] = JB(s->usageHas);
+    u["up"] = JN(s->uPrompt);
+    u["uo"] = JN(s->uCompletion);
+    u["ut"] = JN(s->uTotal);
+    u["uch"] = JN(s->uCacheHit);
+    u["lp"] = JN(s->uLastPrompt);
+    u["lc"] = JN(s->uLastCompletion);
+    u["tps"] = picojson::value(std::round(s->uTokPerSec * 10.0) / 10.0);   /* 0.1 精度 (前端原样显示) */
+    picojson::object o;
+    o["t"] = picojson::value("usage");
+    o["u"] = picojson::value(u);
+    WebPost(s, picojson::value(o).serialize());
     if (w) {
         w->uHas = s->usageHas;
         w->uUp = s->uPrompt;
@@ -1219,18 +1238,19 @@ static void WebUsagePush(AiSess* s) {
 }
 
 static void WebConvsPushOne(AiSess* s) {
-    std::string j = "{\"t\":\"convs\",\"convs\":[";
+    picojson::array convs;
     for (size_t i = g_hist.size(); i-- > 0;) {   /* 最新在前 (显示序) */
         const AiConv& c = g_hist[i];
-        if (i != g_hist.size() - 1) j += ",";
-        char head[96];
-        snprintf(head, 96, "{\"id\":%llu,\"t\":%lld,\"title\":", c.id, c.t);
-        j += head;
-        j += JsonEscapeUtf8(c.title);
-        j += "}";
+        picojson::object co;
+        co["id"] = JN((long long)c.id);
+        co["t"] = JN(c.t);
+        co["title"] = JS(c.title);
+        convs.push_back(picojson::value(co));
     }
-    j += "]}";
-    WebPost(s, j);
+    picojson::object o;
+    o["t"] = picojson::value("convs");
+    o["convs"] = picojson::value(convs);
+    WebPost(s, picojson::value(o).serialize());
     s->histSynced = true;
 }
 
@@ -1245,44 +1265,37 @@ void WebTouch(AiSess* s) {
 
 /* JS ready → 会话全量快照 (boot) */
 static void WebPushBoot(AiSess* s) {
-    std::string j = "{\"t\":\"boot\",\"cfg\":";
-    j += U8(WebCfgJson());
-    j += ",\"pal\":";
-    j += U8(WebPaletteJson(s));
-    j += ",\"cur\":";
-    {
-        char b[32];
-        snprintf(b, 32, "%llu", s->curId);
-        j += b;
-    }
-    j += ",\"convs\":[";
+    picojson::array convs;
     for (size_t i = g_hist.size(); i-- > 0;) {
         const AiConv& c = g_hist[i];
-        if (i != g_hist.size() - 1) j += ",";
-        char head[96];
-        snprintf(head, 96, "{\"id\":%llu,\"t\":%lld,\"title\":", c.id, c.t);
-        j += head;
-        j += JsonEscapeUtf8(c.title);
-        j += "}";
+        picojson::object co;
+        co["id"] = JN((long long)c.id);
+        co["t"] = JN(c.t);
+        co["title"] = JS(c.title);
+        convs.push_back(picojson::value(co));
     }
-    j += "],\"msgs\":[";
-    for (size_t i = 0; i < s->msgs.size(); i++) {
-        if (i) j += ",";
-        WebMsgObj(s, s->msgs[i], (int)i, false, true, &j);
-    }
-    j += "],\"usage\":{\"has\":";
-    j += s->usageHas ? "true" : "false";
-    {
-        char b[160];
-        snprintf(b, 160, ",\"up\":%lld,\"uo\":%lld,\"ut\":%lld,\"uch\":%lld,\"lp\":%lld,\"lc\":%lld,\"tps\":%.1f}",
-                 s->uPrompt, s->uCompletion, s->uTotal, s->uCacheHit,
-                 s->uLastPrompt, s->uLastCompletion, s->uTokPerSec);
-        j += b;
-    }
-    j += ",\"st\":";
-    WebStatusObj(s, &j);
-    j += "}";
-    WebPost(s, j);
+    picojson::array msgs;
+    for (size_t i = 0; i < s->msgs.size(); i++)
+        msgs.push_back(WebMsgValue(s, s->msgs[i], (int)i, false, true));
+    picojson::object u;
+    u["has"] = JB(s->usageHas);
+    u["up"] = JN(s->uPrompt);
+    u["uo"] = JN(s->uCompletion);
+    u["ut"] = JN(s->uTotal);
+    u["uch"] = JN(s->uCacheHit);
+    u["lp"] = JN(s->uLastPrompt);
+    u["lc"] = JN(s->uLastCompletion);
+    u["tps"] = picojson::value(std::round(s->uTokPerSec * 10.0) / 10.0);   /* 0.1 精度 (前端原样显示) */
+    picojson::object o;
+    o["t"] = picojson::value("boot");
+    o["cfg"] = WebCfgValue();
+    o["pal"] = WebPalValue(s);
+    o["cur"] = JN((long long)s->curId);
+    o["convs"] = picojson::value(convs);
+    o["msgs"] = picojson::value(msgs);
+    o["usage"] = picojson::value(u);
+    o["st"] = WebStatusValue(s);
+    WebPost(s, picojson::value(o).serialize());
     s->syncN = (int)s->msgs.size();
     s->syncStamp = s->pushStamp;
     s->syncText = s->msgs.empty() ? 0 : s->msgs.back().text.size();
@@ -1294,6 +1307,7 @@ static void WebPushBoot(AiSess* s) {
         w->stSending = s->sending;
         w->stNet = s->netStatus;
         w->stPhase = -2;   /* 强制下次 status 变化即推 */
+        w->stNote = JobNoteOf(s);
         w->uHas = s->usageHas;
         w->uUp = s->uPrompt;
         w->uUo = s->uCompletion;
@@ -1324,7 +1338,8 @@ void WebSyncSession(AiSess* s) {
         phase = s->job->phase;
         LeaveCriticalSection(&s->job->cs);
     }
-    if (!w || w->stSending != s->sending || w->stNet != s->netStatus || w->stPhase != phase) {
+    if (!w || w->stSending != s->sending || w->stNet != s->netStatus || w->stPhase != phase ||
+        w->stNote != JobNoteOf(s)) {
         WebStatusPush(s);
     }
     if (!w || !w->uHas != !s->usageHas || w->uUp != s->uPrompt || w->uUo != s->uCompletion ||
@@ -1336,10 +1351,10 @@ void WebSyncSession(AiSess* s) {
 
 void WebPushSkin(AiSess* s) {
     if (!s->web) return;
-    std::string j = "{\"t\":\"pal\",\"pal\":";
-    j += U8(WebPaletteJson(s));
-    j += "}";
-    WebPost(s, j);
+    picojson::object o;
+    o["t"] = picojson::value("pal");
+    o["pal"] = WebPalValue(s);
+    WebPost(s, picojson::value(o).serialize());
 }
 
 /* ==================== JS 命令 (JS → C++) ==================== */
@@ -1347,10 +1362,10 @@ void WebPushSkin(AiSess* s) {
 static void CfgBroadcast() {   /* 配置全进程生效: 推给全部活跃会话 (状态点/分段控件跟手) */
     for (auto& ss : g_sess) {
         if (!ss.inUse || !ss.web) continue;
-        std::string j = "{\"t\":\"cfg\",\"cfg\":";
-        j += U8(WebCfgJson());
-        j += "}";
-        WebPost(&ss, j);
+        picojson::object o;
+        o["t"] = picojson::value("cfg");
+        o["cfg"] = WebCfgValue();
+        WebPost(&ss, picojson::value(o).serialize());
         WebSyncSession(&ss);   /* 完备态变化影响状态点 */
     }
 }
@@ -1438,6 +1453,62 @@ std::wstring DonateQrDataUrl(int kind) {   /* 0=微信 1=支付宝; 空串 = 不
     std::wstring r = urls[kind];
     ReleaseSRWLockExclusive(&lock);
     return r;
+}
+
+/* ---- 点击链接的路径解析 (前端 linkifyPaths 的兜底, 2026-09-25) ----
+ * 前端把路径后的词贪婪并进链接 (空格粘连, "决战! 碧游村4K")、句尾闭合标点剥出链接外
+ * ("美人鱼 (2016)" 的 ")"), 链接串因此可能比真路径长或短一截。这里按
+ * "整串 → 补一个被剥的闭合标点 → 按空格从尾部逐段回退(每层再试补标点)" 找最长真实存在者;
+ * 存在性 = 文件系统为准, 命中后能进索引 (GetFileIdByPath) 就给 fid 走宿主 OpenFile (打开行为生效)。
+ * 返回 ≥0 = 索引 FileId; -1 = 文件系统存在但不在索引 (outPath=可用路径); -2 = 全不中。 */
+static int ResolveClickablePath(xjs_engine* eng, const std::wstring& raw, std::wstring* outPath)
+{
+    static const wchar_t* const closers[] = {
+        L")", L"）", L"]", L"】", L"」", L"』", L"》", L"'", L"\"", L"!", L"。"
+    };
+    auto hit = [&](const std::wstring& p, int* fid)->bool {
+        bool drive = p.size() >= 4 && p[1] == L':';           /* "C:\a" 起 */
+        bool unc   = p.size() >= 5 && p[0] == L'\\' && p[1] == L'\\';
+        if (!drive && !unc) return false;                     /* 拒绝 "C:" 一类退化候选 */
+        if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        *fid = -1;
+        if (eng) {
+            int f = xjs_db_GetFileIdByPath(eng, U8(p).c_str());
+            if (f >= 0) *fid = f;
+        }
+        *outPath = p;                                         /* 命中即落账可用路径 */
+        return true;
+    };
+    auto trailPunct = [](wchar_t ch)->bool {
+        return ch == L'.' || ch == L',' || ch == L';' || ch == L':' || ch == L'!' || ch == L'?' ||
+               ch == L'\'' || ch == L'"' || ch == 0x2026 /* … */ ||
+               ch == L'，' || ch == L'。' || ch == L'；' || ch == L'！' || ch == L'？';
+    };
+    std::wstring cur = raw;
+    for (;;) {
+        /* 每层两轮: 0=原样 1=剥尾部普通标点 (空格断词把 "F:\a\b," 连逗号吞进链接的余量);
+         * 每轮先试整串再试补一个闭合标点 (前端剥离的 ")" 真是名字一部分时还原)。 */
+        int f = -999;
+        bool done = false;
+        for (int round = 0; round < 2 && !done; round++) {
+            std::wstring p = cur;
+            if (round == 1)
+                while (!p.empty() && trailPunct(p.back())) p.pop_back();
+            if (p.empty()) continue;
+            if (hit(p, &f)) { done = true; break; }
+            for (const wchar_t* cl : closers) {
+                if (hit(p + cl, &f)) { done = true; break; }
+            }
+        }
+        if (done) return f;
+        size_t sp = cur.find_last_of(L' ');
+        if (sp == std::wstring::npos) break;
+        std::wstring head = cur.substr(0, sp);
+        while (!head.empty() && (head.back() == L' ' || head.back() == L'\t')) head.pop_back();
+        if (head.empty()) break;
+        cur = head;
+    }
+    return -2;
 }
 
 void WebCommand(AiSess* s, const Jv& msg) {
@@ -1548,7 +1619,17 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         return;
     }
-    if (c == L"pallow" || c == L"pdeny") {   /* 策略询问卡: 允许并继续 / 保持拒绝 */
+    if (c == L"epolicy") {   /* 命令执行权限档 (0 禁用 2 询问 3 允许; 1 不是合法档) */
+        const Jv* v = msg.Get(L"v");
+        if (v && v->t == 2 && v->num >= 0 && v->num <= 3 && v->num != 1) {
+            g_cfg.execPolicy = (int)v->num;
+            CfgSave();
+            if (s->job) InterlockedExchange(&s->job->execPolicy, g_cfg.execPolicy);
+            CfgBroadcast();
+        }
+        return;
+    }
+    if (c == L"pallow" || c == L"pdeny") {   /* 文件策略询问卡: 允许并继续 / 保持拒绝 (只碰文件卡, 不碰命令卡) */
         bool allow = c == L"pallow";
         if (allow) {
             g_cfg.filePolicy = 3;
@@ -1559,7 +1640,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         for (auto& m : s->msgs) {
             if (m.role != 2) continue;
             for (auto& st : m.steps) {
-                if (st.state == 4) {
+                if (st.state == 4 && st.kind != 11) {
                     st.state = 3;
                     st.err = allow ? L"已允许文件操作, 本次回答后生效" : L"用户保持拒绝";
                 }
@@ -1567,6 +1648,24 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         WebTouch(s);
         WebSyncSession(s);
+        return;
+    }
+    if (c == L"eallow" || c == L"edeny") {
+        /* 命令执行确认卡: worker 正**挂起**在该调用上等裁决 (dsh approval 口径) —
+           这里只落标志, 卡片状态 (执行中/失败) 由 worker 推进并经泵同步。
+           一次只有一张询问卡 (挂起期间模型无法再发调用), 裸标志即可;
+           作业已结束的旧卡点按钮 = 无收件人, 自然无效。execPolicy 档位不变
+           (要"不再问"请用户自己切「允许」)。 */
+        AiJob* aj = s->job;
+        if (aj) {
+            if (c == L"eallow") {
+                EnterCriticalSection(&aj->cs);
+                InterlockedExchange(&aj->execGrant, 1);
+                LeaveCriticalSection(&aj->cs);
+            } else {
+                InterlockedExchange(&aj->execDeny, 1);
+            }
+        }
         return;
     }
     if (c == L"adj") {
@@ -1746,7 +1845,13 @@ void WebCommand(AiSess* s, const Jv& msg) {
         bool hasIdParam = idv != NULL;
         int fid = -1;
         if (idv && idv->t == 2) fid = (int)idv->num;
-        else if (!path.empty() && eng) fid = xjs_db_GetFileIdByPath(eng, U8(path).c_str());
+        else if (!path.empty()) {
+            /* 链接带路径: 过解析器 (空格回退取最长存在前缀 / 补被剥的闭合标点);
+             * ≥0=索引命中给 fid 走宿主 OpenFile; -1=索引外但文件系统存在, path 已定为可用路径;
+             * -2=全不中, path 保持原文走下方 ShellExecute 失败提示 */
+            int rf = ResolveClickablePath(eng, path, &path);
+            if (rf >= 0) fid = rf;
+        }
         int rc = (fid >= 0 && g_host) ? g_host->OpenFile(g_ctx, s->tok, fid, isReveal ? 1 : 0)
                                       : XJS_PLUGIN_ERR_NOTFOUND;
         if (rc != XJS_PLUGIN_OK) {
@@ -1783,6 +1888,8 @@ void WebCommand(AiSess* s, const Jv& msg) {
             const char* p = eng ? xjs_db_GetPath(eng, (int)idv->num) : NULL;
             if (p) path = W8(p);
         }
+        else if (!path.empty())
+            ResolveClickablePath(xjs_GetDefaultEngine(), path, &path);   /* 全不中(-2) = 照抄原文复制 */
         if (!path.empty() && g_host)
             g_host->ClipboardSetText(g_ctx, U8(path).c_str());
         return;

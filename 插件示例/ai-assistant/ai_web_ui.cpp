@@ -12,7 +12,8 @@
  * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); 文件动作 [文件名](xjs://open|reveal?id=<FileId>)
  * 只带引擎 FileId — 路径由程序按 ID 解析, 前端不接触路径 (2026-09-25 用户口径); path 参数 =
  * 旧历史消息的路径版链接, 继续受理; 正文里确有绝对路径 (旧消息/ai.row 的路径字段) 仍自动识别为文件链接
- * (单击=打开, 右键=打开/定位/复制); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
+ * (单击=打开, 右键=打开/定位/复制); 工具卡片 (.step, C++ 生成带 data-q=查询全文) 右键=复制查询语句
+ * (2026-09-25; 头部 .scmd 只显示前 200 字, 复制走 data-q 全文); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
  * 安全面: CSP 关 fetch/XHR/表单/外域; 模型输出永不产生活 HTML (C++ md4c 层转义裁剪);
  * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力 (右键菜单只在
  * 卡片/路径上接管为自绘菜单, 其余区域保留原生菜单 = 选区复制入口)。
@@ -435,6 +436,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-typing i:nth-child(2){animation-delay:150ms}
 .ai-typing i:nth-child(3){animation-delay:300ms}
 @keyframes ai-typing-bounce{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+/* 过程状态条 (重试/自愈中; C++ 经 status.note 推): 淡色小字跟在打字点/过程面板摘要处 */
+.ai-note{font-size:12px;color:var(--text-tertiary);white-space:nowrap}
 
 /* ---- 会话内轮次跳转条 (左缘紧凑刻度组) ----
    默认刻意压到很淡, 鼠标进入整组才提亮 —— 辅助导航, 不跟对话内容抢注意力 */
@@ -473,6 +476,15 @@ textarea,input{user-select:text;-webkit-user-select:text}
                transition:background-color 120ms ease,color 120ms ease,border-color 120ms ease}
 .ai-suggestion:hover{border-color:color-mix(in srgb,var(--accent-violet) 45%,var(--glass-border));
                      background:var(--btn-secondary-hover);color:var(--text-primary)}
+/* 换一批: 淡文字小按钮, 与捐赠行同级的"低调可点"档 */
+.ai-sugg-refresh{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:3px 10px;border:none;
+               background:none;border-radius:999px;color:var(--text-tertiary);font:inherit;font-size:11px;
+               cursor:default;transition:color 120ms ease}
+.ai-sugg-refresh .glyph{font-size:12px}
+.ai-sugg-refresh:hover{color:var(--accent-violet)}
+/* 重抽后整组轻微上浮入场 (重开菜单式重触发: 移除 rolling → 强制回流 → 加回) */
+.ai-suggestions.rolling .ai-suggestion{animation:ai-sugg-in 220ms ease both}
+@keyframes ai-sugg-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 .ai-donate-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px}
 .ai-donate{padding:0 2px;background:none;border:none;color:var(--text-tertiary);
            font:inherit;font-size:11px;cursor:default;text-decoration:underline dotted;
@@ -742,6 +754,24 @@ textarea,input{user-select:text;-webkit-user-select:text}
                   <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
               </div>
             </div>
+            <div class="ai-cmd-policy" id="epolicy">
+              <button class="ai-cmd-policy-button" id="epolicyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE7EE;</span>
+                <span id="epolicyLabel"></span>
+                <span class="ai-cmd-policy-chevron glyph" aria-hidden="true">&#xE70D;</span>
+              </button>
+              <div class="ai-cmd-policy-menu" id="epolicyMenu" role="listbox" aria-label="命令执行权限" hidden>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="0" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="2" role="option" aria-checked="true">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="3" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+              </div>
+            </div>
             <button class="ai-usage" id="usageBtn" type="button" aria-expanded="false">
               <span class="ai-usage-bar" aria-hidden="true"><i class="ai-usage-bar-fill" id="ubarf"></i></span>
               <span class="ai-usage-brief" id="ubrief"></span>
@@ -788,12 +818,45 @@ function histTime(t){if(!t)return '';const d=new Date(t*1000),now=new Date();
   if(d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth()&&d.getDate()===now.getDate())
     return p(d.getHours())+':'+p(d.getMinutes());
   return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
-const SUGGS=['现在哪些大文件占用空间最多','找出一周内修改过的文档并列个清单','看看当前的文件分类和重复文件'];
+)AIWEBUI"
+           LR"AIWEBUI(
+/* ---- 空态示例提示词池 (36 条, 每次随机抽 6 条展示, 「换一批」重新抽取) ---- */
+const SUGGS=[
+  '现在哪些大文件占用空间最多','找出一周内修改过的文档并列个清单','看看当前的文件分类和重复文件',
+  '哪些文件夹占用的空间最大','统计一下各个磁盘分区的空间占用','找出超过 1GB 的大视频文件',
+  '找出超过 100MB 的压缩包','列出最近三天新建的文件','把今天修改过的文件列出来',
+  '列出本月修改过的 Excel 表格','找出上周下载的文件','找出一年都没打开过的旧文档',
+  '今年拍摄的照片都有哪些','桌面上现在都有哪些文件','下载文件夹里有哪些安装包可以清理',
+  '哪些临时文件可以清理掉','找出内容相同的重复大文件','找出文件名重复的文件',
+  '统计每种扩展名的文件数量','找出文件名里带“简历”的文件','找出文件名里带“备份”的文件',
+  '找出所有叫“新建文件夹”的文件夹','找出名字最长的文件','找出没有扩展名的文件',
+  '列出所有 PDF 并按大小排序','列出电脑里所有的 Word 文档','找出所有的 PSD 设计源文件',
+  '列出系统里安装的字体文件','找出图片文件夹里的旧截图','统计一下音乐文件总共占了多少空间',
+  '找出 C 盘根目录下的大文件','找出路径层次特别深的文件','统计照片和视频各占多少空间',
+  '找出最近浏览过但很久没修改的文件','找出小文件特别多的文件夹','帮我把下载文件夹的文件按类型分个类'
+];
+/* 洗牌副本取前 6 (天然不重复); excl = 上一批, 池够大时优先避开, 保证「换一批」肉眼可见地全换掉 */
+function shuffleSuggs(excl){
+  const pool=SUGGS.slice();
+  for(let i=pool.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;const t=pool[i];pool[i]=pool[j];pool[j]=t;}
+  const out=(excl&&excl.length)?pool.filter(q=>excl.indexOf(q)<0):pool;
+  return out.slice(0,6);
+}
+let SUGG_CUR=shuffleSuggs(null);
+function suggsHtml(){return SUGG_CUR.map(q=>'<button class="ai-suggestion" type="button">'+esc(q)+'</button>').join('');}
+function rerollSuggs(){
+  SUGG_CUR=shuffleSuggs(SUGG_CUR);
+  const box=$('suggBox');if(!box)return;
+  box.classList.remove('rolling');void box.offsetWidth;   /* 重触发入场动画 */
+  box.innerHTML=suggsHtml();
+  box.classList.add('rolling');
+}
 const EMPTY_HTML='<div class="ai-empty" id="empty">'
   +'<span class="ai-empty-icon glyph" aria-hidden="true">&#xE99A;</span>'
   +'<span class="ai-empty-title">用对话来查找和整理文件</span>'
   +'<span class="ai-empty-desc">我可以读取索引库的全部实时数据（文件名、路径、大小、时间、分类），直接执行搜索并打开文件；每一步工具调用都会以卡片展示。</span>'
-  +'<div class="ai-suggestions">'+SUGGS.map(q=>'<button class="ai-suggestion" type="button">'+esc(q)+'</button>').join('')+'</div>'
+  +'<div class="ai-suggestions" id="suggBox">'+suggsHtml()+'</div>'
+  +'<button class="ai-sugg-refresh" id="suggRefresh" type="button"><span class="glyph" aria-hidden="true">&#xE72C;</span>换一批</button>'
   +'<span class="ai-donate-row">'
   +'<button class="ai-donate" type="button" data-q="介绍一下作者和这个软件">👤 关于作者</button>'
   +'<span class="ai-donate-sep">·</span>'
@@ -808,14 +871,22 @@ const POLICY=[
            LR"AIWEBUI(  {k:'ask',    n:'询问', h:'每次写入或删除前先询问，确认后才执行'},
   {k:'allow',  n:'允许', h:'所有文件操作都直接执行，不询问'},
 ];
+/* 命令执行权限三档 (run_command 外部程序; 没有"只读" — 执行类默认询问, 允许一次只放一条)。
+ * 档位值 0/2/3 与文件权限共轨, 但本表只列三档 — 必须按值匹配, 不能拿值当数组下标 */
+const EPOLICY=[
+  {v:0, k:'off',   n:'禁用', h:'不允许 AI 执行任何外部命令'},
+  {v:2, k:'ask',   n:'询问', h:'每条命令先展示给你确认，点「允许一次」才执行'},
+  {v:3, k:'allow', n:'允许', h:'AI 可直接执行命令，不再询问（高危命令仍会标记提醒）'},
+];
+function epolicyMeta(v){for(const p of EPOLICY)if(p.v===v)return p;return EPOLICY[1];}
 
 /* ==================== 状态 ==================== */
 const S={
-  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,name:'',ctx:0,maxOut:0,active:'',profs:[]},
+  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,name:'',ctx:0,maxOut:0,active:'',profs:[]},
   pal:null, convs:[], msgs:[], cur:0,
-  sending:false, net:0, phase:0,
+  sending:false, net:0, phase:0, note:'',   /* note = 过程状态条 (重试/自愈中, status 推送带) */
   usage:{has:false,up:0,uo:0,ut:0,uch:0,lp:0,lc:0,tps:0},
-  sideOpen:false, cfgOpen:false, policyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
+  sideOpen:false, cfgOpen:false, policyOpen:false, epolicyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
   profDirty:false,  /* 表单里有未保存的编辑: 挡住 C++ 整包下发把正在敲的内容冲掉 */
   delArmed:false, delTimer:0, modelTimer:0,
   clearArmed:false, clearTimer:0,   /* 清空记录两步确认 (首击待确认, 4s 内再击才清) */
@@ -1061,7 +1132,8 @@ function turnPartHtml(m,mi,isFinal){
   }
   let inner='';
   if(S.sending&&mi===S.msgs.length-1&&S.phase===0&&m.empty){
-    inner+='<div class="ai-bubble">'+typingHtml()+'</div>';   /* 正在生成: 三点在气泡内 */
+    /* 正在生成: 三点在气泡内; 过程状态条 (重试/自愈中) 淡色小字跟随 */
+    inner+='<div class="ai-bubble">'+typingHtml()+(S.note?' <span class="ai-note">'+esc(S.note)+'</span>':'')+'</div>';
   }else{
     inner+=m.html||'<div class="ai-bubble">&nbsp;</div>';
     if(m.r===1&&!(S.sending&&mi===S.msgs.length-1)) inner+=metaHtml(mi);   /* 结尾行只给定稿回答 */
@@ -1098,7 +1170,7 @@ function turnGroupHtml(start){
     const isLive=S.sending&&end===S.msgs.length;
     const key=S.cur+':'+start;
     const open=S.turnLog[key]!==undefined?S.turnLog[key]:isLive;
-    const sum=!isLive?'':(S.phase===1?'执行中…':'生成中…');
+    const sum=!isLive?'':(S.note||(S.phase===1?'执行中…':'生成中…'));
     main='<div class="ai-turn-log'+(open?' open':'')+'">'
         +'<button class="ai-turn-log-head" type="button" data-act="turnlog" aria-expanded="'+(open?'true':'false')+'">'
         +'<span class="ai-turn-log-ic glyph" aria-hidden="true">&#xE9D9;</span>'
@@ -1315,30 +1387,52 @@ function jumpTo(round){
  * 自动文件链接 (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
  * enhance() 挂在每次消息 HTML 落地之后 (innerHTML 重建后节点全新, 幂等无需去重)。 */
 const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua过滤','lua-exec':'Lua执行',lua_exec:'Lua执行'};
-/* 路径字符边界: 停在 空格/引号/尖括号/管道/星号/冒号/问号/正斜杠 + 全角标点与中文句读,
-   其余 (含括号、逗号、点、&、汉字) 都是合法文件名字符, 种子照吞 —
-   "美人鱼 (2016)\美人鱼 (2016).mkv"、"a, b & c.mkv" 才切得完整 */
-const PATH_STOP=/[\s'"`<>|*\/:?\u3000-\u303F\uFF01-\uFF5E\u2010-\u2027]/;
-const PATH_RE=new RegExp("(?<![A-Za-z0-9])(?:[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\s'\"`<>|*/:?\\u3000-\\u303F\\uFF01-\\uFF5E\\u2010-\\u2027]+","g");   /* lookbehind 排除 https: 里的 "s:/" */
-/* 路径含空格 ("C:\Program Files\App\x.exe"、"美人鱼 (2016)\美人鱼 (2016).mkv"、整句英文长文件名):
- * 种子切到空格后按词延伸 — 词内含 \ (路径续段) 或以"点+字母扩展名"收尾 (文件名) 才落锚记为路径;
- * 纯汉字词 = 正文开始, 硬停 (锚点之前的部分就是路径); 其余 ASCII 词先吃进继续看。
- * "共 12.5 GB" 的 12.5 不会被当扩展名 (限字母开头), "C:\a\b 是 x.txt 备份" 的"是"先断, 不会错并。 */
+/* 路径字符边界: 硬停在 空白/引号/尖括号/管道/星号/冒号/问号/正斜杠 (ASCII);
+   全角标点与中文句读不是硬边界 — 名字里合法 ("异人之下（2024）"), 仅当其后紧跟
+   汉字或另一全角标点 (= 正文续写) 才算边界 (seedEnd/segStopAt); 其余 (括号、逗号、点、&、汉字) 照吞 */
+const PATH_STOP=/[\s'"`<>|*\/:?]/;
+const PATH_RE=new RegExp("(?<![A-Za-z0-9])(?:[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\s'\"`<>|*/:?]+","g");   /* lookbehind 排除 https: 里的 "s:/" */
+const CJK_CH=/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
+const CM_STOP=/[\u3000-\u303F\uFF01-\uFF5E\u2010-\u2027]/;
+/* 种子截断: 全角标点后跟 汉字/全角标点 = 正文开始, 从该标点处截 ("F:\a\b，然后" 的"，"_);
+   后跟 ASCII/空白/结尾 = 名字的一部分 ("（2024）.mkv"、"（2024） 第2季"、"打开 F:\a\b。" 交给剥离) */
+function seedEnd(text,s,e){
+  for(let i=s;i<e;i++){
+    if(CM_STOP.test(text[i])){
+      const nx=text[i+1];
+      if(nx!==undefined&&(CJK_CH.test(nx)||CM_STOP.test(nx)))return i;
+    }
+  }
+  return e;
+}
+/* 路径含空格 ("C:\Program Files\App\x.exe"、"美人鱼 (2016)\美人鱼 (2016).mkv"、
+ * "知短剧知短...锐 (2018)"、"决战! 碧游村4K"): 空格后的词贪婪并入链接 —
+ * 旧"含 \ 或带扩展名才落锚"规则会把无扩展名的 "(2018)"/"DVD版"/汉字段切断 (2026-09-25 实锤);
+ * 纯汉字词 = 正文开始, 硬停; 词内全角标点后跟汉字/全角标点同样停 ("(2024)。后续")。
+ * 贪婪可能把路径后的正文词粘进链接 — 点不准由 C++ 侧 ResolveClickablePath
+ * (ai_web.cpp) 按空格从尾部逐段回退取最长存在前缀兜底, 这里宁可多并。 */
 const PATH_CJKWORD=/^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+$/;
 function pathStopCh(ch){return PATH_STOP.test(ch);}
+function segStopAt(text,j){
+  const ch=text[j];
+  if(ch===undefined||pathStopCh(ch))return true;
+  if(CM_STOP.test(ch)){
+    const nx=text[j+1];
+    if(nx===undefined||CJK_CH.test(nx)||CM_STOP.test(nx))return true;
+  }
+  return false;
+}
 function extendPath(text,e){
-  let best=e,k=e;
+  let k=e;
   for(;;){
     if(text[k]!==' ')break;
     let j=k+1;
-    while(j<text.length&&!pathStopCh(text[j]))j++;
+    while(j<text.length&&!segStopAt(text,j))j++;
     if(j===k+1)break;
-    const seg=text.slice(k+1,j);
-    if(PATH_CJKWORD.test(seg))break;
+    if(PATH_CJKWORD.test(text.slice(k+1,j)))break;
     k=j;
-    if(seg.indexOf('\\')>=0||/\.[A-Za-z][A-Za-z0-9]{0,4}$/.test(seg))best=k;
   }
-  return best;
+  return k;
 }
 const LUA_KW=new Set('and break do else elseif end false for function goto if in local nil not or repeat return then true until while self'.split(' '));
 const SQL_KW=new Set('select from where group by order having limit offset as and or not null is like ilike in between case when then else end distinct join left right inner outer cross on asc desc union all exists insert into values update set delete create table view index with cast interval now current_date current_timestamp'.split(' '));
@@ -1440,6 +1534,25 @@ function highlightCode(root){
 )AIWEBUI"
            LR"AIWEBUI(/* 气泡正文里的绝对路径 → 可点击 .ai-path 链接 (TreeWalker 只碰文本节点,
    跳过代码块/链接/已有链接/按钮; 句尾标点剥出链接外) */
+/* 句尾标点剥离: 配对 closers 只在失衡 (= 正文括号包住了路径, 如 "(见 F:\a\b)") 时剥,
+   平衡的名字后缀保留 ("美人鱼 (2016)" 结尾的 ")" 不再被剥掉, 旧规则恒剥 = 点不开);
+   名字末尾真带 closer 的由 C++ 侧 ResolveClickablePath 补标点兜底 */
+function stripPathTail(p){
+  for(;;){
+    const ch=p[p.length-1];
+    if(ch===undefined)return p;
+    const ci=')）]}】」』》〉'.indexOf(ch);
+    if(ci>=0){
+      const op='(（[{【「『《〈'[ci];
+      let no=0,nc=0;
+      for(const c of p){if(c===op)no++;else if(c===ch)nc++;}
+      if(nc>no){p=p.slice(0,-1);continue;}
+      return p;
+    }
+    if(/[.。,，;；:!?‘’“”…'"]$/.test(ch)){p=p.slice(0,-1);continue;}
+    return p;
+  }
+}
 function linkifyPaths(root){
   const scope=root||$('threadInner');
   const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT,{acceptNode:function(n){
@@ -1457,10 +1570,11 @@ function linkifyPaths(root){
     PATH_RE.lastIndex=0;
     while((m=PATH_RE.exec(text))){
       if(m.index+m[0].length<=last)continue;   /* 已被上一个延伸段覆盖 */
-      const end=extendPath(text,m.index+m[0].length);
+      const end=extendPath(text,seedEnd(text,m.index,m.index+m[0].length));
+      if(end-m.index<4)continue;   /* 截到只剩盘符根 ("C:\（注）…" 的 "C:\") 不成链接 */
       if(end<=last)continue;
       const path=text.slice(m.index,end);
-      const strip=path.replace(/[.。,，;；:!?)】」》>'"\u2019\u201d]+$/,'');
+      const strip=stripPathTail(path);
       if(strip.length<3)continue;
       if(!frag)frag=document.createDocumentFragment();
       if(m.index>last)frag.appendChild(document.createTextNode(text.slice(last,m.index)));
@@ -1528,6 +1642,8 @@ function copyTurn(mi){
 function bindThread(){
   const inner=$('threadInner');
   inner.addEventListener('click',e=>{
+    const rf=e.target.closest('.ai-sugg-refresh');
+    if(rf){rerollSuggs();return;}
     const sug=e.target.closest('.ai-suggestion');
     if(sug){if(!S.sending)post({c:'send',text:sug.textContent});return;}
     const dnt=e.target.closest('.ai-donate');
@@ -1576,6 +1692,10 @@ function bindThread(){
     if(ab){const act=ab.getAttribute('data-act');
       if(act==='authallow')post({c:'pallow'});
       else if(act==='authdeny')post({c:'pdeny'});
+      else if(act==='execallow'||act==='execdeny'){   /* 命令执行确认卡: 按卡定位 (允许一次只放这条) */
+        const box=ab.closest('.sask');
+        if(box)post({c:act==='execallow'?'eallow':'edeny',
+          mi:+box.getAttribute('data-mi'),si:+box.getAttribute('data-si')});}
       else if(act==='adjApply'||act==='adjIgnore'||act==='adjApplyAll'||act==='adjIgnoreAll'){
         const box=ab.closest('.sadj'),it=ab.closest('.sadj-it');
         if(box)post({c:'adj',act:act.slice(3).toLowerCase(),
@@ -1615,7 +1735,8 @@ function bindThread(){
         turn.replaceWith(nw);applyOpenSteps();}
       return;}
   });
-  /* 右键: 文件路径 / 搜索卡片的操作菜单 (其余区域保留浏览器原生菜单 = 选区复制入口) */
+)AIWEBUI"
+           LR"AIWEBUI(/* 右键: 文件路径 / 搜索卡片 / 工具卡片的操作菜单 (其余区域保留浏览器原生菜单 = 选区复制入口) */
   inner.addEventListener('contextmenu',e=>{
     const chip=e.target.closest('.ai-chip');
     if(chip){
@@ -1645,6 +1766,15 @@ function bindThread(){
         '-',
         {t:'复制路径',fn:()=>post(Object.assign({c:'copypath'},ref))}
       ],e.clientX,e.clientY);
+      return;
+    }
+    /* 工具卡片 (.step): 右键 = 复制查询语句全文 (data-q 为未截断原文, .scmd 只显示前 200 字)。
+       落在此分支前, 卡内样本路径已被 .ai-path 分支接走; 其余区域保留原生菜单 = 选区复制入口 */
+    const stp=e.target.closest('.step');
+    if(stp){
+      e.preventDefault();
+      const q=stp.getAttribute('data-q')||'';
+      if(q)showCtx([{t:'复制查询语句',fn:()=>post({c:'copy',text:q})}],e.clientX,e.clientY);
       return;
     }
   });
@@ -1719,6 +1849,7 @@ function renderComposer(){
   $('cbox').setAttribute('data-streaming',S.sending?'true':'false');
   refreshSendState();
   renderPolicy();
+  renderEpolicy();
   renderUsage();
 }
 function doSend(){
@@ -1756,6 +1887,7 @@ function policySetOpen(open){
   clearTimeout(S.policyTimer);
   if(open){
     usageSetOpen(false);   /* 互斥: 用量浮层同从工具条向上展开 */
+    epolicySetOpen(false);   /* 互斥: 命令执行权限下拉 (close 分支不回环) */
     menu.classList.remove('closing');
     menu.classList.add('opening');
     menu.hidden=false;
@@ -1768,6 +1900,45 @@ function policySetOpen(open){
   if(menu.hidden)return;
   menu.classList.add('closing');
   S.policyTimer=setTimeout(()=>{
+    if(btn.getAttribute('aria-expanded')!=='true'){menu.hidden=true;menu.classList.remove('closing');}
+  },90);
+}
+
+/* ---- 命令执行权限下拉 (run_command 外部程序; 结构复用文件权限下拉) ---- */
+function renderEpolicy(){
+  const cur=epolicyMeta(S.cfg.epolicy);
+  $('epolicyLabel').textContent=cur.n;
+  const btn=$('epolicyBtn');
+  btn.dataset.policy=cur.k;
+  btn.title='命令执行权限：'+cur.h;
+  document.querySelectorAll('#epolicyMenu .ai-cmd-policy-option').forEach(op=>{
+    const i=+op.getAttribute('data-epolicy');
+    const p=epolicyMeta(i);
+    op.querySelector('.ai-cmd-policy-option-label').textContent=p.n;
+    op.querySelector('.ai-cmd-policy-option-hint').textContent=p.h;
+    op.setAttribute('aria-checked',i===S.cfg.epolicy?'true':'false');
+  });
+}
+function epolicySetOpen(open){
+  S.epolicyOpen=open;   /* 开关标志先落账 (点外收起/Escape/按钮切换都读它) */
+  const btn=$('epolicyBtn'),menu=$('epolicyMenu');
+  btn.setAttribute('aria-expanded',open?'true':'false');
+  clearTimeout(S.epolicyTimer);
+  if(open){
+    usageSetOpen(false);
+    policySetOpen(false);
+    menu.classList.remove('closing');
+    menu.classList.add('opening');
+    menu.hidden=false;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      if(btn.getAttribute('aria-expanded')==='true')menu.classList.remove('opening');
+    }));
+    return;
+  }
+  menu.classList.remove('opening');
+  if(menu.hidden)return;
+  menu.classList.add('closing');
+  S.epolicyTimer=setTimeout(()=>{
     if(btn.getAttribute('aria-expanded')!=='true'){menu.hidden=true;menu.classList.remove('closing');}
   },90);
 }
@@ -1841,7 +2012,7 @@ function handle(m){
     case 'boot':
       S.cfg=m.cfg;S.pal=m.pal;applyPal(S.pal);
       S.convs=m.convs||[];S.cur=m.cur||0;S.msgs=m.msgs||[];
-      S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;
+      S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;S.note=m.st.note||'';
       S.usage=m.usage||S.usage;
       maybeAutoCollapseTurn();
       renderAll();break;
@@ -1859,19 +2030,19 @@ function handle(m){
     case 'msgs':
       if(m.cur!==undefined)S.cur=m.cur;
       S.msgs=m.msgs||[];
-      if(m.st){S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;}
+      if(m.st){S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;S.note=m.st.note||'';}
       maybeAutoCollapseTurn();
       renderThread(true);renderStatus();renderComposer();renderSide();break;
     case 'last':{
       if(!S.msgs.length)break;
       S.msgs[S.msgs.length-1]=m.m;
-      if(m.st){S.sending=!!m.st.sending;S.phase=m.st.phase||0;}
+      if(m.st){S.sending=!!m.st.sending;S.phase=m.st.phase||0;S.note=m.st.note||'';}
       maybeAutoCollapseTurn();
       applyLast();renderStatus();break;}
     case 'usage':S.usage=m.u||S.usage;renderUsage();break;
     case 'toast':showToast(m.msg,{0:'info',1:'ok',2:'warn',3:'err'}[m.k]||'warn');break;
     case 'status':
-      S.sending=!!m.sending;S.net=m.net;S.phase=m.phase||0;
+      S.sending=!!m.sending;S.net=m.net;S.phase=m.phase||0;S.note=m.note||'';
       maybeAutoCollapseTurn();
       renderStatus();renderThread(true);renderComposer();renderSide();break;
     case 'blur':
@@ -1960,6 +2131,13 @@ function bind(){
     policySetOpen(false);
     post({c:'policy',v:+op.getAttribute('data-policy')});
   });
+  $('epolicyBtn').addEventListener('click',()=>epolicySetOpen(!S.epolicyOpen));
+  $('epolicyMenu').addEventListener('click',e=>{
+    const op=e.target.closest('.ai-cmd-policy-option');
+    if(!op)return;
+    epolicySetOpen(false);
+    post({c:'epolicy',v:+op.getAttribute('data-epolicy')});
+  });
   $('usageBtn').addEventListener('click',()=>usageSetOpen(!S.usageOpen));
   /* 清空记录 = 两步确认 (与删除模型档案同一套语言): 首击进入待确认, 4s 内再击才清空 */
   $('clearb').addEventListener('click',()=>{
@@ -1986,6 +2164,7 @@ function bind(){
   document.addEventListener('mousedown',e=>{
     if(S.ctxOpen&&!e.target.closest('#ctxMenu'))hideCtx();
     if(S.policyOpen&&!e.target.closest('#policy')&&!e.target.closest('#policyMenu'))policySetOpen(false);
+    if(S.epolicyOpen&&!e.target.closest('#epolicy')&&!e.target.closest('#epolicyMenu'))epolicySetOpen(false);
     if(S.usageOpen&&!e.target.closest('#usagePanel')&&!e.target.closest('#usageBtn'))usageSetOpen(false);
     if(S.modelOpen&&!e.target.closest('#modelPicker'))modelSetOpen(false);
     /* 悬浮侧栏点外收起 (排除 #b-hist: 按钮自己的 click 负责开关, mousedown 先收会把它再弹开) */
@@ -2000,6 +2179,7 @@ function bind(){
       if(S.modelOpen){modelSetOpen(false);e.preventDefault();return;}
       if(S.cfgOpen){profDisarm();cfgToggle(false);e.preventDefault();return;}
       if(S.policyOpen){policySetOpen(false);e.preventDefault();return;}
+      if(S.epolicyOpen){epolicySetOpen(false);e.preventDefault();return;}
       if(S.usageOpen){usageSetOpen(false);e.preventDefault();return;}
     }
   });

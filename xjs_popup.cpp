@@ -733,6 +733,33 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             }
             return 0;
         }
+        case WM_RBUTTONDOWN: {
+            /* 右键按下 = 悬停高亮落点行 (与左键"按下只悬停"同视觉), 松开才触发 */
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (p->openSub >= 0) return 0;   /* 子面板无右键项 */
+            int h = -1;
+            for (int i = 0; i < (int)p->items.size(); i++)
+                if (!p->items[i].sep && !p->items[i].header && !p->items[i].disabled && pt.y >= p->y[i] && pt.y < p->y[i + 1]) h = i;
+            if (h != p->hover) { p->hover = h; InvalidateRect(hwnd, NULL, FALSE); }
+            return 0;
+        }
+        case WM_RBUTTONUP: {
+            /* 右键松开 = 复制型条目 (rclickCopy, 搜索历史) 回传 id|XJS_POPUP_COPY, 菜单关闭;
+               其余条目右键无动作 (菜单保持 — 点外关闭仍由 LL 钩子按按下判定) */
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (p->openSub < 0) {
+                for (int i = 0; i < (int)p->items.size(); i++) {
+                    if (p->items[i].sep || p->items[i].header || p->items[i].disabled || !p->items[i].rclickCopy) continue;
+                    if (pt.y < p->y[i] || pt.y >= p->y[i + 1]) continue;
+                    int id = p->items[i].id;
+                    HWND owner = p->owner;
+                    DestroyWindow(hwnd);
+                    PostMessageW(owner, WM_POPUP_RESULT, id | XJS_POPUP_COPY, 0);
+                    return 0;
+                }
+            }
+            return 0;
+        }
         case WM_SIZE: {
             /* 子菜单开合经 XjsPopupApplySize 改窗口尺寸: RT 必须随动, 否则绘制落在旧尺寸上 */
             if (p->rt)

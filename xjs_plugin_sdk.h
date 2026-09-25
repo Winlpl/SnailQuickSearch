@@ -191,12 +191,16 @@ struct XjsPluginHost {
 
     /* ---- 插件私有存储 (任意线程; 一文件一键, 落 plugins\<id>\data\<key>;
             键 = UTF-8 任意文字 (建议中文主键, 与配置文件口径一致), 禁控制字符与 \/:*?"<>|, ≤128 字节;
-            值为任意字节 (约定 UTF-8)) ---- */
+            值为任意字节 (约定 UTF-8)) ----
+       StorageGet 两步读: buf=NULL 返回所需字节数; 再按该数请求 = 恰好取全 (返回值=实际写入数;
+       需安全 C 串自留 1 字节缓冲) */
     int (XJS_PLUGIN_CALL *StorageGet)(XjsPluginCtx*, const char* key, char* buf, int cap);
     int (XJS_PLUGIN_CALL *StorageSet)(XjsPluginCtx*, const char* key, const char* data, int len);
     int (XJS_PLUGIN_CALL *StorageRemove)(XjsPluginCtx*, const char* key);
 
-    /* ---- 调试 (任意线程; 只进调试器 OutputDebugString, 不落盘) ---- */
+    /* ---- 调试 (任意线程; 只进调试器 OutputDebugString, 不落盘) ----
+       无调试器时宿主不调用 OutputDebugString (IsDebuggerPresent 闸) — 它无接管会以
+       DBG_PRINTEXCEPTION_C 走一轮异常派发, 被监控采集点记成异常事件 */
     void (XJS_PLUGIN_CALL *Log)(XjsPluginCtx*, int level /*0 debug 1 info 2 warn 3 error*/, const char* utf8);
 
     /* ---- 面板接管 (v4 追加; 声明 能力:"preview-panel" 且实现 OnPanelEvent 才有效) ----

@@ -4,6 +4,8 @@
  */
 #include "ai_assistant.h"
 
+extern "C" IMAGE_DOS_HEADER __ImageBase;   /* 链接器提供: 取本 DLL 模块路径用 (临时诊断) */
+
 /* ==================== 基础工具 ==================== */
 
 std::wstring W8(const char* s) {
@@ -83,29 +85,56 @@ static std::string B64Dec(const std::string& in) {
     return out;
 }
 
-std::string JsonEscapeUtf8(const std::wstring& s) {   /* → 完整 JSON 字符串字面量 (含首尾引号;
-    全部调用点 (请求体/配置/历史) 均直接拼接不再手动包引号 — 曾漏引号发裸词, DeepSeek 400
-    "model expected value at line 1 column 10" 即值起始处解析失败 */
-    std::string u = U8(s);
-    std::string out = "\"";
-    for (unsigned char c : u) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) { char b[8]; sprintf_s(b, "\\u%04X", c); out += b; }
-                else out += (char)c;
+/* JSON 收口 (实现见 ai_assistant.h 声明处注释): 解析/序列化全走 picojson */
+static void JvFromP(Jv& jv, const picojson::value& v) {   /* picojson 树 → Jv 宽字符视图 (机械转换) */
+    if (v.is<bool>()) { jv.t = 1; jv.b = v.get<bool>(); }
+    else if (v.is<double>()) { jv.t = 2; jv.num = v.get<double>(); }
+    else if (v.is<std::string>()) { jv.t = 3; jv.str = W8(v.get<std::string>().c_str()); }
+    else if (v.is<picojson::array>()) {
+        jv.t = 4;
+        for (auto& e : v.get<picojson::array>()) {
+            Jv x;
+            JvFromP(x, e);
+            jv.arr.push_back(std::move(x));
         }
+    } else if (v.is<picojson::object>()) {
+        jv.t = 5;
+        for (auto& kv : v.get<picojson::object>()) {
+            Jv x;
+            JvFromP(x, kv.second);
+            jv.obj.push_back({ W8(kv.first.c_str()), std::move(x) });
+        }
+    } else {
+        jv.t = 0;   /* null */
     }
-    out += "\"";
-    return out;
 }
 Jv JsonParseW(const std::wstring& text) {
-    JParser jp(text);
-    return jp.Val();
+    Jv jv;
+    picojson::value v;
+    if (picojson::parse(v, U8(text)).empty()) JvFromP(jv, v);
+    return jv;   /* 解析失败 = null 型 Jv (与旧行为一致) */
+}
+bool JParseU8(picojson::value& out, const std::string& u8) {
+    out = picojson::value();
+    return picojson::parse(out, u8).empty();
+}
+picojson::value JvToP(const Jv& v) {   /* Jv 树 → picojson (键/字符串转 UTF-8) */
+    switch (v.t) {
+        case 1: return picojson::value(v.b);
+        case 2: return picojson::value(v.num);
+        case 3: return JS(v.str);
+        case 4: {
+            picojson::array a;
+            for (auto& e : v.arr) a.push_back(JvToP(e));
+            return picojson::value(a);
+        }
+        case 5: {
+            picojson::object o;
+            for (auto& kv : v.obj) o[U8(kv.first)] = JvToP(kv.second);
+            return picojson::value(o);
+        }
+        default: return picojson::value();   /* null */
+    }
 }
 
 /* ==================== 配置 (存储键 "cfg"; API Key 以本机 GUID 为密码加密, 明文不落盘) ==================== */
@@ -162,31 +191,30 @@ static bool ValidUtf8(const std::string& s) {
 }
 void CfgSave() {
     if (!g_host) return;
-    /* JSON 字面量拼接: 先 UTF-8 转义再转回宽字符 (纯 ASCII 字面量), 整体一次落盘 */
-    auto lit = [](const std::wstring& s) { return W8(JsonEscapeUtf8(s).c_str()); };
     std::wstring mk = MachineKeyStr();
-    auto enc = [&](const std::wstring& k) -> std::wstring {   /* 密钥加密 (空 = 不落该字段) */
+    auto enc = [&](const std::wstring& k) -> picojson::value {   /* 密钥加密 (空 = 不落该字段) */
         std::string e = B64Enc(XorSecret(U8(k), U8(mk)));
-        return L"\"enc:1:" + W8(e.c_str()) + L"\"";
+        return picojson::value("enc:1:" + e);
     };
-    std::wstring j = L"{\"reasoning\":";
-    j += g_cfg.reasoning ? L"true" : L"false";
-    j += L",\"filePolicy\":" + std::to_wstring(g_cfg.filePolicy);
-    j += L",\"activeId\":" + lit(g_cfg.activeId);
-    j += L",\"profiles\":[";
-    for (size_t i = 0; i < g_cfg.profiles.size(); i++) {
-        const AiProfile& p = g_cfg.profiles[i];
-        if (i) j += L",";
-        j += L"{\"id\":" + lit(p.id);
-        j += L",\"name\":" + lit(p.name);
-        j += L",\"baseUrl\":" + lit(p.baseUrl);
-        j += L",\"model\":" + lit(p.model);
-        if (!p.apiKey.empty()) j += L",\"apiKeyEnc\":" + enc(p.apiKey);
-        j += L",\"ctx\":" + std::to_wstring(p.ctx);
-        j += L",\"maxOut\":" + std::to_wstring(p.maxOut) + L"}";
+    picojson::object root;
+    root["reasoning"] = JB(g_cfg.reasoning);
+    root["filePolicy"] = JN(g_cfg.filePolicy);
+    root["execPolicy"] = JN(g_cfg.execPolicy);
+    root["activeId"] = JS(g_cfg.activeId);
+    picojson::array profs;
+    for (const AiProfile& p : g_cfg.profiles) {
+        picojson::object o;
+        o["id"] = JS(p.id);
+        o["name"] = JS(p.name);
+        o["baseUrl"] = JS(p.baseUrl);
+        o["model"] = JS(p.model);
+        if (!p.apiKey.empty()) o["apiKeyEnc"] = enc(p.apiKey);
+        o["ctx"] = JN(p.ctx);
+        o["maxOut"] = JN(p.maxOut);
+        profs.push_back(picojson::value(o));
     }
-    j += L"]}";
-    std::string u8 = U8(j);
+    root["profiles"] = picojson::value(profs);
+    std::string u8 = picojson::value(root).serialize();
     g_host->StorageSet(g_ctx, "cfg", u8.c_str(), (int)u8.size());
 }
 /* 密钥解密 ("enc:1:<b64>"; 换机解出乱码 = 视为未配置 — GUID 密码不出本机) */
@@ -258,6 +286,10 @@ void CfgLoad() {
             if (r && r->t == 1) g_cfg.reasoning = r->b;
             const Jv* fp = v.Get(L"filePolicy");
             if (fp && fp->t == 2 && fp->num >= 0 && fp->num <= 3) g_cfg.filePolicy = (int)fp->num;
+            /* 命令执行权限只有 0/2/3 三档 (没有只读); 存量里出现 1 一律按询问处理 */
+            const Jv* ep = v.Get(L"execPolicy");
+            if (ep && ep->t == 2 && ep->num >= 0 && ep->num <= 3)
+                g_cfg.execPolicy = (ep->num == 1) ? 2 : (int)ep->num;
             const Jv* av = v.Get(L"activeId");
             if (av && av->t == 3) g_cfg.activeId = av->str;
             const Jv* ps = v.Get(L"profiles");
@@ -316,98 +348,68 @@ static std::wstring ConvTitleOf(const std::wstring& firstUser) {
 }
 void HistSave() {
     if (!g_host) return;
-    std::wstring j = L"[";
-    for (size_t i = 0; i < g_hist.size(); i++) {
-        const AiConv& c = g_hist[i];
-        if (i) j += L",";
-        wchar_t head[96];
-        swprintf(head, 96, L"{\"id\":%llu,\"t\":%lld,\"title\":", c.id, c.t);
-        j += head;
-        j += W8(JsonEscapeUtf8(c.title).c_str());
-        j += L",\"msgs\":[";
-        for (size_t k = 0; k < c.msgs.size(); k++) {
-            const AiMsg& m = c.msgs[k];
-            if (k) j += L",";
+    picojson::array convs;
+    for (const AiConv& c : g_hist) {
+        picojson::array msgs;
+        for (const AiMsg& m : c.msgs) {
+            picojson::object om;
             if (m.role == 2) {
                 /* 工具卡片组: query/err 截到 512 字符 (绘制端同款上限, 存整段脚本无展示出口) */
-                j += L"{\"r\":2,\"steps\":[";
-                for (size_t si = 0; si < m.steps.size(); si++) {
-                    const AiToolStep& t = m.steps[si];
-                    if (si) j += L",";
-                    wchar_t sh[80];
-                    swprintf(sh, 80, L"{\"k\":%d,\"st\":%d,\"n\":%d,\"ms\":%lld",
-                             t.kind, t.state, t.count, t.elapsedMs);
-                    j += sh;
-                    j += L",\"name\":";
-                    j += W8(JsonEscapeUtf8(t.name).c_str());
-                    if (!t.argz.empty()) {
-                        j += L",\"argz\":";
-                        j += W8(JsonEscapeUtf8(t.argz).c_str());
-                    }
-                    if (!t.mode.empty()) {
-                        j += L",\"mode\":";
-                        j += W8(JsonEscapeUtf8(t.mode).c_str());
-                    }
-                    if (!t.query.empty()) {
-                        j += L",\"query\":";
-                        j += W8(JsonEscapeUtf8(t.query.substr(0, 512)).c_str());
-                    }
-                    if (!t.err.empty()) {
-                        j += L",\"err\":";
-                        j += W8(JsonEscapeUtf8(t.err.substr(0, 512)).c_str());
-                    }
+                om["r"] = JN(2);
+                picojson::array steps;
+                for (const AiToolStep& t : m.steps) {
+                    picojson::object os;
+                    os["k"] = JN(t.kind);
+                    os["st"] = JN(t.state);
+                    os["n"] = JN(t.count);
+                    os["ms"] = JN(t.elapsedMs);
+                    os["name"] = JS(t.name);
+                    if (!t.argz.empty()) os["argz"] = JS(t.argz);
+                    if (!t.mode.empty()) os["mode"] = JS(t.mode);
+                    if (!t.query.empty()) os["query"] = JS(t.query.substr(0, 512));
+                    if (!t.err.empty()) os["err"] = JS(t.err.substr(0, 512));
                     if (!t.adj.items.empty()) {
                         /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
-                        j += L",\"adj\":{\"kind\":";
-                        j += std::to_wstring(t.adj.kind);
-                        j += L",\"win\":";
-                        j += W8(JsonEscapeUtf8(t.adj.win).c_str());
-                        j += L",\"items\":[";
-                        for (size_t aj = 0; aj < t.adj.items.size(); aj++) {
-                            const AiAdjustItem& it = t.adj.items[aj];
-                            if (aj) j += L",";
-                            j += L"{\"key\":";
-                            j += W8(JsonEscapeUtf8(it.key).c_str());
-                            j += L",\"val\":";
-                            j += W8(JsonEscapeUtf8(it.val).c_str());
-                            j += L",\"json\":";
-                            j += W8(JsonEscapeUtf8(W8(it.json.c_str())).c_str());
-                            wchar_t sb[48];
-                            swprintf(sb, 48, L",\"st\":%d", it.state);
-                            j += sb;
-                            if (!it.err.empty()) {
-                                j += L",\"err\":";
-                                j += W8(JsonEscapeUtf8(it.err.substr(0, 200)).c_str());
-                            }
-                            j += L"}";
+                        picojson::object oa;
+                        oa["kind"] = JN(t.adj.kind);
+                        oa["win"] = JS(t.adj.win);
+                        picojson::array items;
+                        for (const AiAdjustItem& it : t.adj.items) {
+                            picojson::object oi;
+                            oi["key"] = JS(it.key);
+                            oi["val"] = JS(it.val);
+                            oi["json"] = JS(W8(it.json.c_str()));
+                            oi["st"] = JN(it.state);
+                            if (!it.err.empty()) oi["err"] = JS(it.err.substr(0, 200));
+                            items.push_back(picojson::value(oi));
                         }
-                        j += L"]}";
+                        oa["items"] = picojson::value(items);
+                        os["adj"] = picojson::value(oa);
                     }
                     if (!t.top.empty()) {
-                        j += L",\"top\":[";
-                        for (size_t pi = 0; pi < t.top.size(); pi++) {
-                            if (pi) j += L",";
-                            j += W8(JsonEscapeUtf8(t.top[pi]).c_str());
-                        }
-                        j += L"]";
+                        picojson::array top;
+                        for (const std::wstring& p : t.top) top.push_back(JS(p));
+                        os["top"] = picojson::value(top);
                     }
-                    j += L"}";
+                    steps.push_back(picojson::value(os));
                 }
-                j += L"]}";
+                om["steps"] = picojson::value(steps);
+                msgs.push_back(picojson::value(om));
                 continue;
             }
-            j += m.role ? L"{\"r\":1,\"text\":" : L"{\"r\":0,\"text\":";
-            j += W8(JsonEscapeUtf8(m.text).c_str());
-            if (!m.reason.empty()) {
-                j += L",\"reason\":";
-                j += W8(JsonEscapeUtf8(m.reason).c_str());
-            }
-            j += L"}";
+            om["r"] = JN(m.role);
+            om["text"] = JS(m.text);
+            if (!m.reason.empty()) om["reason"] = JS(m.reason);
+            msgs.push_back(picojson::value(om));
         }
-        j += L"]}";
+        picojson::object oc;
+        oc["id"] = JN((long long)c.id);
+        oc["t"] = JN(c.t);
+        oc["title"] = JS(c.title);
+        oc["msgs"] = picojson::value(msgs);
+        convs.push_back(picojson::value(oc));
     }
-    j += L"]";
-    std::string u8 = U8(j);
+    std::string u8 = picojson::value(convs).serialize();
     g_host->StorageSet(g_ctx, "历史", u8.c_str(), (int)u8.size());
 }
 void HistLoad() {

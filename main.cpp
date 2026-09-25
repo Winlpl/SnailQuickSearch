@@ -24,9 +24,20 @@ static void XjsLogPath(const wchar_t* name, wchar_t* out, DWORD cap) {
 }
 
 /* 排最前的 VEH: 只记录致命类异常, 静默写 startup_stack.txt (阶段+逐帧 模块!偏移)。
-   良性探测(线程命名/调试输出/断点/单步)不记录不拦截, 直接放行给后续处理器 */
+   良性探测(线程命名/断点/单步)不记录不拦截, 直接放行给后续处理器;
+   唯一例外 = 调试输出类异常: 无调试器接管时直接吞掉 (见函数内注释) */
 static LONG CALLBACK XjsVecStackLogger(PEXCEPTION_POINTERS ei) {
     static volatile LONG s_busy = 0;
+    /* OutputDebugString 无调试器接管时会以 DBG_PRINTEXCEPTION_C/WIDE_STRING 走一轮异常派发,
+       引擎 VEH 与监控采集点都会见到并被记成异常事件 (2026-09-25 插件启动日志实锤上报)。
+       在这里(第一个 VEH)按 EXCEPTION_CONTINUE_EXECUTION 原位恢复 = "无人接管"的正常继续路径,
+       RaiseException 随即返回, 与无处理器的默认结局一致; 有真调试器时调试器先于所有 VEH
+       接管, 输出照常, 本分支只在无调试器时命中。放在 s_busy 闸之前: 高频良性路径零状态 */
+    if (ei->ExceptionRecord) {
+        DWORD c0 = ei->ExceptionRecord->ExceptionCode;
+        if (c0 == 0x4001000A /*DBG_PRINTEXCEPTION_C*/ || c0 == 0x4001000B /*DBG_PRINTEXCEPTION_WIDE_STRING*/)
+            return EXCEPTION_CONTINUE_EXECUTION;
+    }
     /* VEH 可在任意线程并发进入 (UI/引擎/钩子线程同时崩), 置位必须原子 */
     if (InterlockedCompareExchange(&s_busy, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
     DWORD code = ei->ExceptionRecord ? ei->ExceptionRecord->ExceptionCode : 0;
@@ -430,9 +441,14 @@ void XjsOnPopupResult(int id) {
         }
     } else if (id >= IDM_HOSTED_SRC_BASE && id < IDM_HOSTED_SRC_BASE + 100) {
         XjsHostedPickSource(id - IDM_HOSTED_SRC_BASE);   /* 来源切换菜单: 换当前来源并重搜整链 */
-    } else if (id >= IDM_HISTORY_BASE && id < IDM_HISTORY_BASE + 999) {
-        int i = id - IDM_HISTORY_BASE;
-        if (i < (int)g_history.size()) {
+    } else if ((id & ~XJS_POPUP_COPY) >= IDM_HISTORY_BASE && (id & ~XJS_POPUP_COPY) < IDM_HISTORY_BASE + 999) {
+        int i = (id & ~XJS_POPUP_COPY) - IDM_HISTORY_BASE;
+        if (id & XJS_POPUP_COPY) {   /* 右键历史项 = 复制该条查询语句, 不执行搜索 (带标志 id 判范围先剥标志, 同 CMODE 口径) */
+            if (i < (int)g_history.size()) {
+                XjsCopyClipboard(g_history[i]);
+                XjsToastShow(g_hWnd, XjsT(L"状态栏.已复制"), XTOAST_SUCCESS, XSF(1));
+            }
+        } else if (i < (int)g_history.size()) {
             XjsSearchSetText(g_history[i]);   /* 置入即触发搜索 */
         }
     } else if (id == IDM_HISTORY_BASE + 999) {

@@ -107,14 +107,17 @@ static CRITICAL_SECTION s_storageCs;
 
 /* ==================== 小工具 ==================== */
 
-/* 调用方缓冲输出: buf/cap 为空 = 返回所需字节数; 否则写入(截断)并返回实际写入数 (均不含 NUL)。
+/* 调用方缓冲输出: buf 空 = 返回所需字节数; 否则写入 min(cap,所需) 字节并返回写入数。
+   NUL 只在有空位 (写入数 < cap) 时补 — 禁止为 NUL 抢数据空间: "先 NULL 查长度再按该长度
+   请求"的两步读必须恰好取全 (曾为 NUL 留位截掉末字节, cfg JSON 缺右括号 picojson 解析失败,
+   已配置密钥显示未配置, 2026-09-25 实锤); 要安全 C 串由调用方自留 1 字节。
    (去 static: xjs_plugin_api.cpp 共用, 声明在 xjs_plugin_api.h — 唯一实现仍在本文件) */
 int PluginBufOut(char* buf, int cap, const std::string& s) {
     int need = (int)s.size();
     if (!buf || cap <= 0) return need;
-    int n = (cap - 1 < need) ? cap - 1 : need;
+    int n = (cap < need) ? cap : need;
     if (n > 0) memcpy(buf, s.data(), (size_t)n);
-    buf[n] = 0;
+    if (n < cap) buf[n] = 0;
     return n;
 }
 
@@ -1230,10 +1233,13 @@ static int FnStorageRemove(XjsPluginCtx* ctx, const char* key) {
 static void FnLog(XjsPluginCtx* ctx, int level, const char* utf8) {
     XjsPluginEntry* p = NULL;
     if (PluginApiCheck(ctx, 0, false, &p) != XJS_PLUGIN_OK || !p || !utf8) return;
+    /* 只进调试器: 无调试器时连输出都不构造 — OutputDebugString 无接管会以
+       DBG_PRINTEXCEPTION_C 走一轮异常派发, 被 XjsVecStackLogger 之外的采集点记成异常事件 */
+    if (!IsDebuggerPresent()) return;
     static const wchar_t* const LV[4] = { L"D", L"I", L"W", L"E" };
     if (level < 0 || level > 3) level = 1;
     std::wstring line = std::wstring(L"[xjs-plugin:") + p->mf.id + L"," + LV[level] + L"] " + Utf8ToUtf16(utf8);
-    OutputDebugStringW(line.c_str());   /* 只进调试器, 不落盘 (用户口径: 日志落盘面从简) */
+    OutputDebugStringW(line.c_str());   /* 不落盘 (用户口径: 日志落盘面从简) */
 }
 
 /* ==================== 宿主 API 函数表 (Init 发给插件, 指针终身有效) ==================== */

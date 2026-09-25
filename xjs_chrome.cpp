@@ -1160,8 +1160,13 @@ void XjsShowHistoryPanel() {
     if (n == 0) {
         items.push_back({ 0, XjsT(L"菜单.暂无搜索历史"), L"", false, false, true, false });
     } else {
-        for (int i = 0; i < n; i++)
-            items.push_back({ IDM_HISTORY_BASE + i, g_history[i], L"", false, false });
+        for (int i = 0; i < n; i++) {
+            XjsPopupItem it;
+            it.id = IDM_HISTORY_BASE + i;
+            it.title = g_history[i];
+            it.rclickCopy = true;   /* 右键 = 复制该条查询语句 (不执行搜索); 左键照旧置入并搜索 */
+            items.push_back(it);
+        }
     }
     items.push_back({ 0, L"", L"", false, true });
     items.push_back({ IDM_HISTORY_BASE + 999, XjsT(L"菜单.清空搜索历史"), L"", false, false });

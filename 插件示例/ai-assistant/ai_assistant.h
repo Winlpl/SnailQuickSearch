@@ -35,6 +35,7 @@
 #include <atomic>
 #include <thread>
 
+#include "../../picojson.h"   /* JSON 唯一入口 (插件侧 include 收口本头): 解析/序列化都是模块的活 */
 #include "../../xjs_plugin_sdk.h"
 #include "../../xunjieso.h"   /* 引擎直连: 加载器按模块名绑到宿主进程已加载的同名 DLL 实例 */
 
@@ -118,7 +119,10 @@ Gdiplus::Color HexCol(const std::wstring& hex, int alpha = 255);
 Gdiplus::Color MixCol(Gdiplus::Color a, Gdiplus::Color b, float t);
 Gdiplus::Color WithA(Gdiplus::Color c, BYTE a);
 
-/* ---- 简易 JSON (SSE 载荷/配置/历史 都是小型文档, 自带解析器零依赖) ---- */
+/* ---- JSON (统一收口根目录 picojson, 插件不手写解析器/不手拼文档) ----
+ * 读侧: JsonParseW = picojson::parse 之后机械转换成本树的 Jv (宽字符视图),
+ * 全库既有 v.S/v.Get/v.arr 读法零改动。写侧: 直接建 picojson::value (辅助 JS/JN/JB),
+ * 序列化经 JDumpW/JvToP — 转义与数字格式全归 picojson, 禁止再手拼 "{\"x\":" 式文档。 */
 struct Jv {
     int t = 0;   /* 0=null 1=bool 2=num 3=string 4=array 5=object */
     bool b = false;
@@ -136,118 +140,14 @@ struct Jv {
         return (v && v->t == 3) ? v->str : def;
     }
 };
-struct JParser {
-    const wchar_t* p;
-    const wchar_t* end;
-    bool ok = false;
-    explicit JParser(const std::wstring& s) : p(s.c_str()), end(s.c_str() + s.size()) {}
-    void Ws() { while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++; }
-    Jv Num() {
-        Jv v; v.t = 2;
-        wchar_t* stop = NULL;
-        v.num = wcstod(p, &stop);
-        if (stop == p) { p++; return v; }
-        p = stop;
-        ok = true;
-        return v;
-    }
-    Jv Val() {
-        Jv v;
-        Ws();
-        if (p >= end) return v;
-        wchar_t c = *p;
-        if (c == '{') {
-            v.t = 5; p++;
-            Ws();
-            if (p < end && *p == '}') { p++; ok = true; return v; }
-            for (;;) {
-                Ws();
-                Jv k = (p < end && *p == '"') ? Str() : Jv();
-                Ws();
-                if (p < end && *p == ':') p++;
-                v.obj.push_back({ k.str, Val() });
-                Ws();
-                if (p < end && *p == ',') { p++; continue; }
-                if (p < end && *p == '}') p++;
-                break;
-            }
-            ok = true;
-            return v;
-        }
-        if (c == '[') {
-            v.t = 4; p++;
-            Ws();
-            if (p < end && *p == ']') { p++; ok = true; return v; }
-            for (;;) {
-                v.arr.push_back(Val());
-                Ws();
-                if (p < end && *p == ',') { p++; continue; }
-                if (p < end && *p == ']') p++;
-                break;
-            }
-            ok = true;
-            return v;
-        }
-        if (c == '"') return Str();
-        if (c == 't') { p += 4; v.t = 1; v.b = true; ok = true; return v; }
-        if (c == 'f') { p += 5; v.t = 1; v.b = false; ok = true; return v; }
-        if (c == 'n') { p += 4; return v; }
-        /* 裸词容错: 旧版转义函数漏引号写出的存量 (配置/历史) 值是裸文本 — 此前单字符跳过
-           会让对象/数组解析提前断掉, 后续字段 (apiKeyEnc/会话消息) 全丢 = key 与会话记录
-           "消失"。吞到分隔符整段取值: 纯数字按数, 其余按字符串; 新版写入恒为带引号合法
-           JSON, 不走此径 */
-        {
-            const wchar_t* q = p;
-            while (q < end && *q != L',' && *q != L']' && *q != L'}' && *q != L'\n' && *q != L'\r') q++;
-            if (q > p) {
-                wchar_t* stop = NULL;
-                v.num = wcstod(p, &stop);
-                if (stop == q) { v.t = 2; p = q; ok = true; return v; }
-                v.t = 3;
-                v.str.assign(p, q);
-                p = q;
-                ok = true;
-                return v;
-            }
-        }
-        return Num();
-    }
-    Jv Str() {
-        Jv v; v.t = 3; p++;   /* 跳开引号 */
-        while (p < end && *p != '"') {
-            if (*p == '\\' && p + 1 < end) {
-                p++;
-                switch (*p) {
-                    case '"': v.str += '"'; break;
-                    case '\\': v.str += '\\'; break;
-                    case '/': v.str += '/'; break;
-                    case 'n': v.str += '\n'; break;
-                    case 't': v.str += '\t'; break;
-                    case 'r': v.str += '\r'; break;
-                    case 'b': v.str += '\b'; break;
-                    case 'f': v.str += '\f'; break;
-                    case 'u': {
-                        if (p + 4 < end) {
-                            wchar_t cp = (wchar_t)wcstol(std::wstring(p + 1, p + 5).c_str(), NULL, 16);
-                            v.str += cp;
-                            p += 4;
-                        }
-                        break;
-                    }
-                    default: v.str += *p; break;
-                }
-                p++;
-            } else {
-                v.str += *p++;
-            }
-        }
-        if (p < end) p++;   /* 闭引号 */
-        ok = true;
-        return v;
-    }
-};
-std::string JsonEscapeUtf8(const std::wstring& s);   /* → 完整 JSON 字符串字面量 (含首尾引号) */
-Jv JsonParseW(const std::wstring& text);
+Jv JsonParseW(const std::wstring& text);              /* 宽 JSON 文本 → Jv (picojson 解析, 失败=null) */
+bool JParseU8(picojson::value& out, const std::string& u8);   /* UTF-8 JSON 文本 → picojson (失败=false) */
+picojson::value JvToP(const Jv& v);                   /* Jv 树 → picojson 值 (键/串转 UTF-8, 机械转换) */
+inline picojson::value JS(const std::wstring& s) { return picojson::value(U8(s)); }   /* 宽串 → JSON 串 */
+inline picojson::value JN(long long n) { return picojson::value((double)n); }         /* 整数 */
+inline picojson::value JB(bool b) { return picojson::value(b); }                      /* 布尔 */
+inline std::wstring JDumpW(const picojson::value& v) { return W8(v.serialize().c_str()); }
+                                                      /* picojson 值 → 宽 JSON 文本 */
 
 /* ==================== 配置 (存储键 "cfg"; 定义 ai_core.cpp) ====================
  * 模型档案 (多模型切换): 每条档案是一套完整接口配置 —— 跨服务商时地址与密钥也随档案走。
@@ -275,6 +175,9 @@ struct AiCfg {
     bool reasoning = false;   /* 深度思考: true=effort high, false=none (DeepSeek 须显式传; 进程级, 不随档案) */
     int filePolicy = 2;       /* 文件操作权限 (对话区下方分段控件): 0=禁用 1=只读 2=询问 3=允许;
                                  禁用/只读拒绝 open_file 与 copy_paths, 询问先拒后给确认卡, 允许直接执行 */
+    int execPolicy = 2;       /* 命令执行权限 (run_command 外部程序): 0=禁用 2=询问 3=允许 (没有"只读"
+                                 — 执行没有读取档, 默认询问 = 每条命令出确认卡, 用户"允许一次"只放行
+                                 本条命令的完全相同重试, 不持久放权) */
     std::vector<AiProfile> profiles;   /* 档案表 = 事实源 (上限 50, AiProfileMax) */
     std::wstring activeId;             /* 当前使用档案的 id (失效回落第一条, 与前端同规) */
 };
@@ -307,7 +210,7 @@ struct AiAdjust {
 };
 struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths 3=设置 4=窗口 5=搜索框
-                                   6=模式 7=插件 8=皮肤 9=规范 10=捐赠 (未知工具照显 name) */
+                                   6=模式 7=插件 8=皮肤 9=规范 10=捐赠 11=run_command 命令 (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
@@ -355,6 +258,9 @@ void BuildInstructions();      /* 系统提示词 = 常驻骨架 + 引擎内嵌 
 struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸它, UI 经消息泵抽取) */
     CRITICAL_SECTION cs;
     std::wstring out, reason;      /* 当前轮的文本增量 (worker 写, UI 抽; 每轮工具执行后清空重开) */
+    std::wstring note;             /* 过程状态条 (重试/超限自愈中; worker 写, status 推送带走, 空=无) */
+    int gen = 0;                   /* 文本世代: worker 丢弃半截流重新生成时 +1 (泵据此把
+                                      尾部气泡文本重置为当前 out, 不留上一轮残文) */
     int state = 0;                 /* 0=进行中 1=完成 2=失败 3=已中止 */
     int phase = 0;                 /* 0=流式中 1=工具执行中 (泵据此冻结/新开文本气泡) */
     std::vector<AiToolStep> steps; /* 工具步骤镜像 (泵同步进 msgs 的 role==2 消息) */
@@ -367,6 +273,13 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     XjsWindowToken tok = 0;        /* 发起窗口 (open_file 走宿主 OpenFile 用) */
     volatile LONG policy = 2;      /* 文件操作权限快照 (发送时定格; 确认卡"允许"后由 UI 更新,
                                       之后的工具调用即时放行; g_cfg.filePolicy 为持久事实源) */
+    volatile LONG execPolicy = 2;  /* 命令执行权限快照 (同上, g_cfg.execPolicy 的发送时定格) */
+    /* run_command 询问档的裁决通道 (dsh approval 口径: 审批**挂起**工具调用等用户裁决,
+     * 答复恢复 — 不是"拒绝后指望模型自己重试"的死胡同): worker 出询问卡后在此轮询,
+     * eallow/edeny 置位, worker 消费 (允许=继续执行, 拒绝=作为工具失败回喂模型)。
+     * 一次只有一张询问卡 (worker 挂起期间模型无法再发调用), 裸标志即可, j->cs 护。 */
+    volatile LONG execGrant = 0;   /* 用户点了「允许一次」 */
+    volatile LONG execDeny = 0;    /* 用户点了「拒绝」 */
     struct TurnUsage {             /* 最近一轮 SSE 的用量 (response.completed.usage; 泵累计进会话) */
         bool has = false;
         long long prompt = 0, completion = 0, total = 0, cacheHit = 0;
@@ -401,6 +314,8 @@ struct AiSess {
     int lastStepsVer = -1;            /* 泵已同步到卡片的 stepsVersion (变化才拷镜像) */
     int stepBase = 0;                 /* 本作业工具卡片起始下标 (SendCurrent 时定格; 历史恢复的
                                          role==2 卡片在其之前, 泵的步骤同步不碰它们) */
+    int syncGen = -1;                 /* 泵已对齐的文本世代 (job->gen 变化 = worker 丢了半截流重生成,
+                                         泵把尾部气泡文本重置为当前 out, 上一轮残文不留) */
     int netStatus = 0;                /* 0=未配置/未知(灰) 1=正常(绿) 2=失败(红) */
     /* 用量 (对齐参考实现: 累计=计费量; 上下文占用只认最近一次请求) */
     long long uPrompt = 0, uCompletion = 0, uTotal = 0, uCacheHit = 0, uCacheWrite = 0;

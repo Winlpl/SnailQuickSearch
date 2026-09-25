@@ -601,9 +601,12 @@ struct XjsPopupItem {
     bool delBtn = false;   /* 尾部删除按钮 (与 editBtn 同现: ✎ 左 ✕ 右; 首击原地变红"确定删除"且菜单保持, 再击回传 id|XJS_POPUP_DEL) */
     std::vector<XjsPopupItem> children;   /* 子菜单 (通用级联, 2026-09-17): 非空 = 父项, 右缘画 ▸, 悬停/→ 展开;
                                              父项本体不可执行 (点击只展开); 子项 id 由调用方自行分配 */
+    /* 置末尾: 各处聚合初始化按位置给到 icon 为止, 中插字段会错位 (2026-09-25) */
+    bool rclickCopy = false;   /* 右键该项 = 复制条目内容 (搜索历史项; 回传 id|XJS_POPUP_COPY, 左键行为不变) */
 };
 #define XJS_POPUP_EDIT 0x40000000   /* 弹窗项尾部编辑按钮点击标志 (回传 id 时置位) */
 #define XJS_POPUP_DEL  0x20000000   /* 弹窗项尾部删除按钮确认后点击标志 (回传 id 时置位) */
+#define XJS_POPUP_COPY 0x10000000   /* 弹窗项右键复制标志 (rclickCopy 项, 回传 id 时置位) */
 
 /* 单行自绘编辑器组件 (搜索框 / 行内重命名 / 别名对话框共用同一实现):
  *   - 文本/光标/选区/横向滚动 全 D2D 绘制, 无原生 EDIT

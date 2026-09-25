@@ -118,6 +118,9 @@ void SendCurrent(AiSess* s, const std::wstring& textIn) {
     j->pathA = U8(path + L"/responses");
     j->tok = s->tok;   /* open_file 走宿主 OpenFile 的目标窗口 */
     InterlockedExchange(&j->policy, g_cfg.filePolicy);   /* 权限快照 (确认卡"允许"由 UI 更新) */
+    InterlockedExchange(&j->execPolicy, g_cfg.execPolicy);
+    InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
+    InterlockedExchange(&j->execDeny, 0);
     /* 对话快照 (只含 role 0/1 文本消息; 工具往返由 worker 在循环中累计) */
     for (auto& m : s->msgs)
         if (m.role != 2 && !m.text.empty()) j->hist.push_back(m);
@@ -126,6 +129,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn) {
     s->job = j;
     s->sending = true;
     s->stepBase = (int)s->msgs.size();   /* 本作业工具卡片起点 (历史恢复的 role==2 卡片在其之前) */
+    s->syncGen = -1;                     /* 世代对齐复位 (新作业 gen 从 0 起) */
     s->netStatus = g_cfg.apiKey.empty() ? 0 : s->netStatus;
     j->th = new std::thread([j]() { WorkerMain(j); });
     WebTouch(s);
@@ -141,6 +145,7 @@ static void PumpStreams() {
         int state = 0, phase = 0, stepsVer = 0;
         std::wstring err;
         bool truncated = false;
+        int gen = 0;
         std::vector<AiToolStep> steps;
         EnterCriticalSection(&j->cs);
         out = j->out;
@@ -149,10 +154,25 @@ static void PumpStreams() {
         phase = j->phase;
         err = j->err;
         truncated = j->truncated;
+        gen = j->gen;
         stepsVer = j->stepsVersion;
         if (stepsVer != s.lastStepsVer) steps = j->steps;   /* 有变化才拷 (少一次全量复制) */
         LeaveCriticalSection(&j->cs);
         if (state == 0) {
+            if (gen != s.syncGen) {
+                /* 世代变化 = worker 丢弃半截流重新生成 (传输中断/空响应重试/超限自愈):
+                 * 尾部文本气泡重置为当前 out (通常已清空) — 泵只在文本变化时覆写尾部气泡,
+                 * 不重置的话重生成的流会叠加在上一轮残文后面 */
+                s.syncGen = gen;
+                if (!s.msgs.empty() && s.msgs.back().role == 1) {
+                    AiMsg& back = s.msgs.back();
+                    if (back.text != out || back.reason != reason) {
+                        back.text = out;
+                        back.reason = reason;
+                        WebTouch(&s);
+                    }
+                }
+            }
             /* 用量累计: 每轮 response.completed 的 usage 取一次 (对齐参考实现:
                累计=计费量; 上下文占用/速度只认最近一轮) */
             bool takeUsage = false;
@@ -242,10 +262,11 @@ static void PumpStreams() {
                 }
             }
         } else {
-            /* 收尾: 状态落消息 + 中止的执行中卡片落败 + 落库 (role==2 工具卡片一并入库) + join + 清作业 */
+            /* 收尾: 状态落消息 + 中止的执行中/询问中卡片落败 (state 4 = 挂起等裁决的
+               run_command 卡, 作业没了就再无人裁决) + 落库 + join + 清作业 */
             for (auto& m : s.msgs)
                 for (auto& st : m.steps)
-                    if (st.state == 0 || st.state == 1) { st.state = 3; st.err = L"已中止"; }
+                    if (st.state == 0 || st.state == 1 || st.state == 4) { st.state = 3; st.err = L"已中止"; }
             if (s.msgs.empty() || s.msgs.back().role != 1) {
                 AiMsg am;
                 am.role = 1;
