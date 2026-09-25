@@ -327,15 +327,8 @@ static bool LuaValueToBytes(void* L, int idx, std::string* out, std::wstring* ex
     return true;
 }
 
-/* 路径校验: 必须绝对路径 (盘符或 UNC), 禁文件名字符, 防误写相对路径落临时目录难找 */
-static bool WritePathOk(const std::wstring& p) {
-    if (p.size() < 3 || p.size() > 1024) return false;
-    bool abs = (p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) || (p.rfind(L"\\\\", 0) == 0);
-    if (!abs) return false;
-    for (wchar_t c : p)
-        if (c < 0x20 || wcschr(L"<>|\"?*", c)) return false;
-    return true;
-}
+/* 路径校验收口 FilePathOk (实现 ai_file.cpp): 必须绝对路径 (盘符或 UNC), 禁文件名字符,
+ * 防误写相对路径落临时目录难找 (lua 写出与 file_op 共用同一判定) */
 
 /* ai.write/ai.saveas 的回执: 成功 = true; 失败 = nil + 原因 (脚本可判可提示) */
 static int LuaWriteRet(void* L, bool ok, const wchar_t* why) {
@@ -371,7 +364,7 @@ static int AgentLuaWriteCommon(void* L, bool saveDlg) {
             return LuaWriteRet(L, false, L"路径为空");
         }
         path = W8(p);
-        if (!WritePathOk(path)) {
+        if (!FilePathOk(path)) {
             WriteNoteAppend(L"ai.write 路径非法 (须绝对路径)", path.c_str());
             return LuaWriteRet(L, false, L"路径必须是合法绝对路径 (如 D:\\数据\\结果.csv), 且不含 <>|\"?* 等字符");
         }
@@ -409,8 +402,9 @@ static int AgentLuaWriteCommon(void* L, bool saveDlg) {
 static int AgentLuaWrite(void* L) { return AgentLuaWriteCommon(L, false); }
 static int AgentLuaSaveAs(void* L) { return AgentLuaWriteCommon(L, true); }
 
-/* ai.read(路径) → 文本内容 (原样字节; 失败 = nil + 原因)。仅文本文件 —
- * 内容含 '\0' 直接拒绝 (SDK 栈辅助按 C 串取值, 静默截断比报错更害人); 上限 8MB。 */
+/* ai.read(路径) → 文本内容 (UTF-8; 失败 = nil + 原因)。仅文本文件 —
+ * 内容含 '\0' 直接拒绝 (SDK 栈辅助按 C 串取值, 静默截断比报错更害人); 上限 8MB。
+ * 编码 = AiTextToUtf8 识别转换 (BOM/UTF-16/ANSI-GBK → UTF-8), 脚本拿到的恒为可读文本。 */
 static int AgentLuaRead(void* L) {
     if (InterlockedCompareExchange(&g_luaIoMode, 0, 0) != 1)
         return LuaWriteRet(L, false, L"ai.read 仅在 Lua 执行模式 (lua_exec) 可用");
@@ -420,7 +414,7 @@ static int AgentLuaRead(void* L) {
     const char* p = xjs_lua_ToString(L, 1);
     if (!p || !*p) return LuaWriteRet(L, false, L"路径为空");
     std::wstring path = W8(p);
-    if (!WritePathOk(path)) return LuaWriteRet(L, false, L"路径必须是合法绝对路径");
+    if (!FilePathOk(path)) return LuaWriteRet(L, false, L"路径必须是合法绝对路径");
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
@@ -438,9 +432,11 @@ static int AgentLuaRead(void* L) {
     }
     CloseHandle(h);
     if (!ok) return LuaWriteRet(L, false, L"文件超过 8MB 上限 (ai.read 仅适合文本)");
-    if (data.find('\0') != std::string::npos)
+    /* UTF-16 文本天然含 NUL 高位字节 — 先按 BOM 转换再判二进制, 顺序不能反 */
+    std::string u8t = AiTextToUtf8(data, NULL);
+    if (u8t.find('\0') != std::string::npos)
         return LuaWriteRet(L, false, L"内容含二进制数据, ai.read 仅支持文本文件");
-    xjs_lua_PushString(L, data.c_str());
+    xjs_lua_PushString(L, u8t.c_str());
     return 1;
 }
 
@@ -1402,22 +1398,6 @@ static std::wstring AgentToolCopyPaths() {
  * 全部一次性 (allowed-once) 的口径。 */
 static const size_t EXEC_STREAM_CAP = 32768;   /* 每流保尾字节量 */
 
-static std::string B64EncStr(const unsigned char* d, size_t n) {   /* RFC 4648 (EncodedCommand 载荷) */
-    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string r;
-    r.reserve((n + 2) / 3 * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        unsigned v = (unsigned)d[i] << 16;
-        if (i + 1 < n) v |= (unsigned)d[i + 1] << 8;
-        if (i + 2 < n) v |= (unsigned)d[i + 2];
-        r += T[(v >> 18) & 63];
-        r += T[(v >> 12) & 63];
-        r += (i + 1 < n) ? T[(v >> 6) & 63] : '=';
-        r += (i + 2 < n) ? T[v & 63] : '=';
-    }
-    return r;
-}
-
 /* 单流收集: 读线程独写 Push, 主线程收尾 Take (解码 UTF-8 → OEM 回落) */
 struct ExecStream {
     CRITICAL_SECTION cs;
@@ -1574,13 +1554,20 @@ static std::wstring AgentToolRunCommand(AiJob* j, const std::wstring& shell,
         if (n > 0 && n <= MAX_PATH) cwd = tp;
     }
 
+    /* 可执行文件钉死 System32 绝对路径 (AI 生成的命令行环境必须零劫持面:
+     * 裸 "cmd.exe"/"powershell.exe" 走 CreateProcess 搜索序 — 应用目录/当前目录/PATH
+     * 都可能被同名 exe 抢先)。命令文本本身另经权限档 + ExecRiskText 扫描 + 确认卡。 */
+    wchar_t windir[MAX_PATH + 1];
+    UINT wn = GetWindowsDirectoryW(windir, MAX_PATH);
+    if (wn == 0 || wn > MAX_PATH - 40) return L"无法定位系统目录";
+    std::wstring sysExe = std::wstring(windir) + L"\\System32\\";
     std::wstring cmdline;
     if (shell == L"cmd") {
-        cmdline = L"cmd.exe /d /s /c \"chcp 65001>nul & " + command + L"\"";
+        cmdline = L"\"" + sysExe + L"cmd.exe\" /d /s /c \"chcp 65001>nul & " + command + L"\"";
     } else {
         std::wstring ps = L"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command;
-        cmdline = L"powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-                  + W8(B64EncStr((const unsigned char*)ps.c_str(), ps.size() * sizeof(wchar_t)).c_str());
+        cmdline = L"\"" + sysExe + L"WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+                  + W8(AiB64Enc((const unsigned char*)ps.c_str(), ps.size() * sizeof(wchar_t)).c_str());
     }
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
@@ -1780,6 +1767,24 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         st->kind = 1;
         const Jv* rv = v.Get(L"reveal");
         bool reveal = rv && ((rv->t == 1 && rv->b) || (rv->t == 2 && rv->num != 0));
+        const Jv* idv = v.Get(L"id");
+        const Jv* pv = v.Get(L"path");
+        if ((idv && idv->t == 2 && idv->num >= 1) || (pv && pv->t == 3 && !pv->str.empty())) {
+            /* 按 FileId/路径直开 (2026-09-26: 寻址不再依赖"最近一次样本序号";
+             * path 经 GetFileIdByPath 反查, 宿主 OpenFile 只收 FileId) */
+            std::vector<std::wstring> list;
+            std::wstring rerr = FileResolveTargets(v, &list, 1);
+            if (!rerr.empty()) return rerr;
+            if (list.empty()) return L"缺少 index / id / path 之一";
+            xjs_engine* eng = xjs_GetDefaultEngine();
+            int fid = eng ? xjs_db_GetFileIdByPath(eng, U8(list[0]).c_str()) : -1;
+            if (fid < 0)
+                return L"文件不在索引中 (或引擎不可用): " + list[0] + L" — 可改用 run_search 先确认路径";
+            wchar_t nb[32];
+            swprintf(nb, 32, L"#%d", fid);
+            st->argz = nb;
+            return AgentToolUi(j, UIW_OPEN_FILE, tok, L"", L"", L"", fid, reveal ? 1 : 0, st);
+        }
         int index = (int)wcstol(TrimW(v.S(L"index")).c_str(), NULL, 10);
         if (!AgentCsEnter(j)) return L"已停止";
         std::wstring err = AgentToolOpenFile(j, index, reveal, tok, st);
@@ -1788,10 +1793,38 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
     }
     if (name8 == "copy_paths") {
         st->kind = 2;
+        const Jv* ids = v.Get(L"ids");
+        const Jv* pths = v.Get(L"paths");
+        const Jv* p1 = v.Get(L"path");
+        bool targeted = (ids && ids->t == 4 && !ids->arr.empty()) ||
+                        (pths && pths->t == 4 && !pths->arr.empty()) ||
+                        (p1 && p1->t == 3 && !p1->str.empty());
+        if (targeted) {   /* 指定清单 (2026-09-26: ids/paths 寻址), 不再依赖最近一次搜索 */
+            std::vector<std::wstring> list;
+            std::wstring rerr = FileResolveTargets(v, &list, 100);
+            if (!rerr.empty()) return rerr;
+            std::wstring text;
+            for (auto& p : list) { text += p; text += L"\r\n"; }
+            if (text.empty()) return L"没有可复制的路径";
+            if (!g_host || g_host->ClipboardSetText(g_ctx, U8(text).c_str()) != XJS_PLUGIN_OK)
+                return L"剪贴板写入失败";
+            wchar_t nb[40];
+            swprintf(nb, 40, L"%d 条路径", (int)list.size());
+            st->argz = nb;
+            return L"";
+        }
         if (!AgentCsEnter(j)) return L"已停止";
         std::wstring err = AgentToolCopyPaths();
         LeaveCriticalSection(&g_agentCs);
         return err;
+    }
+    if (name8 == "read_file") {
+        st->kind = 12;
+        return ReadFileToolExec(v, st);
+    }
+    if (name8 == "read_image") {
+        st->kind = 14;
+        return ReadImageToolExec(j, v, st);
     }
     if (name8 == "get_lua_spec") {
         /* Lua 规范重读通道 (2026-09-25 起规范全文默认拼进系统提示词附录, 本工具供脚本报错
@@ -2102,6 +2135,10 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- run_command 是真实执行在用户机器上的命令：先想清楚再提交；权限为「询问」时该调用会**暂停等用户在确认卡上裁决**"
     L"（允许=自动继续执行并拿到输出，拒绝或 5 分钟未确认=本次调用失败）——等待期间不要重复调用同一工具；"
     L"被拒绝就放弃该思路并如实告知，绝不换写法绕过。\n"
+    L"- 动用户的文件（复制/移动/重命名/删除/新建文件夹）一律用 file_op，不要用 run_command 的 del/move/copy 等命令替代：\n"
+    L"  file_op 删除默认进回收站（可还原）、逐项回执可核查、目标已存在默认不覆盖；用户没有要求增删改文件就不要自作主张。\n"
+    L"  **rename 的 renames 每项必须给 from=改名前完整路径**（目录 + 搜索结果里的旧文件名，旧名原样照抄不构造），\n"
+    L"  不要只用 id —— id 反查到的是索引最新名，文件改过名后记录会失真。\n"
     L"- 改设置/换皮肤/切语言/窗口管理：用对应代办工具提交——这类改动**不会直接生效**，而是列进\"待应用的调整\"卡片，"
     L"用户逐项点\"应用\"才执行。提交后用一句话请用户到卡片上确认，**绝不宣称已生效**，"
     L"**用户没让改就不要替用户提交任何调整**。搜索模式管理与任务类操作（搜索/打开文件/复制路径）仍直接执行。\n"
@@ -2129,7 +2166,11 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- run_search：引擎内执行一次搜索（5 种模式，语法见《搜索语法速查》；Lua 统计经 ai.print、数据行经 ai.row 回传）。\n"
     L"- run_command：执行一条 Windows 命令（cmd/powershell）拿真实输出——诊断、系统信息、搜索覆盖不到的批量操作；"
     L"受用户\"命令执行\"权限档约束（禁用=拒绝，询问=命令出确认卡、用户点允许后自动继续执行，允许=直接执行）。\n"
-    L"- open_file / copy_paths：把搜索样本中的文件打开/定位给用户看 / 复制路径清单到剪贴板。\n"
+    L"- open_file / copy_paths：把文件打开/定位给用户看 / 复制路径清单到剪贴板（按最近样本序号、FileId 或绝对路径指定均可）。\n"
+    L"- read_file：读本地文件内容给你分析（自动识别编码 UTF-8/UTF-16/GBK；docx/pptx/xlsx 自动抽取文字；PDF 等二进制不支持会明确说明）。\n"
+    L"- read_image：把本地图片注入对话给视觉模型看（截图/照片/图表分析；需模型开启图片输入；用户说\"看看这张图/截图\"时用）。\n"
+    L"- file_op：文件动作（复制/移动/重命名/删除到回收站/新建文件夹），源支持 FileId+路径批量混用，默认不覆盖已存在目标；\n"
+    L"  受\"文件操作\"权限档约束（禁用/只读拒绝写操作，询问=卡片确认后执行，允许=直接执行）。\n"
     L"- get_author_and_donate：关于作者/软件背景的权威介绍；用户想捐赠/赞赏时也用它取二维码引用（竖排显示在对话页）。\n"
     L"- list_windows / get_window_state / set_window_settings / control_window / create_window：窗口查看与代办（改动经\"待应用的调整\"卡片，用户点应用才生效）。\n"
     L"- get_global_settings / set_global_settings / list_skins：全局设置读写（改经卡片）/ 皮肤名清单。\n"
@@ -2238,7 +2279,8 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"（不带字段实参 = id+名称；字段名就是输出 JSON 的键）。行进工具结果 JSON 的 rows 数组，"
     L"**每行是只含请求字段的 JSON 对象**（如 {\"id\":123,\"大小\":1048576,\"名称\":\"a.docx\"}，时间=epoch 秒）；"
     L"索引未开启的字段整键省略（rows 首元素有提示），行数过多会截断。清单展示优先 ai.row，别用 ai.print 手拼行。\n"
-    L"- 文件导出（仅 lua_exec，仅 agent 工具环境）：**ai.read(路径)**=读文本文件返回内容（≤8MB，二进制拒绝）；"
+    L"- 文件导出（仅 lua_exec，仅 agent 工具环境）：**ai.read(路径)**=读文本文件返回内容（≤8MB，二进制拒绝；"
+    L"编码自动识别并转 UTF-8，GBK 等本地编码也能读）；"
     L"**ai.write(路径, 内容)**=登记写出（脚本结束后系统自动完成写盘，结果在工具结果 JSON 的 writtenFiles/writesNote）；"
     L"**ai.saveas(内容, \"默认文件名.csv\")**=弹系统保存对话框让用户选位置（用户选定=授权，取消=不写）。\n"
     L"  内容格式自动判定：**二维表（表的表）→ CSV**（UTF-8 带 BOM，Excel 直开；子表为字典时取键并集做表头，"
@@ -2263,8 +2305,13 @@ static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」或 5 分钟未确认则本次调用以失败返回; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
-  {"type":"function","name":"open_file","description":"打开最近一次 run_search 样本列表中的某个文件 (在用户屏幕上打开/定位), 用于让用户直接看到该文件。","parameters":{"type":"object","properties":{"index":{"type":"integer","description":"样本列表序号 (1 起)"},"reveal":{"type":"boolean","description":"true=只在资源管理器中定位, 不打开"}},"required":["index"]}},
-  {"type":"function","name":"copy_paths","description":"把最近一次 run_search 的前 100 条完整路径 (每行一条) 复制到剪贴板, 供用户粘贴。","parameters":{"type":"object","properties":{},"required":[]}},
+  {"type":"function","name":"open_file","description":"把一个文件在用户屏幕上打开或定位 (走用户窗口的打开行为), 用于让用户直接看到该文件。三种寻址任选其一: index=最近一次 run_search 样本序号 (1 起); id=引擎 FileId (任何工具结果里给过的 ID 都可以用); path=绝对路径 (须在索引中, 不在时先 run_search 确认)。","parameters":{"type":"object","properties":{"index":{"type":"integer","description":"样本列表序号 (1 起; 与 id/path 三选一)"},"id":{"type":"integer","description":"引擎 FileId"},"path":{"type":"string","description":"文件绝对路径"},"reveal":{"type":"boolean","description":"true=只在资源管理器中定位, 不打开"}}}},
+  {"type":"function","name":"copy_paths","description":"把完整路径清单 (每行一条) 复制到剪贴板, 供用户粘贴。不带参数 = 最近一次 run_search 的前 100 条; 也可用 ids (FileId 数组) 或 paths (绝对路径数组) 复制指定清单 (两者可混用, 上限 100 条)。","parameters":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"integer"},"description":"引擎 FileId 数组"},"paths":{"type":"array","items":{"type":"string"},"description":"绝对路径数组"}}}},
+  {"type":"function","name":"read_file","description":"读取本地文件的内容给你分析。文本文件自动识别编码 (UTF-8/UTF-16/GBK 等本地编码统一转 UTF-8); docx/pptx/xlsx 自动解包抽取文字 (pptx 带分页标记; xlsx 每行=一行、单元格间制表符, 日期为序列数); 其它二进制 (含 PDF/旧版 doc/xls/ppt) 不支持, 会明确报错不硬猜。文件过大只回传头尾并注明省略量。也可传 id (FileId) 读索引中的文件。受文件操作权限档约束: 「禁用」拒绝。","parameters":{"type":"object","properties":{"path":{"type":"string","description":"文件绝对路径"},"id":{"type":"integer","description":"引擎 FileId (与 path 二选一)"}}}},
+  {"type":"function","name":"read_image","description":"把一张本地图片文件注入本对话供你直接查看 (视觉): 截图报错分析、照片内容描述、图表解读等, 用户说\"看看这张图/这个截图\"时用。超过 4MB 或非常见格式会自动压缩转格式 (最长边约 2000px); GIF 取第一帧。需要当前模型开启图片输入能力 (未开启会报错, 如实告知用户)。","parameters":{"type":"object","properties":{"path":{"type":"string","description":"图片文件绝对路径"},"id":{"type":"integer","description":"引擎 FileId (与 path 二选一)"}}}},
+  {"type":"function","name":"file_op","description":"对文件/文件夹执行动作: copy=复制, move=移动 (改名=移动到新路径), rename=批量改名, delete=删除 (默认进回收站, 可还原; permanent=true 才彻底删除), mkdir=新建文件夹 (含多级)。源可用 paths (绝对路径数组) 与 ids (引擎 FileId 数组) 混合指定。rename 每项 {from, to}: **from 必填 = 改名前的完整路径文本** (用搜索结果里的旧文件名 + 目录拼出), to=新文件名 (留在原目录) 或新完整路径; rename 不支持用 FileId 寻址 — id 反查到的是索引最新名, 文件改过名后无法当「改名前」路径。受文件操作权限档约束: 「禁用/只读」拒绝写操作; 「询问」时本次调用**暂停**并在卡片上列出全部明细, 用户点「允许一次」才执行 (5 分钟未响应按取消); 「允许」直接执行。默认不覆盖已存在的目标 (overwrite=true 才覆盖); 一次 ≤128 项, 执行后逐项返回成功/失败与更改记录 changes (每个成功项的 action/from/to; 向用户报告结果或引用改动后的路径时**以 changes 为准**); 另有 unchanged=源与目标相同而未执行的项数 (文件已经是目标状态, 常见于改过名后重复提交 — **不要把它算作改动成功**, 如实告知用户无需更改)。不要用 run_command 的 del/move/copy 替代本工具; 用户没有要求时绝不主动提出删除/移动。","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["copy","move","rename","delete","mkdir"],"description":"动作"},"paths":{"type":"array","items":{"type":"string"},"description":"源绝对路径数组 (与 ids 可混用; mkdir 不用)"},"ids":{"type":"array","items":{"type":"integer"},"description":"引擎 FileId 数组 (自动解析为路径; rename 不用)"},"target":{"type":"string","description":"copy/move: 目标目录 (须已存在); mkdir: 要创建的目录"},"renames":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string","description":"改名前的完整路径 (目录 + 搜索结果里的旧文件名, 原样照抄旧名)"},"to":{"type":"string","description":"新文件名 (留在原目录) 或新完整路径"}},"required":["from","to"]},"description":"rename 动作专用: 每项 {from, to} — from=改名前完整路径文本, 必填"},"overwrite":{"type":"boolean","description":"目标已存在时覆盖 (默认 false=跳过并报告)"},"permanent":{"type":"boolean","description":"delete 专用: true=彻底删除不进回收站 (确认卡会标警告)"}},"required":["action"]}},
+)json"   /* 两段相邻拼接 — 单个字符串字面量超过约16KB 会触发 C2026 (同 ai_web_ui 的分段口径);
+            边界约定: 前段以 "[" 开头、不含 "]"; 后段以 "]" 结尾、不含 "[" — 拼起来才是完整数组 */ R"json(
   {"type":"function","name":"list_windows","description":"列出当前全部搜索窗口 (令牌/名称/是否主窗/档案槽)。其它代办工具的 window 参数都填这里的\"名称\"。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"get_window_state","description":"查看一个搜索窗口的完整状态与设置 (视图/页面缩放/皮肤/预览/预览宽度/置顶/搜索模式/搜索词/结果数/选中数/失焦行为/显示开关/任务栏图标/鼠标打开/默认选中/窗口矩形等)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (list_windows 查; 留空=当前对话所在窗口)"}},"required":[]}},
   {"type":"function","name":"set_window_settings","description":"提交对一个搜索窗口的设置修改。**不会直接生效**: 每个键列成\"待应用的调整\"卡片, 用户点\"应用\"才逐项执行 (可忽略)。settings 对象的键全部可选但必须合法, 一个未知键/非法值在应用时该键失败: 视图=list|details|medium|large; 页面缩放=50~200(百分数); 皮肤=皮肤名(先 list_skins 查); 预览=布尔; 预览宽度=160~2000; 置顶=布尔; 失焦行为=0(无)|1(失焦关闭窗口); 显示控制按钮/显示筛选框/显示状态栏/任务栏图标=布尔; 鼠标打开=0(双击)|1(单击); 默认选中=0(不选)|1(自动选第一个); 搜索模式=wildcard|regex|sql|lua|lua-exec; 语言=auto|zh|zh-TW|en|ko|th|ms。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"settings":{"type":"object","description":"要修改的设置键值对 (子集随意)"}},"required":["settings"]}},
@@ -2488,6 +2535,26 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
         input.push_back(picojson::value(out));
     }
     input.push_back(userItem(L"(以下为系统自动注入的环境快照, 非用户发言)" + BuildEnvSnapshot()));
+    if (!j->injImgs.empty()) {
+        /* read_image 注入的本地图片 (worker 内自产自销): 文字说明 + input_image 组,
+         * 位置在快照之后、护栏提醒之前 — 模型每轮都看得到, 直到作业结束 */
+        picojson::array ca;
+        picojson::object note;
+        note["type"] = picojson::value("input_text");
+        note["text"] = JS(std::wstring(L"(系统自动注入: 以下是 read_image 工具读取的本地图片, 供直接查看内容, 非用户发言)"));
+        ca.push_back(picojson::value(note));
+        for (auto& u : j->injImgs) {
+            picojson::object part;
+            part["type"] = picojson::value("input_image");
+            part["image_url"] = picojson::value(u);   /* UTF-8 data URL 直嵌 (免宽窄往返) */
+            part["detail"] = picojson::value("auto");
+            ca.push_back(picojson::value(part));
+        }
+        picojson::object item;
+        item["role"] = picojson::value("user");
+        item["content"] = picojson::value(ca);
+        input.push_back(picojson::value(item));
+    }
     if (!inject.empty()) input.push_back(userItem(inject));
     if (!withTools)
         input.push_back(userItem(L"(工具调用次数已达上限，请直接根据已获得的信息回答)"));
@@ -2839,8 +2906,84 @@ static std::string AgentCallKey(const std::string& name8, const std::string& arg
     return name8 + "|" + canon;
 }
 
-void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果回填 → 下一轮, 直到最终答复 */
+/* ============ 窗口不在前台时的系统级提醒 (Win10 通知中心 toast) ============ */
+
+/* 前台可见 = 用户看得见页内提示, 不打扰; 全进程 4 秒节流防连环轰炸 (多 worker 线程
+ * 并发时静态节流的竞态最坏 = 重复/丢一条提醒, 可接受)。 */
+static bool AiToastWanted() {
+    static ULONGLONG last = 0;
+    if (AiPanelHostForeground()) return false;
+    ULONGLONG now = GetTickCount64();
+    if (last && now - last < 4000) return false;
+    last = now;
+    return true;
+}
+
+/* 经 PowerShell 发 Win10 通知: 借系统 PowerShell 自身 AUMID — 零系统修改 (不建开始菜单
+ * 快捷方式), -EncodedCommand 免引号转义, CREATE_NO_WINDOW 不闪控制台, 发完不等。
+ * 宿主自带 Toast 是窗口内自绘, 窗口在后台就看不见。
+ * 安全口径 (AI 生成的文本视为不可信输入): 正文先过 AiToastSafeText 白名单 — 引号/反引号/
+ * 美元符/管道等脚本敏感字符全部剔除, 剩余文本即使拼接位置出错也构不成可执行语法;
+ * 单引号转义保留作双保险; powershell.exe 钉死 System32 绝对路径, 杜绝 PATH 劫持。 */
+static std::wstring AiToastSafeText(const std::wstring& in, size_t cap) {
+    std::wstring out;
+    for (wchar_t c : in) {
+        if (out.size() >= cap) break;
+        if (c == L'\n' || c == L'\r' || c == L'\t') { out += L' '; continue; }   /* 折行展平 */
+        if (c < 0x20 || c == 0x7F) continue;
+        if (wcschr(L"'\"`$;|&<>", c)) continue;   /* 脚本敏感字符 (cmd 与 PS 双语境) 直接剔除 */
+        out += c;
+    }
+    while (!out.empty() && out.back() == L' ') out.pop_back();
+    return out;
+}
+static void AiSystemToast(const std::wstring& bodyRaw) {
+    std::wstring body = AiToastSafeText(bodyRaw, 150);
+    if (body.empty()) return;
+    std::wstring q;
+    for (wchar_t c : body) {   /* PS 单引号串转义 (白名单后应无引号 — 双保险) */
+        if (c == L'\'') q += L"''";
+        else q += c;
+    }
+    wchar_t windir[MAX_PATH + 1];
+    UINT wn = GetWindowsDirectoryW(windir, MAX_PATH);
+    if (wn == 0 || wn > MAX_PATH - 40) return;
+    std::wstring psExe = std::wstring(windir) + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    std::wstring ps =
+        L"[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime];"
+        L"[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime];"
+        L"$a='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
+        L"$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+        L"$t=$x.GetElementsByTagName('text');"
+        L"[void]$t.Item(0).AppendChild($x.CreateTextNode('蜗牛快搜 · AI 助手'));"
+        L"[void]$t.Item(1).AppendChild($x.CreateTextNode('" + q + L"'));"
+        L"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($a).Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+    std::wstring cmd =
+        L"\"" + psExe + L"\" -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " +
+        W8(AiB64Enc((const unsigned char*)ps.c_str(), ps.size() * sizeof(wchar_t)).c_str());
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    if (CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
+/* 挂起确认提醒 (file_op / run_command 询问档): 卡在等用户裁决, 人在后台就叫他回来 */
+static void AiAskSystemNotify(const std::wstring& what) {
+    if (!AiToastWanted()) return;
+    std::wstring body = what;
+    if (body.empty()) body = L"AI 请求执行操作";
+    if (body.size() > 120) {
+        body.resize(120);
+        body += L"…";
+    }
+    AiSystemToast(L"等待你的确认: " + body + L" (回到窗口后可在输入框上方处理)");
+}
+
+ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果回填 → 下一轮, 直到最终答复 */
     JobLuaDumpCleaner dumpCleaner;   /* data\待运行.lua 作业级守卫: 期间每次 lua 调用覆盖写入, 本函数任何出口删除 */
+    j->injImgs.clear();   /* read_image 注入图随作业存活 (历史不落, 新作业不带上一次的图) */
     wchar_t whost[512] = {};
     MultiByteToWideChar(CP_UTF8, 0, j->hostA.c_str(), -1, whost, 512);
     HINTERNET hs = WinHttpOpen(L"snail-quicksearch-ai-assistant", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
@@ -2980,6 +3123,17 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     local.argz = exDesc;
                     ArgzCut(&local.argz);
                 }
+                bool foTool = (c.name == "file_op");
+                bool fileReadTool = (c.name == "read_file" || c.name == "read_image");
+                AiFileOp fo;
+                std::wstring foPrep;   /* 非空 = Prepare 失败的原因 (直接作为工具错误) */
+                if (foTool) {
+                    Jv cv = JsonParseW(W8(c.args.c_str()));
+                    foPrep = FileOpPrepare(cv, &fo);
+                    local.kind = 13;
+                    local.argz = foPrep.empty() ? fo.summary : L"参数无效";
+                    ArgzCut(&local.argz);
+                }
                 int sidx = -1;
                 EnterCriticalSection(&j->cs);
                 j->steps.push_back(local);
@@ -3001,6 +3155,19 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                         d["note"] = JS(L"与本批次中前面一次调用完全相同, 已去重未重复执行; 以上一次的执行结果为准");
                         output = picojson::value(d).serialize();
                     }
+                } else if (fileReadTool && pol == 0) {
+                    /* read_file/read_image = 纯读, 只在「禁用」档拒绝 (只读/询问/允许都放行) */
+                    err = L"已拒绝: 文件操作权限当前为「禁用」。请告知用户在对话输入框下方的"
+                          L"文件操作权限选择器切换到「询问」或「允许」后, 再重新调用本工具";
+                    local.state = 3;
+                } else if (foTool && pol == 0) {
+                    err = L"已拒绝: 文件操作权限当前为「禁用」。请告知用户在对话输入框下方的"
+                          L"文件操作权限选择器切换到「允许」或「询问」后, 再重新提出该操作";
+                    local.state = 3;
+                } else if (foTool && pol == 1) {
+                    err = L"已拒绝: 文件操作权限当前为「只读」(写操作被禁止)。请告知用户把权限"
+                          L"切换到「询问」或「允许」后, 再重新提出";
+                    local.state = 3;
                 } else if (fileTool && pol == 0) {
                     /* 拒绝回执写成可恢复指引 (dsh 口径: 拒绝原因要告诉模型怎么继续),
                        只描述事实 + 恢复路径, 不代用户做决定 */
@@ -3014,6 +3181,67 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                 } else if (fileTool && pol == 2) {
                     err = L"等待用户确认文件操作 (在下方卡片选择「允许」后我会重试)";
                     local.state = 4;
+                } else if (foTool && pol == 2) {
+                    /* file_op 询问档 = 挂起等用户裁决 (与 run_command 同一条 execGrant/execDeny
+                     * 通道, 挂起期一次只有一张询问卡): 卡上带明细摘要与高危提示, 允许=执行,
+                     * 拒绝/超时 = 工具失败回喂, 模型当场得体收尾 — 不做"先拒后重试"死胡同。 */
+                    if (!foPrep.empty()) {
+                        err = foPrep;
+                        local.state = 3;
+                    } else {
+                        local.state = 4;
+                        local.err = L"等待用户确认文件操作 · " + fo.confirm +
+                                    (fo.risk.empty() ? std::wstring() : (L"\n" + fo.risk));
+                        EnterCriticalSection(&j->cs);
+                        InterlockedExchange(&j->execGrant, 0);
+                        InterlockedExchange(&j->execDeny, 0);
+                        if (sidx >= 0 && sidx < (int)j->steps.size()) {   /* 询问卡立即可见 (不等执行完) */
+                            j->steps[sidx].state = 4;
+                            j->steps[sidx].err = local.err;
+                            j->stepsVersion++;
+                        }
+                        LeaveCriticalSection(&j->cs);
+                        if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+                        AiAskSystemNotify(fo.summary);   /* 窗口不在前台 → Win10 通知提醒回来裁决 */
+                        bool granted = false;
+                        bool stoppedAsk = false;
+                        ULONGLONG askT0 = GetTickCount64();
+                        for (;;) {
+                            if (InterlockedCompareExchange(&j->abort, 0, 0)) { stoppedAsk = true; break; }
+                            bool denied = false;
+                            EnterCriticalSection(&j->cs);
+                            if (j->execGrant) { j->execGrant = 0; granted = true; }
+                            denied = j->execDeny != 0;
+                            LeaveCriticalSection(&j->cs);
+                            if (granted || denied || GetTickCount64() - askT0 > 300000) break;
+                            Sleep(40);
+                        }
+                        if (stoppedAsk) {
+                            err = L"已停止";
+                            local.state = 3;
+                        } else if (granted) {
+                            local.state = 1;   /* 卡片转执行中 (执行完由尾部统一回写为完成) */
+                            local.err.clear();
+                        } else if (InterlockedCompareExchange(&j->execDeny, 0, 0)) {
+                            err = L"用户拒绝这次文件操作 — 不要再用其它写法尝试同一操作, 如实说明并按用户指示继续";
+                            local.state = 3;
+                        } else {
+                            err = L"等待用户确认超时 (5 分钟未响应), 本次操作已取消 — 可告知用户放行后重新提出";
+                            local.state = 3;
+                        }
+                        EnterCriticalSection(&j->cs);
+                        if (sidx >= 0 && sidx < (int)j->steps.size()) {
+                            j->steps[sidx].state = local.state;
+                            j->steps[sidx].err = local.err;
+                            j->stepsVersion++;
+                        }
+                        LeaveCriticalSection(&j->cs);
+                        if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+                        if (granted)
+                            err = FileOpExecute(j, fo, &local);
+                    }
+                } else if (foTool) {   /* 允许档 (pol == 3): 直接执行 */
+                    err = foPrep.empty() ? FileOpExecute(j, fo, &local) : foPrep;
                 } else if (execTool && epol == 0) {
                     err = L"已拒绝: 命令执行权限当前为「禁用」。请告知用户在对话输入框下方的"
                           L"命令执行权限选择器切换到「允许」或「询问」后, 再重新调用本工具";
@@ -3041,6 +3269,7 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     }
                     LeaveCriticalSection(&j->cs);
                     if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+                    AiAskSystemNotify(exDesc.empty() ? std::wstring(L"命令执行") : exDesc);   /* 窗口不在前台 → Win10 通知 */
                     bool granted = false;
                     bool stoppedAsk = false;
                     ULONGLONG askT0 = GetTickCount64();
@@ -3100,6 +3329,7 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
                     dst.err = local.err;
                     dst.top = local.top;   /* open 展开态归泵/用户, 不覆盖 */
                     dst.wrote = local.wrote;   /* 导出的文件 (卡片常显块+落库) */
+                    dst.chg = local.chg;   /* file_op 逐项更改记录 (卡片常显块+回合聚合+落库) */
                     dst.adj = local.adj;   /* 待应用的调整 (提案数据; 漏拷 = 卡片按钮区不渲染) */
                     j->stepsVersion++;
                 }
@@ -3151,15 +3381,20 @@ void WorkerMain(AiJob* j) {   /* agent 循环: SSE → 工具执行 → 结果�
     j->truncated = truncated;
     j->err = W8(errMsg.c_str());
     j->state = aborted ? 3 : (failed ? 2 : 1);
-    /* 临时诊断 (空答复排查): 作业收尾时 out 的长度与开头 */
-    if (g_host->StorageSet) {
-        std::wstring dbg = L"state=" + std::to_wstring(j->state) +
-                           L" truncated=" + std::to_wstring((int)truncated) +
-                           L" outLen=" + std::to_wstring(j->out.size()) +
-                           L"\noutHead=" + j->out.substr(0, 200);
-        g_host->StorageSet(g_ctx, "调试作业末", U8(dbg).c_str(), (int)U8(dbg).size());
-    }
+    /* 后台完成提醒的素材: 最后一条用户消息开头 (任务完成/失败 = 哪件事完了) */
+    std::wstring ask;
+    for (auto& m : j->hist)
+        if (m.role == 0 && !m.text.empty()) ask = m.text;
     LeaveCriticalSection(&j->cs);
     if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
+    /* 窗口不在前台 → Win10 通知 (任务完成/失败; 用户自己"停止"的 = 人在场, 不打扰) */
+    if (!aborted && AiToastWanted()) {
+        std::wstring body = (failed ? L"任务失败: " : L"任务完成: ") + ask;
+        if (body.size() > 100) {
+            body.resize(100);
+            body += L"…";
+        }
+        AiSystemToast(body);
+    }
 }
 

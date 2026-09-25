@@ -490,8 +490,23 @@ static const wchar_t* StepBadge(int kind) {
         case 9: return L"规范";
         case 10: return L"关于";
         case 11: return L"命令";
+        case 12: return L"读取";
+        case 13: return L"文件";
+        case 14: return L"图片";
     }
     return L"工具";
+}
+
+/* 多行文本转义 (file_op 确认卡的明细含 \n → <br/>) */
+static void HtmlEscapeBr(std::wstring* out, const std::wstring& s) {
+    size_t b = 0;
+    for (;;) {
+        size_t n = s.find(L'\n', b);
+        HtmlEscape(out, n == std::wstring::npos ? s.substr(b) : s.substr(b, n - b));
+        if (n == std::wstring::npos) break;
+        *out += L"<br/>";
+        b = n + 1;
+    }
 }
 
 /* role==2 工具卡片组 (旧 .ai-cmd-entry 口径; 查询展示截 200 字符 — 浏览器端折行,
@@ -535,15 +550,14 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
         /* 折叠/展开箭头 (点击头部切换; 样本列表默认收起) */
         *out += L"</span><span class=\"sarr glyph\">&#xE70D;</span></div>";
         if (st.state == 4) {
-            if (st.kind == 11) {
-                /* 命令执行确认卡: 允许一次 = 只放行这条命令的完全相同重试 (不持久放权);
-                   data-mi/si 供 eallow 回传定位 (凭据按 shell|command 键比对) */
-                wchar_t ab[48];
-                swprintf(ab, 48, L"<div class=\"sask\" data-mi=\"%d\" data-si=\"%d\">", mi, (int)si);
-                *out += ab;
-                HtmlEscape(out, st.err.empty() ? L"等待用户确认命令执行" : st.err);
-                *out += L"<br/><span class=\"abtn primary\" data-act=\"execallow\">允许一次</span>";
-                *out += L"<span class=\"abtn\" data-act=\"execdeny\">拒绝</span></div>";
+            if (st.kind == 11 || st.kind == 13) {
+                /* 命令执行 / 文件操作确认卡: 卡内只放确认文本 (2026-09-26 用户口径"上面的确认
+                   不需要了") — 允许/拒绝按钮只在输入框上方常驻确认条 (#pendbar), 裁决单入口 */
+                *out += L"<div class=\"sask\">";
+                HtmlEscapeBr(out, st.err.empty() ? (st.kind == 11 ? L"等待用户确认命令执行"
+                                                                  : L"等待用户确认文件操作")
+                                                 : st.err);
+                *out += L"</div>";
             } else {
                 /* 策略询问: 允许 (转允许并放行后续) / 保持拒绝 */
                 *out += L"<div class=\"sask\">";
@@ -620,14 +634,89 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             }
             *out += L"</div>";
         }
+        if (!st.chg.empty()) {
+            /* 文件更改记录 = 常显块 (不随卡片折叠收起 — "AI 改了什么随时可查", 回合级另有
+               sess-chg 聚合块)。路径挂 .ai-path 可点击 (旧路径点击 = 活解析, 改名后点开
+               就是新位置的文件), 但必须带 data-rec=1: 更改记录是**历史事实**, 改名前的旧
+               路径不存在是常态, 前端 pathcheck 的模糊校正会把旧名回填成磁盘新名 → 记录
+               显示成"前后名一样"。记录块禁止进校验改写, 显示恒为落库原样。 */
+            wchar_t cb[128];
+            {
+                int nfail = 0;
+                for (auto& c : st.chg) if (!c.ok) nfail++;
+                if (nfail)
+                    swprintf(cb, 128, L"🗂 文件更改 %d 项 (✕ %d 失败):", (int)st.chg.size(), nfail);
+                else
+                    swprintf(cb, 128, L"🗂 文件更改 %d 项:", (int)st.chg.size());
+            }
+            *out += L"<div class=\"schg\">";
+            *out += cb;
+            static const wchar_t* CHGW[5] = { L"复制", L"移动", L"重命名", L"删除", L"新建" };
+            auto pathSpan = [&out](const std::wstring& full, const std::wstring& shown) {
+                *out += L"<span class=\"ai-path\" data-rec=\"1\" data-path=\"";
+                HtmlEscape(out, full);
+                *out += L"\">";
+                HtmlEscape(out, shown);
+                *out += L"</span>";
+            };
+            auto dirOf = [](const std::wstring& p) {
+                size_t s = p.find_last_of(L'\\');
+                return s == std::wstring::npos ? std::wstring() : p.substr(0, s + 1);
+            };
+            auto eqNoCase = [](const std::wstring& a, const std::wstring& b) {
+                if (a.size() != b.size()) return false;
+                for (size_t i = 0; i < a.size(); i++)
+                    if (towlower(a[i]) != towlower(b[i])) return false;
+                return true;
+            };
+            auto nameOf = [](const std::wstring& p) {
+                size_t s = p.find_last_of(L'\\');
+                return s == std::wstring::npos ? p : p.substr(s + 1);
+            };
+            /* 卡上只铺前 8 行 (大批量重命名 33 行全铺会把版面顶爆); 完整清单在回合级
+               "本轮文件更改"块 (默认收起, 可展开)。同目录的一对只显文件名 (完整路径
+               恒留在 data-path 供点击/复制), 跨目录保留完整路径; 失败行红样式+原因 */
+            size_t show = st.chg.size() < 8 ? st.chg.size() : 8;
+            for (size_t ci = 0; ci < show; ci++) {
+                const AiFileChange& c = st.chg[ci];
+                bool sameDir = !c.from.empty() && !c.to.empty() && eqNoCase(dirOf(c.from), dirOf(c.to));
+                *out += L"<div class=\"schg-it\"";
+                if (!c.ok) *out += L" schg-bad";
+                *out += L"><span class=\"schg-w\">";
+                HtmlEscape(out, CHGW[c.act % 5]);
+                *out += L"</span>";
+                if (!c.from.empty()) pathSpan(c.from, sameDir ? nameOf(c.from) : c.from);
+                if (!c.from.empty() && !c.to.empty()) *out += L"<span class=\"chg-arr\">→</span>";
+                if (!c.to.empty()) pathSpan(c.to, sameDir ? nameOf(c.to) : c.to);
+                if (!c.ok) {
+                    *out += L"<span class=\"chg-err\">✕ ";
+                    HtmlEscape(out, c.err);
+                    *out += L"</span>";
+                }
+                *out += L"</div>";
+            }
+            if (show < st.chg.size()) {
+                wchar_t cm[64];
+                swprintf(cm, 64, L"… 其余 %d 项见下方回合汇总", (int)(st.chg.size() - show));
+                *out += L"<div class=\"schg-it schg-more\">";
+                HtmlEscape(out, cm);
+                *out += L"</div>";
+            }
+            *out += L"</div>";
+        }
         if (!st.top.empty()) {
             *out += L"<div class=\"ssamples\" style=\"display:none\">";
+            /* file_op 的样本 = 操作前源路径 (历史事实, 同更改记录口径挂 data-rec 禁校验改写);
+               其余卡片样本 = 现存索引路径, 照常校验 (图标/点击) */
+            bool rec = st.kind == 13;
             for (size_t ti = 0; ti < st.top.size(); ti++) {
                 wchar_t no[16];
                 swprintf(no, 16, L"%d. ", (int)(ti + 1));
                 *out += no;
                 /* 样本路径 = 可点击链接 (单击打开/右键定位复制; 前端 .ai-path 统一处理) */
-                *out += L"<span class=\"ai-path\" data-path=\"";
+                *out += L"<span class=\"ai-path\"";
+                if (rec) *out += L" data-rec=\"1\"";
+                *out += L" data-path=\"";
                 HtmlEscape(out, st.top[ti]);
                 *out += L"\">";
                 HtmlEscape(out, st.top[ti]);
@@ -1084,6 +1173,26 @@ static void WebCreateControllerFor(AiSess* s) {
     g_webEnv->CreateCoreWebView2Controller(w->hwnd, new WebCtrlHandler(s));
 }
 
+/* 面板宿主窗口 (搜索窗) 前台判定 (挂起确认的系统通知闸): 任一面板宿主在前台 = 用户看得见
+   页内确认条, 不发系统通知; 面板已关/窗口在后台 = 发 Win10 通知提醒回来裁决 */
+static std::vector<HWND> s_panelHosts;
+bool AiPanelHostForeground() {
+    for (size_t i = 0; i < s_panelHosts.size();) {
+        if (IsWindow(s_panelHosts[i])) i++;
+        else s_panelHosts.erase(s_panelHosts.begin() + i);
+    }
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    HWND fgr = GetAncestor(fg, GA_ROOTOWNER);
+    if (!fgr) fgr = fg;
+    for (HWND h : s_panelHosts) {
+        HWND hr = GetAncestor(h, GA_ROOTOWNER);
+        if (!hr) hr = h;
+        if (hr == fgr) return true;
+    }
+    return false;
+}
+
 void WebSessionCreate(AiSess* s) {
     if (s->web) return;
     if (!HOST_RECT_OK || !g_host) return;
@@ -1108,6 +1217,8 @@ void WebSessionCreate(AiSess* s) {
     s->web = w;   /* 建好即挂 (环境在途时由 WebCreateControllersPending 补建控制器) */
     SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)s);
     SetTimer(w->hwnd, 1, 250, NULL);   /* 焦点对账心跳 (WebFocusTick) */
+    if (std::find(s_panelHosts.begin(), s_panelHosts.end(), (HWND)parent) == s_panelHosts.end())
+        s_panelHosts.push_back((HWND)parent);   /* 前台判定用 (AiPanelHostForeground) */
     if (g_webEnv) WebCreateControllerFor(s);
 }
 
@@ -1222,14 +1333,34 @@ static picojson::value WebMsgValue(AiSess* s, const AiMsg& m, int mi, bool think
     if (m.role == 2 && !m.steps.empty()) {   /* 步骤状态: 前端聚合头部计数用 (卡面视觉由 MsgHtmlOf 直出) */
         picojson::array steps;
         picojson::array wrote;               /* 本条卡片写出的文件 (前端按回合聚合渲染导出块) */
-        for (const AiToolStep& st : m.steps) {
-            picojson::object so;
-            so["state"] = JN(st.state);
-            for (const std::wstring& p : st.wrote) wrote.push_back(JS(p));
+        picojson::array chg;                 /* 本条卡片文件更改记录 (前端按回合聚合渲染更改块) */
+            for (const AiToolStep& st : m.steps) {
+                picojson::object so;
+                so["state"] = JN(st.state);
+                if (st.state == 4) {   /* 挂起确认: 常驻条需要的字段 — kind 过滤 (只有 kind 11/13
+                                          真挂起等裁决; open_file/copy_paths 的策略询问卡不挂起,
+                                          走 pallow/pdeny, 不能进常驻条) + 摘要 + 明细正文 */
+                    so["k"] = JN(st.kind);
+                    so["argz"] = JS(st.argz);
+                    so["err"] = JS(st.err);
+                }
+                for (const std::wstring& p : st.wrote) wrote.push_back(JS(p));
+            for (const AiFileChange& c : st.chg) {
+                picojson::object co;
+                co["a"] = JN(c.act);
+                co["f"] = JS(c.from);
+                co["t"] = JS(c.to);
+                if (!c.ok) {   /* 失败项: 前端红样式 + 原因 (缺省 = 成功, 兼容旧数据) */
+                    co["o"] = JN(0);
+                    co["e"] = JS(c.err);
+                }
+                chg.push_back(picojson::value(co));
+            }
             steps.push_back(picojson::value(so));
         }
         o["steps"] = picojson::value(steps);
         if (!wrote.empty()) o["wrote"] = picojson::value(wrote);
+        if (!chg.empty()) o["chg"] = picojson::value(chg);
     }
     return picojson::value(o);
 }

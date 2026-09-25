@@ -260,6 +260,7 @@ static void PumpStreams() {
                                    m.steps[0].err != steps[seen].err ||
                                    m.steps[0].top != steps[seen].top ||
                                    m.steps[0].wrote != steps[seen].wrote ||
+                                   m.steps[0].chg != steps[seen].chg ||
                                    m.steps[0].name != steps[seen].name ||
                                    m.steps[0].mode != steps[seen].mode ||
                                    m.steps[0].query != steps[seen].query;

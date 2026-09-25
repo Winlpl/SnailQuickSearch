@@ -85,6 +85,56 @@ static std::string B64Dec(const std::string& in) {
     return out;
 }
 
+/* base64 字节版 (read_image data URL 与 EncodedCommand 等共用; 文本版 B64Enc 供密钥加密) */
+std::string AiB64Enc(const unsigned char* d, size_t n) {
+    return B64Enc(std::string((const char*)d, n));
+}
+
+/* UTF-16 字节流 → UTF-8 (AiTextToUtf8 的 BOM 分支用)。
+ * 不能走 MultiByteToWideChar(1200/1201) — 实测直接拒 (ERROR_INVALID_PARAMETER, CP1200
+ * 不作源码页), 显式按字节拼 wide: LE 原生拷, BE 逐单元换序。 */
+static std::string U16BytesToU8(const char* d, size_t n, UINT codePage) {
+    if (n % 2) n -= 1;   /* 截齐偶数 (截断文件尾部半单元) */
+    std::wstring w(n / 2, 0);
+    if (n) {
+        if (codePage == 1200)
+            memcpy(&w[0], d, n);
+        else
+            for (size_t i = 0; i < n / 2; i++)
+                w[i] = (wchar_t)(((unsigned char)d[2 * i + 1] << 8) | (unsigned char)d[2 * i]);
+    }
+    return U8(w);
+}
+
+/* ---- 文本 → UTF-8 (read_file / ai.read 共用): BOM 识别 → UTF-8 严格校验 → ANSI 回落 ----
+ * 中文 Windows 的 ANSI 页是 GBK 系, 模型管线全程 UTF-8 — 不转就是乱码。
+ * encName 回传识别结果 (工具结果里告知模型); 编码存疑时以输出可读为准, 不做二次猜测。 */
+std::string AiTextToUtf8(const std::string& raw, std::wstring* encName) {
+    if (encName) *encName = L"UTF-8";
+    if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF &&
+        (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF)
+        return raw.substr(3);   /* UTF-8 BOM: 剥壳 */
+    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE) {
+        if (encName) *encName = L"UTF-16LE";
+        return U16BytesToU8(raw.data() + 2, raw.size() - 2, 1200);
+    }
+    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFE && (unsigned char)raw[1] == 0xFF) {
+        if (encName) *encName = L"UTF-16BE";
+        return U16BytesToU8(raw.data() + 2, raw.size() - 2, 1201);
+    }
+    int strict = raw.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                       raw.data(), (int)raw.size(), NULL, 0);
+    if (strict > 0) {   /* 合法 UTF-8: 原样 (recode 等价, 直取原文免一次转换) */
+        if (encName) *encName = L"UTF-8";
+        return raw;
+    }
+    if (encName) *encName = L"ANSI (本地编码, 已转 UTF-8)";
+    int wl = raw.empty() ? 0 : MultiByteToWideChar(CP_ACP, 0, raw.data(), (int)raw.size(), NULL, 0);
+    std::wstring w(wl > 0 ? (size_t)wl : 0, 0);
+    if (wl > 0) MultiByteToWideChar(CP_ACP, 0, raw.data(), (int)raw.size(), &w[0], wl);
+    return U8(w);
+}
+
 /* JSON 收口 (实现见 ai_assistant.h 声明处注释): 解析/序列化全走 picojson */
 static void JvFromP(Jv& jv, const picojson::value& v) {   /* picojson 树 → Jv 宽字符视图 (机械转换) */
     if (v.is<bool>()) { jv.t = 1; jv.b = v.get<bool>(); }
@@ -419,6 +469,22 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
                         for (const std::wstring& p : t.wrote) wf.push_back(JS(p));
                         os["w"] = picojson::value(wf);
                     }
+                    if (!t.chg.empty()) {   /* file_op 逐项更改记录 ([动作,源,目标] 紧凑数组, 失败项
+                                             追加 [0,原因]; 会话重开后更改块仍可见, 回答引用改后路径仍可点) */
+                        picojson::array ca;
+                        for (const AiFileChange& c : t.chg) {
+                            picojson::array e;
+                            e.push_back(JN(c.act));
+                            e.push_back(JS(c.from));
+                            e.push_back(JS(c.to));
+                            if (!c.ok) {
+                                e.push_back(JN(0));
+                                e.push_back(JS(c.err));
+                            }
+                            ca.push_back(picojson::value(e));
+                        }
+                        os["chg"] = picojson::value(ca);
+                    }
                 steps.push_back(picojson::value(os));
             }
             om["steps"] = picojson::value(steps);
@@ -487,6 +553,20 @@ static bool HistConvFromJson(const Jv& jc, AiConv& c) {
                         const Jv* jw = jst.Get(L"w");
                         if (jw && jw->t == 4)
                             for (auto& jw2 : jw->arr) if (jw2.t == 3) t.wrote.push_back(jw2.str);
+                        const Jv* jcg = jst.Get(L"chg");
+                        if (jcg && jcg->t == 4)
+                            for (auto& je : jcg->arr) {
+                                if (je.t != 4 || je.arr.size() < 3) continue;
+                                AiFileChange c;
+                                c.act = (je.arr[0].t == 2) ? (int)je.arr[0].num : 0;
+                                if (je.arr[1].t == 3) c.from = je.arr[1].str;
+                                if (je.arr[2].t == 3) c.to = je.arr[2].str;
+                                if (je.arr.size() >= 4 && je.arr[3].t == 2 && je.arr[3].num == 0) {
+                                    c.ok = false;   /* 失败项 ([动作,源,目标,0,原因]; 旧存档 3 元 = 成功) */
+                                    if (je.arr.size() >= 5 && je.arr[4].t == 3) c.err = je.arr[4].str;
+                                }
+                                t.chg.push_back(std::move(c));
+                            }
                         const Jv* ja = jst.Get(L"adj");
                         if (ja && ja->t == 5) {
                             const Jv* jk = ja->Get(L"kind");

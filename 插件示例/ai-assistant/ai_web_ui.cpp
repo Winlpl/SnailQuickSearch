@@ -432,6 +432,56 @@ textarea,input{user-select:text;-webkit-user-select:text}
         font-size:11.5px;line-height:1.65;color:var(--text-secondary)}
 .sess-exports .se-head{color:var(--text-tertiary);margin-bottom:4px}
 .sess-exports .se-it{word-break:break-all}
+)AIWEBUI"
+           LR"AIWEBUI(
+/* file_op 文件更改记录 (卡片常显块 .schg + 回合级聚合块 .sess-chg): 每行 = 独立小气泡
+   (圆角底 + 行间距 + 悬停反馈, 不再连成一片); 行首动作签 min-width 对齐, 箭头强调色。
+   同目录改名只显文件名 — 完整路径恒留在 data-path 供点击/右键复制 */
+.schg{margin:6px 8px 8px;padding:7px 8px 8px;border:1px solid color-mix(in srgb,var(--accent-violet) 35%,var(--glass-border));
+      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);
+      font-size:11px;line-height:1.6;color:var(--text-secondary)}
+.schg-it{display:flex;align-items:baseline;gap:7px;margin-top:4px;padding:4px 9px;border-radius:7px;
+      background:color-mix(in srgb,var(--glass-border) 30%,transparent)}
+.schg-it:hover{background:color-mix(in srgb,var(--glass-border) 55%,transparent)}
+.schg-it .ai-path{min-width:0;word-break:break-all}
+.schg-w{flex:0 0 auto;display:inline-block;padding:0 5px;border-radius:5px;white-space:nowrap;min-width:44px;text-align:center;
+      background:color-mix(in srgb,var(--accent-violet) 16%,transparent);color:var(--text-tertiary)}
+.chg-arr{flex:0 0 auto;color:var(--accent-violet);font-weight:600}
+/* 失败项: 红底行 + 红签 + 原因 (操作失败的文件也要记录, 不静默丢弃) */
+.schg-it.schg-bad,.sess-chg .se-bad{background:color-mix(in srgb,var(--accent-pink) 13%,transparent)}
+.schg-w.bad,.sess-chg .se-bad .schg-w{background:color-mix(in srgb,var(--accent-pink) 22%,transparent);
+      color:color-mix(in srgb,var(--accent-pink) 80%,var(--text-primary))}
+.chg-err{color:var(--accent-pink);font-size:10.5px}
+.sess-chg .se-fail{color:var(--accent-pink);font-style:normal;margin-left:4px}
+.sess-chg{margin:6px 0 2px;padding:5px 9px 8px;border:1px dashed color-mix(in srgb,var(--accent-violet) 38%,var(--glass-border));
+      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 6%,transparent);
+      font-size:11.5px;line-height:1.65;color:var(--text-secondary)}
+.sess-chg .sess-chg-head{display:flex;align-items:center;gap:6px;width:100%;padding:2px 2px;border:0;background:none;
+      color:inherit;font:inherit;text-align:left;cursor:default}
+.sess-chg .sess-chg-head .se-head{flex:1;color:var(--text-tertiary)}
+.sess-chg .sess-chg-head .sarr{flex:0 0 auto;font-size:9px;color:var(--text-tertiary);transition:transform 120ms ease}
+.sess-chg.open .sess-chg-head .sarr{transform:rotate(180deg)}
+.sess-chg .sess-chg-body{display:none;margin-top:3px}
+.sess-chg.open .sess-chg-body{display:block}
+.sess-chg .se-it{display:flex;align-items:baseline;gap:7px;margin-top:4px;padding:4px 9px;border-radius:7px;
+      background:color-mix(in srgb,var(--glass-border) 30%,transparent)}
+.sess-chg .se-it:hover{background:color-mix(in srgb,var(--glass-border) 55%,transparent)}
+.sess-chg .se-it .ai-path{min-width:0;word-break:break-all}
+.sess-chg .schg-w{flex:0 0 auto;display:inline-block;padding:0 5px;border-radius:5px;white-space:nowrap;min-width:46px;text-align:center;
+      background:color-mix(in srgb,var(--accent-violet) 16%,transparent);color:var(--text-tertiary)}
+/* 挂起确认常驻条 (输入框上方): 标题行 = 摘要 + 允许/拒绝按钮; 下方明细区 = 确认正文
+   (逐项清单/风险提示, 与卡上 confirm 文本同源) — 过程面板收起/滚走也能直接裁决 */
+.ai-pendbar{display:flex;flex-direction:column;gap:6px;margin:0 10px 6px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--accent-violet) 50%,var(--glass-border));
+      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 13%,transparent);font-size:11.5px}
+.ai-pendbar[hidden]{display:none}
+.ai-pendbar .pendbar-row{display:flex;align-items:center;gap:8px}
+.ai-pendbar .pendbar-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary)}
+.ai-pendbar .pendbar-b{flex:0 0 auto;padding:4px 13px;border-radius:7px;border:1px solid var(--glass-border);background:none;
+      color:var(--text-secondary);font:inherit;line-height:1.4;cursor:default}
+.ai-pendbar .pendbar-b.primary{background:var(--accent-violet);border-color:transparent;color:#fff}
+.ai-pendbar .pendbar-d{max-height:118px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--text-secondary);word-break:break-all}
+)AIWEBUI"
+           LR"AIWEBUI(
 /* 策略询问 (卡上确认): 上分隔线 + 说明文字 + 允许/拒绝按钮 */
 .sask{padding:7px 8px 8px;border-top:1px solid var(--divider);color:var(--text-tertiary);font-size:11px;line-height:1.5}
 /* 待应用的调整 (AI 提案, 用户逐项 应用/忽略; 源样式对齐 .sask 一族) */
@@ -800,6 +850,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
       <div class="ai-jumpbar" id="jumpbar" hidden><div class="ai-jump-track" id="jumpTrack"></div></div>
     </div>
 
+    <div class="ai-pendbar" id="pendbar" hidden></div>
+
     <div class="ai-composer">
       <div class="ai-composer-inner">
         <div class="ai-composer-box" id="cbox">
@@ -999,6 +1051,9 @@ const S={
   reasonOpen:{},    /* 手动展开的推理块: msgIdx → true (流式自动展开之外的覆盖) */
   turnLog:{},       /* 过程面板开合: convId+':'+组起点 → true 展开/false 收起
                        (undefined=缺省: 流式中最新回合展开、其余收起; 正文开始自动落 false) */
+  chgOpen:{},       /* 本轮文件更改块开合: convId+':'+组起点 → true (缺省收起, 只显头部计数) */
+  ic:{},            /* 路径图标缓存: 小写路径 → data URL (pathcheck 回包填; linkify 时第一时间
+                       内联画上 — 流式/重渲重建 DOM 不再丢图标闪烁; 超 512 项整表清) */
   follow:true,      /* 生成期间跟随滚动 (用户手动上滚即停) */
   policyTimer:0, copiedTimer:0, toastTimer:0,
   jumpRounds:[], jumpFlashTimer:0, jumpFrame:0, jumpTip:null,
@@ -1265,6 +1320,50 @@ function turnExportsHtml(start,end){
   for(const p of seen) h+='<div class="se-it"><span class="ai-path" data-path="'+esc(p)+'">'+esc(p)+'</span></div>';
   return h+'</div>';
 }
+/* 本轮文件更改 (file_op 逐项记录; 轮级聚合挂在回合组末尾 — 工具卡整组折叠时更改仍可见);
+ * 收集 [start,end) 内卡片消息的 chg ({a:动作,f:源,t:目标}), 按三元组去重首现序 */
+const CHG_WORDS=['复制','移动','重命名','删除','新建'];
+/* data-rec=1 = 更改记录是历史事实: 改名前旧路径不存在是常态, 禁止进 pathcheck 校验
+ * (模糊校正会把旧名回填成磁盘新名 → 记录显示"前后名一样"); 点击仍走活解析不改显示。
+ * 同目录的一对 (目录大小写不敏感同径) 只显文件名 — 完整路径恒留在 data-path */
+function chgDirOf(p){const i=p.lastIndexOf('\\');return i<0?'':p.slice(0,i+1)}
+function chgNameOf(p){const i=p.lastIndexOf('\\');return i<0?p:p.slice(i+1)}
+function chgRowHtml(c){
+  const bad=c.o===0;   /* 失败项: 红样式 + 原因 (用户要知道哪些文件没动成) */
+  let h='<div class="se-it'+(bad?' se-bad':'')+'"><span class="schg-w'+(bad?' bad':'')+'">'+(CHG_WORDS[c.a]||'更改')+'</span>';
+  const same=!!(c.f&&c.t)&&chgDirOf(c.f).toLowerCase()===chgDirOf(c.t).toLowerCase();
+  if(c.f)h+='<span class="ai-path" data-rec="1" data-path="'+esc(c.f)+'">'+esc(same?chgNameOf(c.f):c.f)+'</span>';
+  if(c.f&&c.t)h+='<span class="chg-arr">→</span>';
+  if(c.t)h+='<span class="ai-path" data-rec="1" data-path="'+esc(c.t)+'">'+esc(same?chgNameOf(c.t):c.t)+'</span>';
+  if(bad&&c.e)h+='<span class="chg-err">✕ '+esc(c.e)+'</span>';
+  return h+'</div>';
+}
+function turnChangesHtml(start,end){
+  const seen=[];
+  for(let k=start;k<end;k++){
+    const m=S.msgs[k];
+    if(m.r!==2||!m.chg)continue;
+    for(const c of m.chg){
+      const key=c.a+'|'+c.f+'|'+c.t+'|'+(c.o===0?'x':'ok');
+      if(seen.some(x=>x.key===key))continue;
+      seen.push({key,c});
+    }
+  }
+  if(!seen.length)return '';
+  const nfail=seen.filter(x=>x.c.o===0).length;
+  /* 默认收起只显头部计数 (大量改名 33 行全铺会把回答顶出屏); 点头部展开/收起,
+     开合态记 S.chgOpen — 流式期回合组频繁重渲, 不落账一刷新就弹回 */
+  const key=S.cur+':'+start;
+  const open=!!S.chgOpen[key];
+  let h='<div class="sess-chg'+(open?' open':'')+'">'
+       +'<button class="sess-chg-head" type="button" data-act="chgtoggle" data-k0="'+start+'"'
+       +' aria-expanded="'+(open?'true':'false')+'">'
+       +'<span class="se-head">🗂 本轮文件更改 ('+seen.length+(nfail?') <em class="se-fail">✕ '+nfail+' 失败</em>':')')+'</span>'
+       +'<span class="sarr glyph" aria-hidden="true">&#xE70D;</span></button>'
+       +'<div class="sess-chg-body">';
+  for(const x of seen) h+=chgRowHtml(x.c);
+  return h+'</div></div>';
+}
 function turnGroupHtml(start){
   const end=turnEnd(start);
   const finalIdx=end-1;
@@ -1307,7 +1406,7 @@ function turnGroupHtml(start){
   if(finalIsBubble) main+=turnPartHtml(S.msgs[finalIdx],finalIdx,true);
   return '<div class="ai-msg ai-msg-assistant" data-mi="'+start+'">'
     +'<span class="ai-msg-avatar glyph" aria-hidden="true">&#xE99A;</span>'
-    +'<div class="ai-msg-main">'+main+turnExportsHtml(start,end)+'</div></div>';
+    +'<div class="ai-msg-main">'+main+turnExportsHtml(start,end)+turnChangesHtml(start,end)+'</div></div>';
 }
 /* 连续工具组: 头部 = 次数 + 聚合状态; 体 = 各卡片 (卡自身仍可单独展开看查询)。
  * 含待确认卡的组默认展开 (确认按钮必须可达), 其余默认折叠 */
@@ -1381,6 +1480,40 @@ function renderThread(keepScroll){
   applyBubbleShapes(); applyOpenSteps();
   if(stick){S.follow=true;scrollToEnd();}
   updateJumpbar();
+  updatePendAsk();
+}
+/* 挂起确认常驻条: 只认 kind 11/13 (run_command/file_op) 的 state==4 — 这两种才真挂起
+ * 等裁决 (eallow/edeny 通道); open_file/copy_paths 的策略询问卡也标 state4 但不挂起
+ * (pallow/pdeny 通道), 进了常驻条会点不掉。标题行 = 动作摘要 + 允许/拒绝按钮, 下方 =
+ * 确认明细正文 (与卡上同源的逐项清单/风险提示) — 过程面板收起、滚上去看历史时裁决
+ * 入口不丢。注意: 本条在 threadInner 之外, 点击走自己的监听器 (initPendBar) */
+function updatePendAsk(){
+  const bar=$('pendbar');if(!bar)return;
+  let hit=null;
+  S.msgs.forEach(function(m,mi){
+    if(hit||m.r!==2||!m.steps)return;
+    m.steps.forEach(function(s,si){
+      if(hit||+s.state!==4)return;
+      if(s.k!==11&&s.k!==13)return;
+      hit={mi:mi,si:si,argz:s.argz||'',detail:s.err||''};
+    });
+  });
+  if(!hit){bar.hidden=true;bar.innerHTML='';bar.removeAttribute('data-k');return;}
+  const key=hit.mi+':'+hit.si;
+  if(!bar.hidden&&bar.getAttribute('data-k')===key)return;
+  bar.hidden=false;bar.setAttribute('data-k',key);
+  bar.innerHTML='<div class="pendbar-row"><span class="pendbar-t">⏸ '+esc(hit.argz||'AI 等待确认')+'</span>'
+    +'<button class="pendbar-b primary" type="button" data-act="execallow">允许一次</button>'
+    +'<button class="pendbar-b" type="button" data-act="execdeny">拒绝</button></div>'
+    +(hit.detail?'<div class="pendbar-d">'+esc(hit.detail).replace(/\n/g,'<br>')+'</div>':'');
+}
+function initPendBar(){
+  $('pendbar').addEventListener('click',function(e){
+    const b=e.target.closest('.pendbar-b');if(!b)return;
+    const bar=$('pendbar');
+    post({c:b.getAttribute('data-act')==='execallow'?'eallow':'edeny',
+      mi:+bar.getAttribute('data-mi'),si:+bar.getAttribute('data-si')});
+  });
 }
 /* 流式增量: 只换最后一个回合组 (回答/过程都长在组内, 组粒度替换与整帧重绘同观感) */
 function applyLast(){
@@ -1398,6 +1531,7 @@ function applyLast(){
   applyBubbleShapes(row); applyOpenSteps();
   if(stick){S.follow=true;scrollToEnd();}
   updateJumpbar();
+  updatePendAsk();
 }
 
 /* ---- 会话内轮次跳转条: 刻度等距排列 (CSS flex 压缩), 悬停预览, 点击跳转 ---- */
@@ -1688,6 +1822,8 @@ function linkifyPaths(root){
       if(moreRaw.trim())sp.setAttribute('data-more',moreRaw);   /* 链接后紧随原文 = 校验期"继续解析"的余量 */
       sp.title='点击打开 · 右键更多操作';
       sp.textContent=strip;
+      const ic=S.ic[strip.toLowerCase()];   /* 已知图标第一时间内联 (重渲不再闪烁) */
+      if(ic)sp.insertAdjacentHTML('afterbegin','<img class="ai-path-ic" src="'+ic+'" alt="" aria-hidden="true">');
       frag.appendChild(sp);
       if(strip.length<path.length)frag.appendChild(document.createTextNode(path.slice(strip.length)));
       last=end;
@@ -1708,14 +1844,16 @@ function enhance(root){
 /* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
    真实存在性 — 不存在按解析梯子继续试 (more 向后并词/去尾词回退, 与点击解析同一梯子),
    仍不存在 = 退回纯文本, 不画链接不做字符特殊处理。校验异步: enhance 落地后 300ms
-   去抖汇总未校验的 .ai-path, 单批 ≤64 条, 余量随回复的 schedulePathCheck 下一轮续检 */
+   去抖汇总未校验的 .ai-path, 单批 ≤64 条, 余量随回复的 schedulePathCheck 下一轮续检。
+   data-rec=1 的链接 (文件更改记录块) 整体排除: 记录是历史事实, 旧路径不存在是常态,
+   模糊校正回填会让记录显示成"前后名一样" — 显示恒为落库原样, 点击仍走活解析 */
 let pvTimer=0;
 function schedulePathCheck(){
   if(pvTimer)return;
   pvTimer=setTimeout(function(){pvTimer=0;sendPathCheck();},300);
 }
 function sendPathCheck(){
-  const spans=document.querySelectorAll('.ai-path[data-path]:not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-ok]):not([data-bad])');
+  const spans=document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-ok]):not([data-bad])');
   const ps=[],ids=[],seen={};
   spans.forEach(function(sp){
     if(sp.hasAttribute('data-badid'))return;   /* 渲染期已判定的编造 ID: 保持禁用态 */
@@ -1729,7 +1867,7 @@ function sendPathCheck(){
 function applyPathCheck(rs){
   const byKey={};
   (rs||[]).forEach(function(r){byKey[(r.k||'')+'|'+(r.v||'')]=r;});
-  document.querySelectorAll('.ai-path[data-path]:not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-ok]):not([data-bad])').forEach(function(sp){
+  document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-ok]):not([data-bad])').forEach(function(sp){
     if(sp.hasAttribute('data-badid'))return;
     const isId=sp.hasAttribute('data-id');
     const key=isId?('i|'+sp.getAttribute('data-id')):('p|'+sp.getAttribute('data-path'));
@@ -1756,8 +1894,14 @@ function applyPathCheck(rs){
         }else sp.textContent=q;   /* 名字模糊校正等: 直接落磁盘权威拼写 */
       }
     }
-    if(r.ic&&!sp.querySelector('.ai-path-ic'))   /* 引擎真图标置前 (data URL; 先落文字再插图标) */
+    if(r.ic&&!sp.querySelector('.ai-path-ic')){   /* 引擎真图标置前 (data URL; 先落文字再插图标);
+        同时进 S.ic 缓存 — 原路径与校正后路径双键 (重渲时 linkify 按原文本路径查),
+        重渲时 linkify 第一时间内联, 不再闪 */
+      if(r.v)S.ic[String(r.v).toLowerCase()]=r.ic;
+      if(r.q&&r.q!==r.v)S.ic[String(r.q).toLowerCase()]=r.ic;
+      if(Object.keys(S.ic).length>512)S.ic={};
       sp.insertAdjacentHTML('afterbegin','<img class="ai-path-ic" src="'+r.ic+'" alt="" aria-hidden="true">');
+    }
   });
   schedulePathCheck();
 }
@@ -1892,10 +2036,8 @@ function bindThread(){
     if(ab){const act=ab.getAttribute('data-act');
       if(act==='authallow')post({c:'pallow'});
       else if(act==='authdeny')post({c:'pdeny'});
-      else if(act==='execallow'||act==='execdeny'){   /* 命令执行确认卡: 按卡定位 (允许一次只放这条) */
-        const box=ab.closest('.sask');
-        if(box)post({c:act==='execallow'?'eallow':'edeny',
-          mi:+box.getAttribute('data-mi'),si:+box.getAttribute('data-si')});}
+      /* execallow/execdeny (允许一次/拒绝) 不在此分发: 按钮只存在于输入框上方常驻确认条
+         (#pendbar, 在 threadInner 之外), 点击由它自己的 initPendBar 监听器处理 */
       else if(act==='adjApply'||act==='adjIgnore'||act==='adjApplyAll'||act==='adjIgnoreAll'){
         const box=ab.closest('.sadj'),it=ab.closest('.sadj-it');
         if(box)post({c:'adj',act:act.slice(3).toLowerCase(),
@@ -1922,6 +2064,13 @@ function bindThread(){
       S.toolGrp[key]=!(S.toolGrp[key]!==undefined?S.toolGrp[key]:grp.classList.contains('open'));
       grp.classList.toggle('open',S.toolGrp[key]);
       tg.setAttribute('aria-expanded',S.toolGrp[key]?'true':'false');
+      return;}
+    const ch=e.target.closest('.sess-chg-head');
+    if(ch){const key=S.cur+':'+ch.getAttribute('data-k0');
+      S.chgOpen[key]=!S.chgOpen[key];
+      const box=ch.closest('.sess-chg');
+      box.classList.toggle('open',S.chgOpen[key]);
+      ch.setAttribute('aria-expanded',S.chgOpen[key]?'true':'false');
       return;}
     const rh=e.target.closest('.ai-reasoning-head');
     if(rh){const mi=+rh.getAttribute('data-mi');
@@ -2364,6 +2513,7 @@ function renderAll(){
 function bind(){
   const ta=$('inputT');   /* 输入框引用提前: 下方粘贴/附件接线同帧就要用到 (const 有暂时性死区) */
   $('b-set').addEventListener('click',()=>cfgToggle(!S.cfgOpen));
+  initPendBar();
   $('b-hist').addEventListener('click',()=>sideToggle(!S.sideOpen));
   /* 侧栏头部 ✕ = 显式关闭入口 (停靠模式下没有点外收起, 必须有可见的关闭钮) */
   $('sideClose').addEventListener('click',()=>sideToggle(false));

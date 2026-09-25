@@ -125,6 +125,11 @@ std::string U8(const std::wstring& w);
 std::wstring TrimW(const std::wstring& s);
 size_t PrevCp(const std::wstring& s, size_t i);
 size_t NextCp(const std::wstring& s, size_t i);
+std::string AiB64Enc(const unsigned char* d, size_t n);   /* 字节 → base64 (实现 ai_core.cpp) */
+std::string AiTextToUtf8(const std::string& raw, std::wstring* encName);
+                                                          /* BOM/UTF-16/UTF-8 严格校验/ANSI(GBK)
+                                                             识别 → UTF-8 (实现 ai_core.cpp;
+                                                             read_file 与 ai.read 共用) */
 Gdiplus::Color HexCol(const std::wstring& hex, int alpha = 255);
 Gdiplus::Color MixCol(Gdiplus::Color a, Gdiplus::Color b, float t);
 Gdiplus::Color WithA(Gdiplus::Color c, BYTE a);
@@ -232,9 +237,17 @@ struct AiAdjust {
     std::wstring win;           /* 目标窗口名 (空 = 当前对话所在窗; 应用时再解析令牌 — 关窗后应用报错不悬垂) */
     std::vector<AiAdjustItem> items;
 };
+struct AiFileChange {           /* file_op 逐项更改记录 (成功与失败都记 — 失败带原因告知用户, 不静默丢弃) */
+    int act = 0;                /* 0=copy 1=move 2=rename 3=delete 4=mkdir (同 AiFileOp.action) */
+    std::wstring from, to;      /* copy/move/rename: 源→目标; delete: 只 from; mkdir: 只 to */
+    bool ok = true;             /* false = 该项失败 (err 带原因; 模型的 changes 回执仍只发成功清单) */
+    std::wstring err;           /* 失败原因 (ok=false 时有效) */
+    bool operator==(const AiFileChange&) const = default;   /* 泵比对 vector!= 需要 */
+};
 struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths 3=设置 4=窗口 5=搜索框
-                                   6=模式 7=插件 8=皮肤 9=规范 10=捐赠 11=run_command 命令 (未知工具照显 name) */
+                                   6=模式 7=插件 8=皮肤 9=规范 10=捐赠 11=run_command 命令
+                                   12=read_file 13=file_op 14=read_image (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
@@ -247,6 +260,8 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     std::vector<std::wstring> top;   /* 结果样本完整路径 (≤20; 卡片展开显示用, 不回喂模型) */
     std::vector<std::wstring> wrote; /* lua_exec 脚本成功写出的文件路径 (ai.write/ai.saveas;
                                          卡片常显块+随历史落库; 不回喂模型 — 模型经结果 JSON 得知) */
+    std::vector<AiFileChange> chg;   /* file_op 逐项更改记录 (成功+失败都记; 卡片常显块+回合聚合块+
+                                         随历史落库; 不回喂模型 — 模型经结果 JSON 的 changes/errors 得知) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
@@ -299,6 +314,35 @@ bool HistGet(unsigned long long id, AiConv& out);   /* 按需读取一个会话�
 void HistRemove(unsigned long long id);             /* 删除会话 = 正文文件 + 索引条目一并移除 */
 void HistClearAll();                                /* 清空历史 = 全部正文文件 + 索引 */
 
+/* ==================== 文件动作与内容抽取 (实现 ai_file.cpp) ====================
+ * read_file / read_image / file_op 三工具 (2026-09-26): "文件助手"一等公民动作层,
+ * 不再绕 run_command 的 shell 兜底 — 读取带编码识别与 Office 文本抽取 (内置
+ * RFC1951 inflate + ZIP 只读解包, 免第三方库), 图片经 WIC 压缩注入多模态,
+ * 文件动作走权限档+询问卡 (闸与卡在 ai_agent.cpp WorkerMain, 这里只做实体)。
+ * 全部在 agent 工作线程调用; 除 xjs_db_GetPath/GetFileIdByPath 只读查询外不碰引擎/宿主/UI。 */
+
+/* 一次 file_op 作业 (FileOpPrepare 解析一次 → 询问通过后 FileOpExecute 执行) */
+struct AiFileOp {
+    int action = 0;        /* 0=copy 1=move 2=rename 3=delete 4=mkdir */
+    bool overwrite = false;
+    bool permanent = false;            /* delete: true=彻底删除 (不进回收站; 确认卡标警告) */
+    std::vector<std::wstring> items;   /* copy/move/delete 的源路径清单 */
+    std::vector<std::pair<std::wstring, std::wstring>> renames;   /* rename: 源→新完整路径 */
+    std::wstring target;               /* copy/move: 目标目录; mkdir: 要建的目录 */
+    std::wstring summary;              /* 卡头摘要 (argz) */
+    std::wstring confirm;              /* 询问卡正文 (pol=询问 时展示, 含前几项明细) */
+    std::wstring risk;                 /* 高危提示 (彻底删除等; 空=无) */
+};
+bool FilePathOk(const std::wstring& p);   /* 绝对路径且无通配/非法字符 (lua 写出与 file_op 共用) */
+std::wstring FileResolveTargets(const Jv& v, std::vector<std::wstring>* out, int cap);
+          /* 工具参数 ids[] + paths[] + path → 绝对路径清单 (反斜杠归一/去重;
+             id 经 xjs_db_GetPath)。错误 = 描述; cap = 条目上限 */
+std::wstring FileOpPrepare(const Jv& v, AiFileOp* op);   /* 参数 → op; 错误 = 描述 */
+std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st);
+          /* 执行 (worker 线程, 逐项 SHFileOperation; 结果进 st->res8/top; j 只用于 abort) */
+std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st);             /* read_file 实体 */
+std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st);  /* read_image 实体 (图片注入 j->injImgs) */
+
 /* ==================== agent (实现 ai_agent.cpp) ==================== */
 
 void AgentToolInit();
@@ -330,6 +374,8 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
                                       在跑的作业, 下一次 run_search 起按新值同步) */
     xjs_result* syncWin = NULL;    /* 同步目标窗的结果对象 (发送时在 UI 线程经 window.result 捕获;
                                       完成事件回调里用前自查 IsEffective, 窗口已关即弃) */
+    std::vector<std::string> injImgs;    /* read_image 注入的本请求图片 (UTF-8 data URL; worker 读写,
+                                      AgentBuildBody 直接作 image_url, 上限 AI_ATT_MAX 张; 不落历史) */
     /* run_command 询问档的裁决通道 (dsh approval 口径: 审批**挂起**工具调用等用户裁决,
      * 答复恢复 — 不是"拒绝后指望模型自己重试"的死胡同): worker 出询问卡后在此轮询,
      * eallow/edeny 置位, worker 消费 (允许=继续执行, 拒绝=作为工具失败回喂模型)。
@@ -439,6 +485,7 @@ void WebInit();                                   /* 进程一次: 子窗口类�
 void WebShutdown();                               /* 全部会话控制器/子窗收尾 (Shutdown 调, SessClose 之前) */
 void WebSessionCreate(AiSess* s);                 /* OPEN: 建子窗口 + 异步建控制器 + ready 后 boot */
 void WebSessionDestroy(AiSess* s);                /* CLOSE: 收控制器与子窗口 (幂等) */
+bool AiPanelHostForeground();                     /* 任一面板宿主搜索窗在前台? (挂起确认的系统通知闸; 定义 ai_web.cpp) */
 void WebSessionRect(AiSess* s);                   /* OPEN/RESIZE: 按宿主矩形重定位子窗口 + ZoomFactor */
 void WebSyncSession(AiSess* s);                   /* 泵/命令后: 按同步状态推增量 (msgs/last/status/usage) */
 void WebSyncHist();                               /* g_hist 变化后向全部活跃会话推 convs */
