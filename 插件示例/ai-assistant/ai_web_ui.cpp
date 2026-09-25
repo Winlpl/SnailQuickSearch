@@ -124,6 +124,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
                background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
 .ai-reason-toggle[aria-pressed="true"] .ai-reason-box::after{content:'';position:absolute;left:3px;top:.5px;width:3.5px;height:6.5px;
                border-right:1.6px solid var(--accent-violet);border-bottom:1.6px solid var(--accent-violet);transform:rotate(42deg)}
+/* 多模态能力勾选行 (图片/视频/音频 三档, 同一开关语言横排) */
+.ai-caps-row{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;min-width:0}
 )AIWEBUI"
            LR"AIWEBUI(/* 档案下拉与"新建/复制/删除"并排: 下拉吞掉剩余宽度, 按钮各自保持内容宽 */
 .ai-config-profile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;align-items:center;gap:8px}
@@ -172,7 +174,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-thread-inner{display:flex;flex-direction:column;gap:16px;width:100%;max-width:min(1600px,100%);margin:0 auto;
                  user-select:text;-webkit-user-select:text}
 /* 对话区里不参与文本选择的只有交互控件与图标 */
-.ai-thread-inner button,.ai-msg-avatar,.ai-reasoning-ic,.ai-reasoning-chevron,.ai-meta-btn{user-select:none;-webkit-user-select:none}
+.ai-thread-inner button,.ai-msg-avatar,.ai-reasoning-ic,.ai-reasoning-chevron,.ai-meta-btn,.ai-user-del{user-select:none;-webkit-user-select:none}
 
 .ai-msg{display:flex;gap:10px;min-width:0}
 .ai-msg-user{flex-direction:row-reverse}
@@ -188,6 +190,15 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-msg-assistant .ai-bubble.ai-bubble-short{align-self:flex-start;width:fit-content}
 .ai-msg-assistant .ai-bubble:empty{display:none}
 .ai-msg-user .ai-bubble{border:1px solid var(--ai-user-bubble-border);background:var(--ai-user-bubble-bg);color:var(--ai-user-bubble-text)}
+)AIWEBUI"
+           LR"AIWEBUI(/* 悬停删除 (删除单位 = 该提问+其后全部回复, 上下文同步精简); 两步确认: 首击进入
+   确认态 (变红"确认删除", 4s 内再击才发删除), 切换目标/整帧重绘/超时自动复位 */
+.ai-user-del{display:none;flex:0 0 auto;align-self:center;padding:4px 7px;border:0;border-radius:6px;
+             background:transparent;color:var(--text-tertiary);font-size:12px;cursor:pointer;opacity:.7}
+.ai-msg-user:hover .ai-user-del,.ai-user-del.arm{display:inline-flex;align-items:center}
+.ai-user-del:hover{background:var(--btn-secondary-hover);opacity:1}
+.ai-user-del.arm{color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 14%,transparent);
+                 font-size:11px;font-weight:600;opacity:1}
 .ai-msg-error .ai-bubble,.ai-bubble-error{border:1px solid color-mix(in srgb,var(--accent-pink) 42%,transparent)!important;
            background:color-mix(in srgb,var(--accent-pink) 12%,var(--surface-raised))!important}
 
@@ -333,6 +344,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-path{color:var(--accent-cyan);border-bottom:1px dashed color-mix(in srgb,var(--accent-cyan) 48%,transparent);
          cursor:pointer;transition:color 120ms ease,border-bottom-color 120ms ease}
 .ai-path:hover{color:color-mix(in srgb,var(--accent-cyan) 80%,#fff);border-bottom-style:solid}
+.ai-path-ic{width:14px;height:14px;vertical-align:-2px;margin-right:4px;border-radius:2px}
 /* ---- 右键菜单 (文件路径 / 搜索卡片的操作项) ---- */
 .ai-ctx{position:fixed;left:0;top:0;z-index:13000;display:flex;flex-direction:column;min-width:150px;padding:4px;
         border-radius:7px;background:var(--surface-raised);
@@ -496,6 +508,20 @@ textarea,input{user-select:text;-webkit-user-select:text}
    由 C++ md 渲染层换成缓存真图; 这里只管样式: 块级竖排居中 (屏幕窄不并列), 白底保扫得动) ---- */
 .ai-donate-qr{display:block;margin:10px auto;width:min(220px,62%);object-fit:contain;
               background:#fff;border-radius:8px;padding:6px;cursor:default}
+/* ---- 用户气泡里的多模态附件 (C++ AttsHtml 直出; 图片缩略可点开看原图, 视频/音频=文件签) ---- */
+.ai-atts{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
+.ai-att-img{display:block;max-width:240px;max-height:180px;width:auto;height:auto;border-radius:6px;
+            border:1px solid var(--glass-border);cursor:zoom-in;object-fit:cover}
+.ai-att-file{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--glass-border);
+             border-radius:6px;background:color-mix(in srgb,var(--text-primary) 5%,transparent);
+             color:var(--text-primary);font-size:11px;line-height:1.5;cursor:default}
+.ai-att-file .glyph{font-size:12px;color:var(--text-tertiary)}
+.ai-att-file.gone{opacity:.62}
+/* 附件图片点击放大 (点任意处/Esc 收; 选区/右键不与放大冲突 — mousedown 即关) */
+.ai-lightbox{position:fixed;inset:0;z-index:15000;display:grid;place-items:center;
+             background:color-mix(in srgb,var(--bg) 74%,transparent);cursor:zoom-out}
+.ai-lightbox img{max-width:92vw;max-height:92vh;width:auto;height:auto;border-radius:8px;
+                 box-shadow:0 12px 40px rgba(0,0,0,.4)}
 
 /* ==================== 输入区 ====================
    整个区域文本指针: 留白也是"点一下就能继续打字"的地方 */
@@ -523,6 +549,23 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-input{flex:0 0 auto;min-width:0;min-height:22px;max-height:132px;resize:none;border:0;background:transparent;
           color:var(--text-primary);font:inherit;font-size:12.5px;line-height:1.6;outline:none;overflow-y:hidden}
 .ai-input::placeholder{color:var(--text-tertiary)}
+/* ---- 待发送附件条 (粘贴/📎 进入, 发送后清空; 图片=缩略图, 视频/音频=图标+文件名) ---- */
+.ai-attrow{display:flex;flex-wrap:wrap;gap:6px}
+.ai-att{display:flex;align-items:center;gap:6px;padding:3px 4px 3px 3px;border:1px solid var(--glass-border);
+        border-radius:6px;background:color-mix(in srgb,var(--text-primary) 4%,transparent);min-width:0}
+.ai-att-thumb{flex:0 0 auto;width:34px;height:34px;border-radius:4px;object-fit:cover;background:var(--btn-secondary-hover)}
+.ai-att-thumb.glyph{display:grid;place-items:center;font-size:16px;color:var(--text-tertiary)}
+.ai-att-meta{display:flex;flex-direction:column;gap:1px;min-width:0;max-width:150px}
+.ai-att-name{overflow:hidden;font-size:11px;color:var(--text-primary);white-space:nowrap;text-overflow:ellipsis}
+.ai-att-size{font-size:10px;color:var(--text-tertiary)}
+.ai-att-x{display:grid;flex:0 0 auto;width:20px;height:20px;place-items:center;border:0;border-radius:4px;
+          background:transparent;color:var(--text-tertiary);font-size:11px;cursor:default}
+.ai-att-x:hover{background:color-mix(in srgb,var(--accent-pink) 14%,transparent);color:var(--accent-pink)}
+/* 工具条上的 📎 附件按钮 (模型没勾任何多模态能力时隐藏) */
+.ai-bar-ic{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:24px;height:24px;padding:0;
+           border:0;border-radius:5px;background:transparent;color:var(--text-tertiary);font-size:13px;cursor:default;
+           transition:background-color 120ms ease,color 120ms ease}
+.ai-bar-ic:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
 /* ---- 工具条 (输入框容器内部底行): 左=对话级设置, 右=本轮状态与动作 ---- */
 .ai-composer-bar{display:flex;align-items:center;gap:6px;min-width:0}
 /* 发送/停止: 圆形图标按钮, 图标由 CSS 按 data-mode 绘制 */
@@ -659,7 +702,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-toast[data-kind="ok"]::before{background:var(--accent-emerald)}
 .ai-toast[data-kind="warn"]::before{background:var(--accent-amber)}
 .ai-toast[data-kind="err"]::before{background:var(--accent-pink)}
-</style>
+)AIWEBUI"
+           LR"AIWEBUI(</style>
 </head>
 <body>
 <div id="app">
@@ -703,6 +747,12 @@ textarea,input{user-select:text;-webkit-user-select:text}
         <input class="ai-config-input" id="f-key" type="password" spellcheck="false" autocomplete="off" placeholder="sk-..."></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-model">模型</label>
         <input class="ai-config-input" id="f-model" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-flash"></div>
+      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true">多模态</span>
+        <div class="ai-caps-row">
+          <button class="ai-reason-toggle" id="f-img" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>图片 (可粘贴/附带)</button>
+          <button class="ai-reason-toggle" id="f-video" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>视频</button>
+          <button class="ai-reason-toggle" id="f-audio" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>音频</button>
+        </div></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-ctx">上下文长度</label>
         <input class="ai-config-input" id="f-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则自动推断"></div>
       <div class="ai-config-row"><label class="ai-config-label" for="f-max">最大输出</label>
@@ -711,6 +761,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
         <button class="ai-reason-toggle" id="f-reason" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>深度思考 (reasoning.effort=high)</button></div>
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
         <span class="ai-config-hint">两个长度都填 token 数，支持 128K、1M 这类写法。上下文长度只影响用量的“剩余”显示（留空则按模型名推断）；最大输出留空时不发送该参数。</span></div>
+      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+        <span class="ai-config-hint">多模态能力按模型实际支持勾选：开启后输入区可粘贴/附带对应类型（图片处理为 ≤1568px，视频/音频按原样 data URL 发送，上限见输入区提示）；未开启的类型不会出现附件入口。</span></div>
       <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
         <span class="ai-config-hint">密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出；留空保存 = 保留已存密钥。接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
       <div class="ai-config-actions">
@@ -729,9 +781,13 @@ textarea,input{user-select:text;-webkit-user-select:text}
     <div class="ai-composer">
       <div class="ai-composer-inner">
         <div class="ai-composer-box" id="cbox">
+          <div class="ai-attrow" id="attRow" hidden></div>
           <textarea class="ai-input" id="inputT" rows="1" aria-label="给 AI 助手的消息"
             placeholder="描述你的目标，例如：找出一周内修改过的文档"></textarea>
           <div class="ai-composer-bar">
+            <button class="ai-bar-ic" id="attB" type="button" title="附带图片 / 视频 / 音频" hidden>
+              <span class="glyph" aria-hidden="true">&#xE8DA;</span></button>
+            <input type="file" id="attFile" multiple accept="image/*,video/*,audio/*" hidden>
             <div class="ai-cmd-policy" id="policy">
               <button class="ai-cmd-policy-button" id="policyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE756;</span>
@@ -882,8 +938,10 @@ function epolicyMeta(v){for(const p of EPOLICY)if(p.v===v)return p;return EPOLIC
 
 /* ==================== 状态 ==================== */
 const S={
-  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,name:'',ctx:0,maxOut:0,active:'',profs:[]},
+  cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,name:'',ctx:0,maxOut:0,active:'',profs:[],
+       img:false,video:false,audio:false},
   pal:null, convs:[], msgs:[], cur:0,
+  atts:[],          /* 待发送附件 [{u:dataUrl,k:kind,n:文件名}] (发送后清空) */
   sending:false, net:0, phase:0, note:'',   /* note = 过程状态条 (重试/自愈中, status 推送带) */
   usage:{has:false,up:0,uo:0,ut:0,uch:0,lp:0,lc:0,tps:0},
   sideOpen:false, cfgOpen:false, policyOpen:false, epolicyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
@@ -957,6 +1015,9 @@ function fillProfForm(){
   $('f-ctx').value=fmtTokInput(p?p.ctx:0);
   $('f-max').value=fmtTokInput(p?p.maxOut:0);
   $('f-reason').setAttribute('aria-pressed',S.cfg.reasoning?'true':'false');
+  $('f-img').setAttribute('aria-pressed',p&&p.img?'true':'false');
+  $('f-video').setAttribute('aria-pressed',p&&p.video?'true':'false');
+  $('f-audio').setAttribute('aria-pressed',p&&p.audio?'true':'false');
 }
 function renderProfSelect(){
   const sel=$('f-prof');sel.textContent='';
@@ -987,9 +1048,10 @@ function selectProf(id){
   S.cfg.active=id;
   const p=profActive();
   if(p){S.cfg.url=p.url||'';S.cfg.model=p.model||'';S.cfg.hasKey=!!p.hasKey;
-        S.cfg.ctx=p.ctx||0;S.cfg.maxOut=p.maxOut||0;S.cfg.name=profName(p);}
+        S.cfg.ctx=p.ctx||0;S.cfg.maxOut=p.maxOut||0;S.cfg.name=profName(p);
+        S.cfg.img=!!p.img;S.cfg.video=!!p.video;S.cfg.audio=!!p.audio;}
   if(S.cfgOpen){renderProfSelect();fillProfForm();}
-  renderModelBtn();renderStatus();renderUsage();
+  renderModelBtn();renderStatus();renderUsage();renderComposer();
   post({c:'profActive',id});
 }
 function saveProf(){
@@ -1001,7 +1063,10 @@ function saveProf(){
   S.profDirty=false;
   post({c:'profSave',name:$('f-name').value.trim(),url:$('f-url').value.trim(),
         key:$('f-key').value.trim(),model:$('f-model').value.trim(),ctx,max,
-        reasoning:$('f-reason').getAttribute('aria-pressed')==='true'});
+        reasoning:$('f-reason').getAttribute('aria-pressed')==='true',
+        img:$('f-img').getAttribute('aria-pressed')==='true',
+        video:$('f-video').getAttribute('aria-pressed')==='true',
+        audio:$('f-audio').getAttribute('aria-pressed')==='true'});
   showToast('接口设置已保存','ok');
   cfgToggle(false);   /* 保存成功即收起面板 (校验失败才停留) */
 }
@@ -1214,7 +1279,10 @@ function toolGroupHtml(k0,e2){
 function userRowHtml(m,mi){
   return '<div class="ai-msg ai-msg-user" data-mi="'+mi+'">'
     +'<span class="ai-msg-avatar glyph" aria-hidden="true">&#xE77B;</span>'
-    +'<div class="ai-msg-main">'+(m.html||'<div class="ai-bubble">&nbsp;</div>')+'</div></div>';
+    +'<div class="ai-msg-main">'+(m.html||'<div class="ai-bubble">&nbsp;</div>')+'</div>'
+    /* 悬停出现 (row-reverse 布局下落在气泡左外侧): 删除该提问+其后全部回复, 两步确认见 armDel */
+    +'<button class="ai-user-del" type="button" data-act="delturn" data-mi="'+mi+'" title="删除此条问答 (含回复; 需二次确认)">'
+    +'<span class="glyph" aria-hidden="true">&#xE74D;</span></button></div>';
 }
 /* 短气泡收缩: 单段、无块级元素、纯文本 ≤30 字才不跟右缘对齐 */
 )AIWEBUI"
@@ -1236,6 +1304,7 @@ function applyOpenSteps(){
   });
 }
 function renderThread(keepScroll){
+  disarmDel();   /* 整帧重绘 = 确认态复位 (msgs 全量重推后节点已换, 残留 arm 会误跳二次确认) */
   const inner=$('threadInner'), t=threadEl();
   const stick=keepScroll?isNearBottom():true;
   const showEmpty=!S.msgs.length&&!S.sending;
@@ -1387,50 +1456,24 @@ function jumpTo(round){
  * 自动文件链接 (单击打开, 右键 打开/定位/复制); 其余照旧 (外链 openurl)。
  * enhance() 挂在每次消息 HTML 落地之后 (innerHTML 重建后节点全新, 幂等无需去重)。 */
 const MODE_LABELS={wildcard:'通配符',regex:'正则',sql:'SQL',lua:'Lua过滤','lua-exec':'Lua执行',lua_exec:'Lua执行'};
-/* 路径字符边界: 硬停在 空白/引号/尖括号/管道/星号/冒号/问号/正斜杠 (ASCII);
-   全角标点与中文句读不是硬边界 — 名字里合法 ("异人之下（2024）"), 仅当其后紧跟
-   汉字或另一全角标点 (= 正文续写) 才算边界 (seedEnd/segStopAt); 其余 (括号、逗号、点、&、汉字) 照吞 */
+/* 路径字符边界: 只硬停在 ASCII 空白/引号/尖括号/管道/星号/冒号/问号/正斜杠。
+ * 全角标点/汉字段一律照吞, 前端不再猜名字边界 — 2026-09-25 双重实锤:
+ * ① 模型写全角 "决战！碧游村4K" (真名原样), 旧"全角标点后跟汉字=正文"规则把候选截在
+ *    "F:\分享文件夹\电视剧", 校验反而命中存在的父目录 = 误判;
+ * ② "折磨 SM 粗暴 紧缚 2" 的纯汉字段被硬停, 同样截短。
+ * 边界歧义 (路径后跟正文/句读) 一律交给 C++ 梯子按存在性裁断: 正文截断/括号失衡/
+ * 尾标点剥离都是带存在性检验的变体, 命中哪个显示哪个 (ResolveClickablePath, ai_web.cpp)。 */
 const PATH_STOP=/[\s'"`<>|*\/:?]/;
 const PATH_RE=new RegExp("(?<![A-Za-z0-9])(?:[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\s'\"`<>|*/:?]+","g");   /* lookbehind 排除 https: 里的 "s:/" */
-const CJK_CH=/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
-const CM_STOP=/[\u3000-\u303F\uFF01-\uFF5E\u2010-\u2027]/;
-/* 种子截断: 全角标点后跟 汉字/全角标点 = 正文开始, 从该标点处截 ("F:\a\b，然后" 的"，"_);
-   后跟 ASCII/空白/结尾 = 名字的一部分 ("（2024）.mkv"、"（2024） 第2季"、"打开 F:\a\b。" 交给剥离) */
-function seedEnd(text,s,e){
-  for(let i=s;i<e;i++){
-    if(CM_STOP.test(text[i])){
-      const nx=text[i+1];
-      if(nx!==undefined&&(CJK_CH.test(nx)||CM_STOP.test(nx)))return i;
-    }
-  }
-  return e;
-}
-/* 路径含空格 ("C:\Program Files\App\x.exe"、"美人鱼 (2016)\美人鱼 (2016).mkv"、
- * "知短剧知短...锐 (2018)"、"决战! 碧游村4K"): 空格后的词贪婪并入链接 —
- * 旧"含 \ 或带扩展名才落锚"规则会把无扩展名的 "(2018)"/"DVD版"/汉字段切断 (2026-09-25 实锤);
- * 纯汉字词 = 正文开始, 硬停; 词内全角标点后跟汉字/全角标点同样停 ("(2024)。后续")。
- * 贪婪可能把路径后的正文词粘进链接 — 点不准由 C++ 侧 ResolveClickablePath
- * (ai_web.cpp) 按空格从尾部逐段回退取最长存在前缀兜底, 这里宁可多并。 */
-const PATH_CJKWORD=/^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+$/;
 function pathStopCh(ch){return PATH_STOP.test(ch);}
-function segStopAt(text,j){
-  const ch=text[j];
-  if(ch===undefined||pathStopCh(ch))return true;
-  if(CM_STOP.test(ch)){
-    const nx=text[j+1];
-    if(nx===undefined||CJK_CH.test(nx)||CM_STOP.test(nx))return true;
-  }
-  return false;
-}
 function extendPath(text,e){
   let k=e;
   for(;;){
     if(text[k]!==' ')break;
     let j=k+1;
-    while(j<text.length&&!segStopAt(text,j))j++;
+    while(j<text.length&&!pathStopCh(text[j]))j++;
     if(j===k+1)break;
-    if(PATH_CJKWORD.test(text.slice(k+1,j)))break;
-    k=j;
+    k=j;   /* 全量并入 (含全角标点/纯汉字段): 校验梯子决定真实边界 */
   }
   return k;
 }
@@ -1570,7 +1613,7 @@ function linkifyPaths(root){
     PATH_RE.lastIndex=0;
     while((m=PATH_RE.exec(text))){
       if(m.index+m[0].length<=last)continue;   /* 已被上一个延伸段覆盖 */
-      const end=extendPath(text,seedEnd(text,m.index,m.index+m[0].length));
+      const end=extendPath(text,m.index+m[0].length);
       if(end-m.index<4)continue;   /* 截到只剩盘符根 ("C:\（注）…" 的 "C:\") 不成链接 */
       if(end<=last)continue;
       const path=text.slice(m.index,end);
@@ -1581,6 +1624,8 @@ function linkifyPaths(root){
       const sp=document.createElement('span');
       sp.className='ai-path';
       sp.setAttribute('data-path',strip);
+      const moreRaw=text.substr(end,100);
+      if(moreRaw.trim())sp.setAttribute('data-more',moreRaw);   /* 链接后紧随原文 = 校验期"继续解析"的余量 */
       sp.title='点击打开 · 右键更多操作';
       sp.textContent=strip;
       frag.appendChild(sp);
@@ -1598,6 +1643,63 @@ function enhance(root){
   transformActionLinks(scope);
   highlightCode(scope);
   linkifyPaths(scope);
+  schedulePathCheck();
+}
+/* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
+   真实存在性 — 不存在按解析梯子继续试 (more 向后并词/去尾词回退, 与点击解析同一梯子),
+   仍不存在 = 退回纯文本, 不画链接不做字符特殊处理。校验异步: enhance 落地后 300ms
+   去抖汇总未校验的 .ai-path, 单批 ≤64 条, 余量随回复的 schedulePathCheck 下一轮续检 */
+let pvTimer=0;
+function schedulePathCheck(){
+  if(pvTimer)return;
+  pvTimer=setTimeout(function(){pvTimer=0;sendPathCheck();},300);
+}
+function sendPathCheck(){
+  const spans=document.querySelectorAll('.ai-path[data-path]:not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-ok]):not([data-bad])');
+  const ps=[],ids=[],seen={};
+  spans.forEach(function(sp){
+    if(sp.hasAttribute('data-badid'))return;   /* 渲染期已判定的编造 ID: 保持禁用态 */
+    if(sp.hasAttribute('data-id')){const id=sp.getAttribute('data-id');
+      if(!seen['i'+id]){seen['i'+id]=1;ids.push(id);}return;}
+    const p=sp.getAttribute('data-path');
+    if(p&&!seen['p'+p]){seen['p'+p]=1;ps.push(p);}
+  });
+  if(ps.length||ids.length)post({c:'pathcheck',ps:ps.slice(0,64),ids:ids.slice(0,64)});
+}
+function applyPathCheck(rs){
+  const byKey={};
+  (rs||[]).forEach(function(r){byKey[(r.k||'')+'|'+(r.v||'')]=r;});
+  document.querySelectorAll('.ai-path[data-path]:not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-ok]):not([data-bad])').forEach(function(sp){
+    if(sp.hasAttribute('data-badid'))return;
+    const isId=sp.hasAttribute('data-id');
+    const key=isId?('i|'+sp.getAttribute('data-id')):('p|'+sp.getAttribute('data-path'));
+    const r=byKey[key];
+    if(!r)return;   /* 不在本批 (超上限的余量) */
+    if(!r.ok){sp.replaceWith(document.createTextNode(sp.textContent));return;}   /* 不存在 = 纯文本 */
+    sp.setAttribute('data-ok','1');
+    if(!isId&&r.q){
+      const q=r.q,old=sp.getAttribute('data-path'),shown=sp.textContent;
+      if(q!==old){
+        sp.setAttribute('data-path',q);   /* 点击/右键直接用校正后的真路径 */
+        sp.removeAttribute('data-more');
+        if(q.indexOf(shown)===0&&shown.length<q.length){
+          /* 继续解析并入了更长路径: 后续文本对上才补齐显示 (对不上只改 data-path, 点击已通) */
+          const add=q.slice(shown.length),nx=sp.nextSibling;
+          if(nx&&nx.nodeType===3&&nx.nodeValue.indexOf(add)===0){
+            nx.nodeValue=nx.nodeValue.slice(add.length);
+            sp.textContent=q;
+          }
+        }else if(shown.indexOf(q)===0){
+          /* 粘连的正文词被回退剥掉: 剥下的余量还原为纯文本 */
+          sp.textContent=q;
+          sp.parentNode.insertBefore(document.createTextNode(shown.slice(q.length)),sp.nextSibling);
+        }else sp.textContent=q;   /* 名字模糊校正等: 直接落磁盘权威拼写 */
+      }
+    }
+    if(r.ic&&!sp.querySelector('.ai-path-ic'))   /* 引擎真图标置前 (data URL; 先落文字再插图标) */
+      sp.insertAdjacentHTML('afterbegin','<img class="ai-path-ic" src="'+r.ic+'" alt="" aria-hidden="true">');
+  });
+  schedulePathCheck();
 }
 /* ---- 右键菜单 (文件路径 / 搜索卡片的操作项; 点外/Esc/滚动/缩放关闭) ---- */
 function hideCtx(){
@@ -1639,9 +1741,37 @@ function copyTurn(mi){
   if(!text&&m.reason)text=String(m.reason).trim();
   if(text)post({c:'copy',text});
 }
+/* ---- 删除问答的两步确认 (用户气泡悬停按钮): 首击进入确认态 (变红"确认删除"),
+   4s 内再击才发 delturn; 切换目标/整帧重绘 (renderThread)/超时自动复位 —
+   arm 态只活在前端 DOM, msgs 推送重建节点后自然消失 */
+function disarmDel(){
+  if(S.delArmTimer){clearTimeout(S.delArmTimer);S.delArmTimer=0;}
+  if(S.delArmBtn){S.delArmBtn.classList.remove('arm');
+    S.delArmBtn.innerHTML='<span class="glyph" aria-hidden="true">&#xE74D;</span>';}
+  S.delArm=-1;S.delArmBtn=null;
+}
+/* 附件图片放大浮层 (点任意处/Esc/点外失焦收) */
+function hideLightbox(){const lb=$('lightbox');if(lb)lb.remove();}
+function showLightbox(src){
+  hideLightbox();
+  const lb=document.createElement('div');
+  lb.className='ai-lightbox';lb.id='lightbox';
+  const im=document.createElement('img');im.src=src;im.alt='';
+  lb.appendChild(im);
+  lb.addEventListener('mousedown',e=>{e.preventDefault();hideLightbox();});
+  document.body.appendChild(lb);
+}
+function armDel(mi,btn){
+  disarmDel();
+  S.delArm=mi;S.delArmBtn=btn;
+  S.delArmTimer=setTimeout(disarmDel,4000);
+  btn.classList.add('arm');btn.textContent='确认删除';
+}
 function bindThread(){
   const inner=$('threadInner');
   inner.addEventListener('click',e=>{
+    const lbi=e.target.closest('.ai-att-img');
+    if(lbi){showLightbox(lbi.getAttribute('src'));return;}
     const rf=e.target.closest('.ai-sugg-refresh');
     if(rf){rerollSuggs();return;}
     const sug=e.target.closest('.ai-suggestion');
@@ -1656,6 +1786,13 @@ function bindThread(){
     if(chip){post({c:'search',text:chip.getAttribute('data-text')||'',mode:chip.getAttribute('data-mode')||''});
       chip.classList.add('sent');setTimeout(function(){chip.classList.remove('sent');},600);
       return;}
+    const del=e.target.closest('.ai-user-del');
+    if(del){
+      if(S.sending){showToast('回答进行中, 请先停止或等完成后再删除','warn');return;}
+      const mi=+del.closest('.ai-msg').getAttribute('data-mi');
+      if(S.delArm!==mi){armDel(mi,del);return;}   /* 首击=确认态, 4s 内再击才真正删除 */
+      disarmDel();post({c:'delturn',mi});
+      return;}
     const hasSel=window.getSelection&&!window.getSelection().isCollapsed;
     const pth=e.target.closest('.ai-path');
     if(pth&&!hasSel){
@@ -1665,7 +1802,7 @@ function bindThread(){
       const id=pth.getAttribute('data-id');
       /* 新链接只带引擎 FileId (程序按 ID 取路径); 旧历史消息是 data-path */
       if(id)post({c:act,id:+id});
-      else post({c:act,path:pth.getAttribute('data-path')||pth.textContent});
+      else post({c:act,path:pth.getAttribute('data-path')||pth.textContent,more:pth.getAttribute('data-more')||''});
       return;}
     const a=e.target.closest('a');
     if(a){e.preventDefault();const href=a.getAttribute('href')||'';
@@ -1759,7 +1896,7 @@ function bindThread(){
         return;
       }
       const id=pth.getAttribute('data-id');
-      const ref=id?{id:+id}:{path:pth.getAttribute('data-path')||pth.textContent};
+      const ref=id?{id:+id}:{path:pth.getAttribute('data-path')||pth.textContent,more:pth.getAttribute('data-more')||''};
       showCtx([
         {t:'打开文件',fn:()=>post(Object.assign({c:'open'},ref))},
         {t:'定位文件',fn:()=>post(Object.assign({c:'reveal'},ref))},
@@ -1835,7 +1972,7 @@ function autoSize(){
 }
 function refreshSendState(){
   const hasText=!!$('inputT').value.trim();
-  const grayed=!S.sending&&!hasText;
+  const grayed=!S.sending&&!hasText&&!S.atts.length;   /* 有附件 (即使没文字) 也可发送 */
   const b=$('sendB');
   b.disabled=grayed;
   if(grayed)b.setAttribute('data-empty','true');else b.removeAttribute('data-empty');
@@ -1847,25 +1984,106 @@ function renderComposer(){
   b.setAttribute('aria-label',label);
   b.setAttribute('title',S.sending?label:label+' · Enter 发送，Shift + Enter 换行');
   $('cbox').setAttribute('data-streaming',S.sending?'true':'false');
+  /* 📎 附件入口只对勾了对应能力的模型出现 (图片/视频/音频 任一) */
+  $('attB').hidden=!(S.cfg.img||S.cfg.video||S.cfg.audio);
   refreshSendState();
   renderPolicy();
   renderEpolicy();
   renderUsage();
 }
+/* ---- 多模态附件 (粘贴 / 📎 选择; 图片压到 ≤1568px, 视频/音频原样 data URL) ---- */
+const ATT_KIND_NAME={0:'图片',1:'视频',2:'音频'};
+function fmtBytes(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB';}
+function attCapKind(u){   /* data URL 前缀 → kind (其它类型不收) */
+  if(/^data:image\//i.test(u))return 0;
+  if(/^data:video\//i.test(u))return 1;
+  if(/^data:audio\//i.test(u))return 2;
+  return -1;
+}
+function addAtt(u,kind,name){
+  if(S.atts.length>=4){showToast('每条消息最多 4 个附件','warn');return;}
+  S.atts.push({u,k:kind,n:name||''});
+  renderAtts();refreshSendState();
+}
+function renderAtts(){
+  const row=$('attRow');
+  row.hidden=!S.atts.length;
+  row.innerHTML=S.atts.map((a,i)=>{
+    const meta='<span class="ai-att-meta"><span class="ai-att-name">'+esc(a.n||ATT_KIND_NAME[a.k])+'</span>'
+      +'<span class="ai-att-size">'+fmtBytes(Math.round(a.u.length*0.75))+'</span></span>';
+    const th=a.k===0
+      ?'<img class="ai-att-thumb" src="'+a.u+'" alt="">'
+      :'<span class="ai-att-thumb glyph" aria-hidden="true">'+(a.k===1?'&#xE714;':'&#xE8D6;')+'</span>';
+    return '<div class="ai-att">'+th+meta
+      +'<button class="ai-att-x glyph" data-i="'+i+'" type="button" title="移除" aria-label="移除附件">&#xE74D;</button></div>';
+  }).join('');
+}
+/* 图片读入 → 压缩 (长边 >1568 缩放; PNG ≤2.5MB 保留透明, 否则 JPEG 白底 0.9) → data URL */
+function compressImage(dataUrl,cb){
+  const img=new Image();
+  img.onload=()=>{
+    const MAXD=1568;
+    const k=Math.max(1,img.naturalWidth/MAXD,img.naturalHeight/MAXD);
+    const w=Math.max(1,Math.round(img.naturalWidth/k)),h=Math.max(1,Math.round(img.naturalHeight/k));
+    const small=k>1||dataUrl.length>1.5*1024*1024;
+    const done=u=>{
+      if(u.length>4*1024*1024){showToast('图片过大 (压缩后仍超 4MB)','warn');return;}
+      cb(u);
+    };
+    if(!small){done(dataUrl);return;}
+    const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+    const cx=cv.getContext('2d');
+    cx.drawImage(img,0,0,w,h);
+    const png=cv.toDataURL('image/png');
+    if(png.length<=2.5*1024*1024){done(png);return;}
+    cx.fillStyle='#fff';cx.fillRect(0,0,w,h);cx.drawImage(img,0,0,w,h);   /* JPEG 无透明: 白底垫 */
+    done(cv.toDataURL('image/jpeg',0.9));
+  };
+  img.onerror=()=>showToast('图片读取失败','warn');
+  img.src=dataUrl;
+}
+function addFiles(files){
+  for(const f of files){
+    if(!f)continue;
+    const isImg=/^image\//i.test(f.type),isVid=/^video\//i.test(f.type),isAud=/^audio\//i.test(f.type);
+    if(!isImg&&!isVid&&!isAud){showToast('不支持的附件类型：'+(f.name||f.type),'warn');continue;}
+    const kind=isImg?0:isVid?1:2;
+    const capOn=isImg?S.cfg.img:isVid?S.cfg.video:S.cfg.audio;
+    if(!capOn){showToast('当前模型未开启'+ATT_KIND_NAME[kind]+'输入 (接口设置中勾选)','warn');continue;}
+    /* 原始字节数粗筛 (data URL≈4/3×原字节; C++ 侧按 data URL 长度硬闸, 留出头部余量) */
+    if(isVid&&f.size>17*1048576){showToast('视频过大 (上限约 17MB)：'+f.name,'warn');continue;}
+    if(isAud&&f.size>8*1048576){showToast('音频过大 (上限约 8MB)：'+f.name,'warn');continue;}
+    const rd=new FileReader();
+    rd.onload=()=>{
+      const u=String(rd.result||'');
+      const k=attCapKind(u);
+      if(k<0){showToast('附件读取失败：'+(f.name||''),'warn');return;}
+      if(k===1&&u.length>23*1048576){showToast('视频过大 (超 24MB data URL 上限)：'+f.name,'warn');return;}
+      if(k===2&&u.length>11*1048576){showToast('音频过大 (超 12MB data URL 上限)：'+f.name,'warn');return;}
+      if(k===0)compressImage(u,q=>addAtt(q,0,f.name));
+      else addAtt(u,k,f.name);
+    };
+    rd.onerror=()=>showToast('附件读取失败：'+(f.name||''),'warn');
+    rd.readAsDataURL(f);
+  }
+}
 function doSend(){
   const ta=$('inputT');
   const text=ta.value.trim();
-  if(!text||S.sending)return;
+  if(S.sending||(!text&&!S.atts.length))return;
   if(!S.cfg.hasKey){  /* 未配置: 打开接口设置面板 + 明确提示 (与参考实现同口径) */
     showToast('尚未配置接口密钥 — 请填写接口地址、API 密钥与模型','warn');
     cfgToggle(true);
     return;
   }
-  ta.value='';autoSize();refreshSendState();
-  post({c:'send',text});
+  const atts=S.atts.map(a=>({u:a.u,k:a.k,n:a.n}));
+  ta.value='';autoSize();
+  S.atts=[];renderAtts();
+  refreshSendState();
+  post({c:'send',text,atts});
 }
-
-/* ---- 文件操作权限下拉 ---- */
+)AIWEBUI"
+           LR"AIWEBUI(/* ---- 文件操作权限下拉 ---- */
 function renderPolicy(){
   const cur=POLICY[S.cfg.policy]||POLICY[2];
   $('policyLabel').textContent=cur.n;
@@ -2027,6 +2245,7 @@ function handle(m){
       renderStatus();renderComposer();
       break;
     case 'convs':S.convs=m.convs||[];renderSide();break;
+    case 'pathcheck':applyPathCheck(m.r);break;
     case 'msgs':
       if(m.cur!==undefined)S.cur=m.cur;
       S.msgs=m.msgs||[];
@@ -2050,6 +2269,7 @@ function handle(m){
          面板外的点击 WebView2 收不到, 页面自己的点外关闭够不着, 由 C++ 补发;
          停靠侧栏 (宽面板) 与设置面板是常驻模式, 不随焦点收 */
       if(S.ctxOpen)hideCtx();
+      if($('lightbox'))hideLightbox();
       if(S.policyOpen)policySetOpen(false);
       if(S.usageOpen)usageSetOpen(false);
       if(S.modelOpen)modelSetOpen(false);
@@ -2064,6 +2284,7 @@ function renderAll(){
 )AIWEBUI"
            LR"AIWEBUI(/* ==================== 事件接线 ==================== */
 function bind(){
+  const ta=$('inputT');   /* 输入框引用提前: 下方粘贴/附件接线同帧就要用到 (const 有暂时性死区) */
   $('b-set').addEventListener('click',()=>cfgToggle(!S.cfgOpen));
   $('b-hist').addEventListener('click',()=>sideToggle(!S.sideOpen));
   $('b-new').addEventListener('click',()=>post({c:'new'}));
@@ -2091,10 +2312,12 @@ function bind(){
     S.cfg.active=S.cfg.profs.length?S.cfg.profs[0].id:'';
     const np=profActive();
     if(np){S.cfg.url=np.url||'';S.cfg.model=np.model||'';S.cfg.hasKey=!!np.hasKey;
-           S.cfg.ctx=np.ctx||0;S.cfg.maxOut=np.maxOut||0;S.cfg.name=profName(np);}
-    else{S.cfg.url='';S.cfg.model='';S.cfg.hasKey=false;S.cfg.ctx=0;S.cfg.maxOut=0;S.cfg.name='未配置接口';}
+           S.cfg.ctx=np.ctx||0;S.cfg.maxOut=np.maxOut||0;S.cfg.name=profName(np);
+           S.cfg.img=!!np.img;S.cfg.video=!!np.video;S.cfg.audio=!!np.audio;}
+    else{S.cfg.url='';S.cfg.model='';S.cfg.hasKey=false;S.cfg.ctx=0;S.cfg.maxOut=0;S.cfg.name='未配置接口';
+         S.cfg.img=false;S.cfg.video=false;S.cfg.audio=false;}
     if(S.cfgOpen){renderProfSelect();fillProfForm();}
-    renderModelBtn();renderStatus();renderUsage();
+    renderModelBtn();renderStatus();renderUsage();renderComposer();
     post({c:'profDel',id:del});
   });
   /* 表单里任何编辑都标脏 —— 挡住宿主整包下发把用户正在敲的内容冲掉 */
@@ -2113,8 +2336,44 @@ function bind(){
     const on=$('f-reason').getAttribute('aria-pressed')==='true';
     $('f-reason').setAttribute('aria-pressed',on?'false':'true');
   });
+  /* 多模态能力三勾选 (图片/视频/音频): 编辑即标脏 — 挡住宿主整包下发冲掉未保存的勾选 */
+  ['f-img','f-video','f-audio'].forEach(id=>{
+    $(id).addEventListener('click',()=>{
+      const b=$(id);
+      const on=b.getAttribute('aria-pressed')==='true';
+      b.setAttribute('aria-pressed',on?'false':'true');
+      S.profDirty=true;
+    });
+  });
+  /* 📎 附件: 选择文件 / 粘贴图片 (粘贴含媒体文件时接管, 纯文本照常走浏览器默认) */
+  $('attB').addEventListener('click',()=>$('attFile').click());
+  $('attFile').addEventListener('change',()=>{addFiles(Array.from($('attFile').files||[]));$('attFile').value='';});
+  $('attRow').addEventListener('click',e=>{
+    const x=e.target.closest('.ai-att-x');
+    if(!x)return;
+    S.atts.splice(+x.getAttribute('data-i'),1);
+    renderAtts();refreshSendState();
+  });
+  ta.addEventListener('paste',e=>{
+    const files=e.clipboardData&&e.clipboardData.files;
+    if(!files||!files.length)return;
+    const media=Array.from(files).filter(f=>f&&/^(image|video|audio)\//i.test(f.type));
+    if(!media.length)return;   /* 剪贴板里只有文本/其它: 浏览器默认粘贴 */
+    e.preventDefault();
+    addFiles(media);
+  });
+  /* 面板任意处粘贴媒体 (焦点在对话流/工具栏时也接得住): 输入框自己的 paste 已
+     preventDefault, 这里的 closest(textarea,input) 守卫防止二次入列 */
+  document.addEventListener('paste',e=>{
+    if(e.target&&e.target.closest&&e.target.closest('textarea,input'))return;
+    const files=e.clipboardData&&e.clipboardData.files;
+    const media=files?Array.from(files).filter(f=>f&&/^(image|video|audio)\//i.test(f.type)):[];
+    if(!media.length)return;
+    e.preventDefault();
+    addFiles(media);
+    try{ta.focus();}catch(err){}
+  });
   $('sendB').addEventListener('click',()=>{if(S.sending)post({c:'stop'});else doSend();});
-  const ta=$('inputT');
   ta.addEventListener('input',()=>{autoSize();refreshSendState();});
   ta.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();doSend();}
@@ -2174,6 +2433,7 @@ function bind(){
   });
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if($('lightbox')){hideLightbox();e.preventDefault();return;}
       if(S.clearArmed){clearDisarm();e.preventDefault();return;}
       if(S.ctxOpen){hideCtx();e.preventDefault();return;}
       if(S.modelOpen){modelSetOpen(false);e.preventDefault();return;}

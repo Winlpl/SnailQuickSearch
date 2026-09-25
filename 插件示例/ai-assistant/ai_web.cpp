@@ -10,6 +10,8 @@
  */
 #include "ai_assistant.h"
 #include <shellapi.h>
+#include <map>
+#include <vector>
 #include "../../md4c/md4c.h"
 #include "../../webview2/include/WebView2.h"
 
@@ -80,6 +82,10 @@ static picojson::value WebCfgValue() {
     o["reasoning"] = JB(g_cfg.reasoning);
     o["policy"] = JN(g_cfg.filePolicy);
     o["epolicy"] = JN(g_cfg.execPolicy);
+    /* 多模态能力 (活动档案镜像): 输入区据此显隐附件入口 */
+    o["img"] = JB(g_cfg.img);
+    o["video"] = JB(g_cfg.video);
+    o["audio"] = JB(g_cfg.audio);
     /* 活动档案显示名: 状态点与工具栏模型按钮用它 (与前端兜底同款: name||model||未命名模型) */
     o["name"] = JS(CfgDisplayName(act));
     o["ctx"] = JN(g_cfg.ctx);
@@ -96,6 +102,9 @@ static picojson::value WebCfgValue() {
         po["hasKey"] = JB(!p.apiKey.empty());
         po["ctx"] = JN(p.ctx);
         po["maxOut"] = JN(p.maxOut);
+        po["img"] = JB(p.img);
+        po["video"] = JB(p.video);
+        po["audio"] = JB(p.audio);
         profs.push_back(picojson::value(po));
     }
     o["profs"] = picojson::value(profs);
@@ -609,6 +618,32 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
     }
 }
 
+/* 用户消息的多模态附件块 (图片内联缩略, 视频/音频=文件签; dataUrl 已被存储预算清空的 = "已清理"占位) */
+static void AttsHtml(const std::vector<AiAttach>& atts, std::wstring* out) {
+    *out += L"<div class=\"ai-atts\">";
+    for (const AiAttach& a : atts) {
+        if (a.kind == 0 && !a.dataUrl.empty()) {
+            *out += L"<img class=\"ai-att-img\" src=\"";
+            HtmlEscape(out, a.dataUrl);
+            *out += L"\" alt=\"图片\">";
+            continue;
+        }
+        *out += L"<span class=\"ai-att-file";
+        if (a.dataUrl.empty()) *out += L" gone";
+        *out += L"\"><span class=\"glyph\" aria-hidden=\"true\">";
+        *out += (a.kind == 0 ? L"&#xE91B;" : a.kind == 1 ? L"&#xE714;" : L"&#xE8D6;");
+        *out += L"</span>";
+        std::wstring label = a.name.empty()
+            ? (a.kind == 0 ? L"图片" : a.kind == 1 ? L"视频" : L"音频")
+            : a.name;
+        if (label.size() > 40) { label.resize(40); label += L"…"; }
+        HtmlEscape(out, label);
+        if (a.dataUrl.empty()) *out += L" (已清理)";
+        *out += L"</span>";
+    }
+    *out += L"</div>";
+}
+
 /* 消息气泡 (类名与参考实现同源: ai-bubble / ai-bubble-user / ai-bubble-error /
  * ai-steps — 前端 CSS 按这套名字取值) */
 void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* out) {
@@ -621,10 +656,16 @@ void MsgHtmlOf(AiSess* s, const AiMsg& m, int mi, bool thinking, std::wstring* o
         return;
     }
     std::wstring body;
+    if (m.role == 0 && !m.atts.empty()) AttsHtml(m.atts, &body);
     if (!m.text.empty()) {
-        if (!MdToHtml(m.text, &body)) {   /* 解析失败兜底: 原文按代码块呈现 */
-            body = L"<div class=\"ai-code\"><div class=\"ai-code-head\"><span class=\"ai-code-lang\">text</span></div>"
-                   L"<pre><code>";
+        /* md 渲染进独立串再拼接 — MdToHtml 是整体赋值, 直接喂 body 会把前面的附件块覆盖掉
+           (2026-09-25 实锤: 文字+图片的用户气泡只剩文字) */
+        std::wstring md;
+        if (MdToHtml(m.text, &md)) {
+            body += md;
+        } else {   /* 解析失败兜底: 原文按代码块呈现 */
+            body += L"<div class=\"ai-code\"><div class=\"ai-code-head\"><span class=\"ai-code-lang\">text</span></div>"
+                    L"<pre><code>";
             HtmlEscape(&body, m.text);
             body += L"</code></pre></div>";
         }
@@ -1146,8 +1187,16 @@ static picojson::value WebMsgValue(AiSess* s, const AiMsg& m, int mi, bool think
     /* empty = 没有正文 (推理不算正文): 过程区只画推理行 — 若按旧口径 (正文+推理都空才算
        empty), 推理轮的 &nbsp; 占位气泡会照渲染, 过程面板里每轮跟一条空行 (2026-09-25 实锤) */
     if (m.role == 1 && m.text.empty()) o["empty"] = JB(true);
-    if (m.role == 0)
-        o["q"] = JS(m.text.size() > 200 ? m.text.substr(0, 200) : m.text);
+    if (m.role == 0) {
+        std::wstring q = m.text.size() > 200 ? m.text.substr(0, 200) : m.text;
+        if (q.empty()) {   /* 纯附件提问: 轮次跳转预览按类型兜底 */
+            for (const AiAttach& a : m.atts) {
+                if (!q.empty()) q += L" ";
+                q += a.kind == 0 ? L"[图片]" : a.kind == 1 ? L"[视频]" : L"[音频]";
+            }
+        }
+        o["q"] = JS(q);
+    }
     if (m.role == 2 && !m.steps.empty()) {   /* 步骤状态: 前端聚合头部计数用 (卡面视觉由 MsgHtmlOf 直出) */
         picojson::array steps;
         for (const AiToolStep& st : m.steps) {
@@ -1455,13 +1504,85 @@ std::wstring DonateQrDataUrl(int kind) {   /* 0=微信 1=支付宝; 空串 = 不
     return r;
 }
 
-/* ---- 点击链接的路径解析 (前端 linkifyPaths 的兜底, 2026-09-25) ----
- * 前端把路径后的词贪婪并进链接 (空格粘连, "决战! 碧游村4K")、句尾闭合标点剥出链接外
- * ("美人鱼 (2016)" 的 ")"), 链接串因此可能比真路径长或短一截。这里按
- * "整串 → 补一个被剥的闭合标点 → 按空格从尾部逐段回退(每层再试补标点)" 找最长真实存在者;
- * 存在性 = 文件系统为准, 命中后能进索引 (GetFileIdByPath) 就给 fid 走宿主 OpenFile (打开行为生效)。
+/* ---- 点击链接的路径解析 (前端 linkifyPaths 的兜底, 2026-09-25) ---- */
+
+/* 名字归一化 (模糊比对用): 全角 ASCII 区折叠半角、去空白、小写 —
+ * 模型照抄的路径常见全半角/空格漂移 ("决战! 碧游村" vs 真名 "决战！碧游村") */
+static std::wstring NormFoldName(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        if (c >= 0xFF01 && c <= 0xFF5E) c = (wchar_t)(c - 0xFEE0);
+        if (c == L' ' || c == 0x3000 || c == 0x00A0 || c == L'\t') continue;
+        out += (wchar_t)towlower(c);
+    }
+    return out;
+}
+
+/* 最长公共子序列长度 (名字都是短串, 全量 DP) — 字符级抄写错 ("折磨"写成"折腾"、
+ * "粗暴"写成"祖暴") 折叠不掉, 只有相似度能救 */
+static int LcsLen(const std::wstring& a, const std::wstring& b) {
+    size_t W = b.size() + 1;
+    std::vector<int> dp((a.size() + 1) * W, 0);
+    for (size_t i = 1; i <= a.size(); i++)
+        for (size_t j = 1; j <= b.size(); j++)
+            dp[i * W + j] = (a[i - 1] == b[j - 1])
+                ? dp[(i - 1) * W + (j - 1)] + 1
+                : (dp[(i - 1) * W + j] >= dp[i * W + (j - 1)] ? dp[(i - 1) * W + j] : dp[i * W + (j - 1)]);
+    return (int)dp[a.size() * W + b.size()];
+}
+
+/* 名字模糊校正 (解析梯子的一级): 父目录真实存在时枚举磁盘子项, 按归一化+LCS 相似度
+ * (≥72%) 找最接近的真名 — 命中即取磁盘权威拼写, 显示与点击随之校正; 全不中 = false。
+ * 缩写过的名字 (模型用 ... 省略中间) 与真名长度差太远, 相似度不够, 天然落不进来 (保持纯文本)。 */
+static bool FuzzyChildResolve(const std::wstring& cand, std::wstring* out) {
+    size_t pos = cand.find_last_of(L'\\');
+    if (pos == std::wstring::npos || pos == 0 || pos + 1 >= cand.size()) return false;
+    std::wstring parent = cand.substr(0, pos);
+    if (parent.size() == 2 && parent[1] == L':') parent += L"\\";
+    DWORD a = GetFileAttributesW(parent.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    std::wstring want = NormFoldName(cand.substr(pos + 1));
+    if (want.size() < 3) return false;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((parent + (parent.back() == L'\\' ? L"*" : L"\\*")).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::wstring best;
+    int bestScore = 0;
+    size_t bestDiff = 0;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        std::wstring have = NormFoldName(fd.cFileName);
+        if (have.empty()) continue;
+        int score = 0;
+        if (have == want) {
+            score = 100;
+        } else {
+            size_t m = have.size() > want.size() ? have.size() : want.size();
+            int l = LcsLen(have, want);
+            if (l * 100 >= (int)(m * 72)) score = l * 100 / (int)m;   /* 相似度门槛 */
+        }
+        size_t diff = have.size() > want.size() ? have.size() - want.size() : want.size() - have.size();
+        if (score > bestScore || (score > 0 && score == bestScore && diff < bestDiff)) {
+            bestScore = score;
+            best = fd.cFileName;
+            bestDiff = diff;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (bestScore <= 0) return false;
+    *out = parent + (parent.back() == L'\\' ? L"" : L"\\") + best;
+    return true;
+}
+
+/* ---- 存在性梯子本体 ----
+ * 前端把路径后的词贪婪并进链接 (空格粘连)、句尾闭合标点剥出链接外, 链接串因此可能比
+ * 真路径长或短一截。每层依次试: 原样 → 补一个被剥的闭合标点 → 剥尾部普通标点 →
+ * (层内末位) 名字模糊校正; 层序 = more 词向后并 → 整串 → 按空格从尾部逐段回退。
+ * 存在性以文件系统为准, 命中后能进索引 (GetFileIdByPath) 就给 fid 走宿主 OpenFile。
  * 返回 ≥0 = 索引 FileId; -1 = 文件系统存在但不在索引 (outPath=可用路径); -2 = 全不中。 */
-static int ResolveClickablePath(xjs_engine* eng, const std::wstring& raw, std::wstring* outPath)
+static int ResolveClickablePath(xjs_engine* eng, const std::wstring& raw,
+                                const std::wstring& more, std::wstring* outPath)
 {
     static const wchar_t* const closers[] = {
         L")", L"）", L"]", L"】", L"」", L"』", L"》", L"'", L"\"", L"!", L"。"
@@ -1484,31 +1605,165 @@ static int ResolveClickablePath(xjs_engine* eng, const std::wstring& raw, std::w
                ch == L'\'' || ch == L'"' || ch == 0x2026 /* … */ ||
                ch == L'，' || ch == L'。' || ch == L'；' || ch == L'！' || ch == L'？';
     };
-    std::wstring cur = raw;
-    for (;;) {
-        /* 每层两轮: 0=原样 1=剥尾部普通标点 (空格断词把 "F:\a\b," 连逗号吞进链接的余量);
-         * 每轮先试整串再试补一个闭合标点 (前端剥离的 ")" 真是名字一部分时还原)。 */
-        int f = -999;
-        bool done = false;
-        for (int round = 0; round < 2 && !done; round++) {
-            std::wstring p = cur;
-            if (round == 1)
-                while (!p.empty() && trailPunct(p.back())) p.pop_back();
-            if (p.empty()) continue;
-            if (hit(p, &f)) { done = true; break; }
-            for (const wchar_t* cl : closers) {
-                if (hit(p + cl, &f)) { done = true; break; }
+    /* 正文截断变体: 第一个"全角标点/句读后紧跟汉字或另一全角标点"处切 —
+     * 前端已不再猜名字边界, 候选常把路径后的正文 ("F:\a\b，然后查看") 整段吞进来,
+     * 这里作为存在性检验的变体还原 (名字里真含全角标点的由全量候选先命中, 轮不到它) */
+    auto proseCut = [](const std::wstring& s)->std::wstring {
+        auto isCm = [](wchar_t c) {
+            return (c >= 0x3000 && c <= 0x303F) || (c >= 0xFF01 && c <= 0xFF5E) || (c >= 0x2010 && c <= 0x2027);
+        };
+        auto isCjk = [](wchar_t c) {
+            return (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF);
+        };
+        for (size_t i = 0; i + 1 < s.size(); i++)
+            if (isCm(s[i]) && (isCjk(s[i + 1]) || isCm(s[i + 1])))
+                return s.substr(0, i);
+        return s;
+    };
+    /* 失衡闭合标点剥除变体 (正文括号包住了路径: "(见 F:\a\b) 其余" 的 ")") —
+     * 平衡的名字后缀 ("美人鱼 (2016)") 不动; 逐个剥并重数配平 */
+    auto stripUnbalanced = [](const std::wstring& s)->std::wstring {
+        const wchar_t* cl = L")）]}】」』》〉";
+        const wchar_t* op = L"(（[{【「『《〈";
+        std::wstring out = s;
+        for (;;) {
+            if (out.empty()) break;
+            const wchar_t* cp = wcschr(cl, out.back());
+            if (!cp) break;
+            wchar_t c = out.back(), o = op[cp - cl];
+            long no = 0, nc = 0;
+            for (wchar_t ch : out) { if (ch == o) no++; else if (ch == c) nc++; }
+            if (nc > no) out.pop_back(); else break;
+        }
+        return out;
+    };
+    auto tryOne = [&](const std::wstring& p)->int {           /* ≥0=fid -1=fs存在 -2=不中 */
+        std::wstring vars[3];                                 /* 全量优先 (名字里的全角标点靠它命中) */
+        int nv = 0;
+        vars[nv++] = p;
+        {
+            std::wstring pc = proseCut(p);
+            if (pc.size() < p.size() && pc.size() >= 4) vars[nv++] = pc;
+            std::wstring ub = stripUnbalanced(p);
+            if (ub.size() < p.size() && ub != pc) vars[nv++] = ub;
+        }
+        for (int vi = 0; vi < nv; vi++) {
+            int f = -999;
+            if (hit(vars[vi], &f)) return f;
+            for (const wchar_t* cl : closers)
+                if (hit(vars[vi] + cl, &f)) return f;
+        }
+        std::wstring p0 = p;   /* 尾部普通标点剥除变体 (空格断词把 "F:\a\b," 连逗号吞进链接的余量) */
+        while (!p0.empty() && trailPunct(p0.back())) p0.pop_back();
+        if (!p0.empty() && p0 != p) {
+            int f = -999;
+            if (hit(p0, &f)) return f;
+            for (const wchar_t* cl : closers)
+                if (hit(p0 + cl, &f)) return f;
+        }
+        return -2;
+    };
+    /* more 词 (≤4, 空白分隔; more 由前端截自链接后紧随的原文, ≤100 字符) */
+    std::wstring words[4];
+    int nw = 0;
+    for (size_t s = 0; s < more.size() && nw < 4; ) {
+        while (s < more.size() && iswspace(more[s])) s++;
+        size_t e = s;
+        while (e < more.size() && !iswspace(more[e])) e++;
+        if (e > s) words[nw++] = more.substr(s, e - s);
+        s = e;
+    }
+    int f;
+    int fuzzyLeft = 2;   /* 模糊校正限额/路径 (父目录枚举有成本; 前两层已覆盖 抄写错+粘连 两种漂移) */
+    auto tryLayer = [&](const std::wstring& p)->int {
+        f = tryOne(p);
+        if (f != -2) return f;
+        if (fuzzyLeft > 0) {
+            fuzzyLeft--;
+            std::wstring real;
+            if (FuzzyChildResolve(p, &real)) {
+                f = tryOne(real);   /* 真名再过一遍 hit() (落账 fid/可用路径) */
+                if (f != -2) return f;
             }
         }
-        if (done) return f;
+        return -2;
+    };
+    std::wstring ext = raw;                                   /* ① 向后继续解析 (最长优先) */
+    for (int k = 0; k < nw; k++) {
+        ext += L" ";
+        ext += words[k];
+        f = tryOne(ext);
+        if (f != -2) return f;
+    }
+    f = tryLayer(raw);                                        /* ② 整串 (+名字模糊校正) */
+    if (f != -2) return f;
+    std::wstring cur = raw;                                   /* ③ 向前回退 (去尾词, 每层 +模糊校正) */
+    for (;;) {
         size_t sp = cur.find_last_of(L' ');
         if (sp == std::wstring::npos) break;
         std::wstring head = cur.substr(0, sp);
         while (!head.empty() && (head.back() == L' ' || head.back() == L'\t')) head.pop_back();
         if (head.empty()) break;
         cur = head;
+        f = tryLayer(cur);
+        if (f != -2) return f;
     }
     return -2;
+}
+
+/* ---- 引擎图标 → data URL (PNG, 引擎 GetFileIco 同步模式) ----
+ * 缓存键 = "<dir>"/"<noext>"/小写扩展名 (同类文件同图标, 路径级缓存会爆; 超 256 项整表清,
+ * 校验是周期性的自动重建)。新提取按批限额 (fresh 计数) — UI 线程一次解几十个图标会卡帧;
+ * agent 占用 g_agentCs 时 AgentFetchFileIco 返回 NULL 即跳过, 下一轮校验再试。 */
+static std::map<std::wstring, std::wstring> g_icoCache;
+static SRWLOCK g_icoCs = SRWLOCK_INIT;
+static bool IcoDataUrlOf(int fid, const std::wstring& path, int* fresh, std::wstring* out) {
+    if (fid < 0 || path.size() < 3) return false;
+    bool isDir = false;
+    DWORD a = GetFileAttributesW(path.c_str());
+    if (a != INVALID_FILE_ATTRIBUTES) isDir = (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    std::wstring key = isDir ? L"<dir>" : L"<noext>";
+    if (!isDir) {
+        size_t dot = path.find_last_of(L'.');
+        size_t seg = path.find_last_of(L'\\');
+        if (dot != std::wstring::npos && (seg == std::wstring::npos || dot > seg + 1)) {
+            std::wstring e = path.substr(dot + 1);
+            if (e.size() <= 8) {
+                for (auto& c : e) c = (wchar_t)towlower(c);
+                key = e;
+            }
+        }
+    }
+    {
+        AcquireSRWLockShared(&g_icoCs);
+        auto it = g_icoCache.find(key);
+        if (it != g_icoCache.end()) { *out = it->second; ReleaseSRWLockShared(&g_icoCs); return true; }
+        ReleaseSRWLockShared(&g_icoCs);
+    }
+    if (*fresh <= 0) return false;
+    int len = 0;
+    const void* png = AgentFetchFileIco(fid, &len);
+    if (!png || len <= 0) return false;
+    static const wchar_t* b64 = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::wstring url = L"data:image/png;base64,";
+    url.reserve((size_t)len * 4 / 3 + 32);
+    const unsigned char* p = (const unsigned char*)png;
+    for (int i = 0; i < len; i += 3) {
+        unsigned b0 = p[i], b1 = i + 1 < len ? p[i + 1] : 0, b2 = i + 2 < len ? p[i + 2] : 0;
+        url += b64[b0 >> 2];
+        url += b64[((b0 & 3) << 4) | (b1 >> 4)];
+        url += i + 1 < len ? b64[((b1 & 15) << 2) | (b2 >> 6)] : L'=';
+        url += i + 2 < len ? b64[b2 & 63] : L'=';
+    }
+    {
+        AcquireSRWLockExclusive(&g_icoCs);
+        if (g_icoCache.size() > 256) g_icoCache.clear();
+        g_icoCache[key] = url;
+        ReleaseSRWLockExclusive(&g_icoCs);
+    }
+    *fresh -= 1;
+    *out = url;
+    return true;
 }
 
 void WebCommand(AiSess* s, const Jv& msg) {
@@ -1519,7 +1774,22 @@ void WebCommand(AiSess* s, const Jv& msg) {
     }
     if (!s->bootDone) return;   /* ready 之前的命令一律忽略 */
     if (c == L"send") {
-        SendCurrent(s, msg.S(L"text"));
+        /* atts = 多模态附件 (k=kind, u=data URL, n=文件名); 越闸项 SendCurrent 里剔除并提示 */
+        std::vector<AiAttach> atts;
+        const Jv* av = msg.Get(L"atts");
+        if (av && av->t == 4) {
+            for (const Jv& e : av->arr) {
+                if (e.t != 5) continue;
+                AiAttach a;
+                const Jv* k = e.Get(L"k");
+                a.kind = (k && k->t == 2) ? (int)k->num : 0;
+                a.dataUrl = e.S(L"u");
+                a.name = e.S(L"n");
+                if (a.dataUrl.empty()) continue;
+                atts.push_back(std::move(a));
+            }
+        }
+        SendCurrent(s, msg.S(L"text"), &atts);
         return;
     }
     if (c == L"stop") {
@@ -1550,6 +1820,9 @@ void WebCommand(AiSess* s, const Jv& msg) {
         if ((v = msg.Get(L"ctx")) != NULL && v->t == 2) p->ctx = CfgClampTok(v->num);
         if ((v = msg.Get(L"max")) != NULL && v->t == 2) p->maxOut = CfgClampTok(v->num);
         if ((v = msg.Get(L"reasoning")) != NULL && v->t == 1) g_cfg.reasoning = v->b;
+        if ((v = msg.Get(L"img")) != NULL && v->t == 1) p->img = v->b;
+        if ((v = msg.Get(L"video")) != NULL && v->t == 1) p->video = v->b;
+        if ((v = msg.Get(L"audio")) != NULL && v->t == 1) p->audio = v->b;
         CfgApplyActive();
         CfgSave();
         CfgBroadcast();
@@ -1572,6 +1845,9 @@ void WebCommand(AiSess* s, const Jv& msg) {
                 np.model = src->model;
                 np.ctx = src->ctx;
                 np.maxOut = src->maxOut;
+                np.img = src->img;
+                np.video = src->video;
+                np.audio = src->audio;
             }
         }
         g_cfg.profiles.push_back(std::move(np));
@@ -1737,9 +2013,37 @@ void WebCommand(AiSess* s, const Jv& msg) {
         for (int i = lastA - 1; i >= 0; i--)
             if (s->msgs[i].role == 0) { lastU = i; break; }
         if (lastU < 0) return;
+        std::vector<AiAttach> atts = s->msgs[lastU].atts;   /* 重跑同一条提问: 附件原样带上 */
         std::wstring prompt = s->msgs[lastU].text;
         s->msgs.resize(lastU);
-        SendCurrent(s, prompt);
+        SendCurrent(s, prompt, &atts);
+        return;
+    }
+    if (c == L"delturn") {   /* 用户手动删除一轮问答 (提问 + 其后全部回复, 含工具卡片组):
+                                真正从 s->msgs 移除 = 后续请求的上下文同步精简;
+                                二次确认在前端 (悬停删除钮两步确认), 这里只守发送中的闸 */
+        if (s->sending) { WebToast(s, "回答进行中, 请先停止或等完成后再删除", XJS_PLUGIN_TOAST_WARN); return; }
+        const Jv* iv = msg.Get(L"mi");
+        int mi = (iv && iv->t == 2) ? (int)iv->num : -1;
+        if (mi < 0 || mi >= (int)s->msgs.size() || s->msgs[mi].role != 0) return;
+        int end = mi + 1;
+        while (end < (int)s->msgs.size() && s->msgs[end].role != 0) end++;
+        s->msgs.erase(s->msgs.begin() + mi, s->msgs.begin() + end);
+        if (s->stepBase > (int)s->msgs.size()) s->stepBase = (int)s->msgs.size();
+        if (s->msgs.empty()) {
+            /* 删光 = 会话一并移出历史: SessSaveConv 对空会话跳过, 不删则旧内容残留 g_hist,
+               重开面板被删的问答又回来 — 与侧栏"删除对话"同口径 */
+            for (size_t i = 0; i < g_hist.size(); i++)
+                if (g_hist[i].id == s->curId) { g_hist.erase(g_hist.begin() + i); break; }
+            s->curId = 0;
+        }
+        else {
+            SessSaveConv(s);   /* 先 upsert 修剪后的对话 (否则 HistSave 落的是旧副本) */
+        }
+        HistSave();
+        WebTouch(s);
+        WebSyncSession(s);
+        WebSyncHist();
         return;
     }
     if (c == L"new") {
@@ -1846,10 +2150,10 @@ void WebCommand(AiSess* s, const Jv& msg) {
         int fid = -1;
         if (idv && idv->t == 2) fid = (int)idv->num;
         else if (!path.empty()) {
-            /* 链接带路径: 过解析器 (空格回退取最长存在前缀 / 补被剥的闭合标点);
+            /* 链接带路径: 过解析梯子 (more 向后并 → 整串 → 空格回退, 取最长存在者);
              * ≥0=索引命中给 fid 走宿主 OpenFile; -1=索引外但文件系统存在, path 已定为可用路径;
              * -2=全不中, path 保持原文走下方 ShellExecute 失败提示 */
-            int rf = ResolveClickablePath(eng, path, &path);
+            int rf = ResolveClickablePath(eng, path, msg.S(L"more"), &path);
             if (rf >= 0) fid = rf;
         }
         int rc = (fid >= 0 && g_host) ? g_host->OpenFile(g_ctx, s->tok, fid, isReveal ? 1 : 0)
@@ -1889,9 +2193,75 @@ void WebCommand(AiSess* s, const Jv& msg) {
             if (p) path = W8(p);
         }
         else if (!path.empty())
-            ResolveClickablePath(xjs_GetDefaultEngine(), path, &path);   /* 全不中(-2) = 照抄原文复制 */
+            ResolveClickablePath(xjs_GetDefaultEngine(), path, msg.S(L"more"), &path);   /* 全不中(-2) = 照抄原文复制 */
         if (!path.empty() && g_host)
             g_host->ClipboardSetText(g_ctx, U8(path).c_str());
+        return;
+    }
+    /* ---- 路径存在性校验 (前端 linkifyPaths 的批量后端, 2026-09-25 用户口径) ----
+     * 解析出的候选先问真实存在性: 不存在按解析梯子继续试 (more 向后并/去尾词回退/名字模糊校正),
+     * 仍不存在 = 前端把该"链接"退回纯文本 (不画下划线不做点击, 不对字符做特殊处理)。
+     * 请求 {c:'pathcheck', ps:[路径…], ids:[FileId 串…]}; 回 {t:'pathcheck', r:[{k:'p'|'i', v, ok, q, ic}]}。 */
+    if (c == L"pathcheck") {
+        if (!s->web) return;
+        const Jv* ps = msg.Get(L"ps");
+        const Jv* ids = msg.Get(L"ids");
+        picojson::array r;
+        int n = 0;
+        int fresh = 16;   /* 本批新提取图标配额 (缓存命中不占) */
+        if (ps && ps->t == 4) {
+            xjs_engine* eng = xjs_GetDefaultEngine();
+            for (const Jv& e : ps->arr) {
+                if (n >= 64) break;                        /* 单批上限 (余量留在前端下一轮) */
+                if (e.t != 3 || e.str.size() < 4) continue;
+                std::wstring q;
+                int rf = ResolveClickablePath(eng, e.str, L"", &q);
+                picojson::object o;
+                o["k"] = JS(L"p");
+                o["v"] = JS(e.str);
+                o["ok"] = JB(rf != -2);
+                if (rf != -2) {
+                    if (q != e.str) o["q"] = JS(q);        /* 梯子解析到不同候选: 前端校正显示 */
+                    int fid = rf >= 0 ? rf
+                                      : (eng ? xjs_db_GetFileIdByPath(eng, U8(q).c_str()) : -1);
+                    std::wstring ic;
+                    if (fid >= 0 && IcoDataUrlOf(fid, q, &fresh, &ic)) o["ic"] = JS(ic);
+                }
+                r.push_back(picojson::value(o));
+                n++;
+            }
+        }
+        if (ids && ids->t == 4) {
+            xjs_engine* eng = xjs_GetDefaultEngine();
+            for (const Jv& e : ids->arr) {
+                if (n >= 128) break;
+                if (e.t != 3) continue;
+                picojson::object o;
+                o["k"] = JS(L"i");
+                o["v"] = JS(e.str);
+                bool ok = false;
+                if (eng && e.str.size() <= 10) {
+                    wchar_t* endp = NULL;
+                    long long fid = wcstoll(e.str.c_str(), &endp, 10);
+                    if (endp && *endp == 0 && fid > 0 && fid < INT_MAX) {
+                        const char* p8 = xjs_db_GetPath(eng, (int)fid);
+                        if (p8) {   /* ID 失效 (重建索引) = 死链; 活链顺路带图标 */
+                            std::wstring rp = W8(p8);
+                            ok = true;
+                            std::wstring ic;
+                            if (IcoDataUrlOf((int)fid, rp, &fresh, &ic)) o["ic"] = JS(ic);
+                        }
+                    }
+                }
+                o["ok"] = JB(ok);
+                r.push_back(picojson::value(o));
+                n++;
+            }
+        }
+        picojson::object o;
+        o["t"] = picojson::value("pathcheck");
+        o["r"] = picojson::value(r);
+        WebPost(s, picojson::value(o).serialize());
         return;
     }
 }

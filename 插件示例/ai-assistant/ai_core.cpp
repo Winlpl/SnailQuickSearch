@@ -211,6 +211,9 @@ void CfgSave() {
         if (!p.apiKey.empty()) o["apiKeyEnc"] = enc(p.apiKey);
         o["ctx"] = JN(p.ctx);
         o["maxOut"] = JN(p.maxOut);
+        o["img"] = JB(p.img);
+        o["video"] = JB(p.video);
+        o["audio"] = JB(p.audio);
         profs.push_back(picojson::value(o));
     }
     root["profiles"] = picojson::value(profs);
@@ -259,6 +262,9 @@ void CfgApplyActive() {
         g_cfg.apiKey = p->apiKey;
         g_cfg.ctx = p->ctx;
         g_cfg.maxOut = p->maxOut;
+        g_cfg.img = p->img;
+        g_cfg.video = p->video;
+        g_cfg.audio = p->audio;
     } else {
         g_cfg.activeId.clear();
         g_cfg.baseUrl.clear();
@@ -266,6 +272,9 @@ void CfgApplyActive() {
         g_cfg.apiKey.clear();
         g_cfg.ctx = 0;
         g_cfg.maxOut = 0;
+        g_cfg.img = false;
+        g_cfg.video = false;
+        g_cfg.audio = false;
     }
 }
 void CfgLoad() {
@@ -306,6 +315,12 @@ void CfgLoad() {
                     if (cv && cv->t == 2) p.ctx = CfgClampTok(cv->num);
                     const Jv* mv = pv.Get(L"maxOut");
                     if (mv && mv->t == 2) p.maxOut = CfgClampTok(mv->num);
+                    const Jv* iv = pv.Get(L"img");
+                    if (iv && iv->t == 1) p.img = iv->b;
+                    const Jv* vd = pv.Get(L"video");
+                    if (vd && vd->t == 1) p.video = vd->b;
+                    const Jv* au = pv.Get(L"audio");
+                    if (au && au->t == 1) p.audio = au->b;
                     p.apiKey = DecryptKeyStr(pv.S(L"apiKeyEnc"));
                     g_cfg.profiles.push_back(std::move(p));
                 }
@@ -399,6 +414,18 @@ void HistSave() {
             }
             om["r"] = JN(m.role);
             om["text"] = JS(m.text);
+            if (!m.atts.empty()) {
+                /* 多模态附件 (dataUrl 可能已被 HistUpsert 的存储预算清空 = 占位, 照存) */
+                picojson::array atts;
+                for (const AiAttach& a : m.atts) {
+                    picojson::object oa;
+                    oa["k"] = JN(a.kind);
+                    oa["n"] = JS(a.name);
+                    oa["u"] = JS(a.dataUrl);
+                    atts.push_back(picojson::value(oa));
+                }
+                om["att"] = picojson::value(atts);
+            }
             if (!m.reason.empty()) om["reason"] = JS(m.reason);
             msgs.push_back(picojson::value(om));
         }
@@ -415,10 +442,12 @@ void HistSave() {
 void HistLoad() {
     g_hist.clear();
     if (!g_host) return;
-    /* 上限裁剪在装载侧做: 存储值无硬上限, 读入 16MB 足够 30 会话满载 (含工具卡片样本路径) */
-    std::string buf;
-    buf.resize(16 * 1024 * 1024);
-    int n = g_host->StorageGet(g_ctx, "历史", &buf[0], (int)buf.size() - 1);
+    /* 两步读 (先查长度再取): 多模态附件随历史落库后, 会话包远超旧估的 16MB —
+     * 固定上限缓冲读截断 = JSON 解析失败 = 全部历史一次丢光 (CfgLoad 同口径) */
+    int n = g_host->StorageGet(g_ctx, "历史", NULL, 0);
+    if (n <= 0) return;
+    std::string buf((size_t)n + 1, '\0');
+    n = g_host->StorageGet(g_ctx, "历史", &buf[0], n);
     if (n <= 0) return;
     buf.resize((size_t)n);
     buf.push_back(0);
@@ -493,7 +522,20 @@ void HistLoad() {
                     m.role = (jr && jr->num == 1) ? 1 : 0;
                     m.text = jmsg.S(L"text");
                     m.reason = jmsg.S(L"reason");
-                    if (m.text.empty() && m.reason.empty()) continue;
+                    const Jv* ja2 = jmsg.Get(L"att");
+                    if (ja2 && ja2->t == 4) {
+                        for (auto& jatt : ja2->arr) {
+                            if (jatt.t != 5) continue;
+                            AiAttach a;
+                            const Jv* jk = jatt.Get(L"k");
+                            a.kind = (jk && jk->t == 2) ? (int)jk->num : 0;
+                            if (a.kind < 0 || a.kind > 2) a.kind = 0;
+                            a.name = jatt.S(L"n");
+                            a.dataUrl = jatt.S(L"u");
+                            m.atts.push_back(std::move(a));
+                        }
+                    }
+                    if (m.text.empty() && m.reason.empty() && m.atts.empty()) continue;
                 }
                 if (c.msgs.size() < AI_MSG_MAX) c.msgs.push_back(m);
             }
@@ -505,11 +547,23 @@ void HistLoad() {
     }
     while (g_hist.size() > AI_CONV_MAX) g_hist.erase(g_hist.begin());   /* 最旧丢弃 */
 }
-/* 当前会话落库 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具卡片组 (role==2) 一并落库 */
+/* 当前会话落库 (curId=0 → 新建; 否则原位更新), 返回会话 id; 工具卡片组 (role==2) 一并落库。
+ * 存储预算: 会话内全部附件 dataUrl 总量超 AI_ATT_HIST_BUDGET 时, 最旧的先清成占位
+ * (kind/name 留着渲染"已清理", dataUrl 清空 = 不再上请求) — 防大视频把存储值撑失控。 */
 unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>& msgs) {
     std::wstring firstUser;
     for (auto& m : msgs)
         if (m.role == 0 && !m.text.empty()) { firstUser = m.text; break; }
+    if (firstUser.empty()) {
+        /* 纯附件消息 (无文字): 标题按附件类型兜底, 否则 HistUpsert 早退 = 不落库 */
+        for (auto& m : msgs) {
+            if (m.role != 0 || m.atts.empty()) continue;
+            static const wchar_t* KIND_NAME[3] = { L"图片", L"视频", L"音频" };
+            firstUser = L"[" + std::wstring(KIND_NAME[m.atts.front().kind % 3]) + L"]";
+            if (m.atts.size() > 1) firstUser += L"×" + std::to_wstring(m.atts.size());
+            break;
+        }
+    }
     if (firstUser.empty()) return curId;
     AiConv c;
     c.id = curId ? curId : g_nextConvId++;
@@ -520,6 +574,16 @@ unsigned long long HistUpsert(unsigned long long curId, const std::vector<AiMsg>
         c.msgs.push_back(m);
     }
     while (c.msgs.size() > AI_MSG_MAX) c.msgs.erase(c.msgs.begin());
+    size_t budget = AI_ATT_HIST_BUDGET;
+    for (auto& m : c.msgs) {   /* 从最旧往新扫, 超预算的部分清 dataUrl */
+        if (m.role != 0 || m.atts.empty()) continue;
+        for (auto& a : m.atts) {
+            size_t sz = a.dataUrl.size();
+            if (budget >= sz) { budget -= sz; continue; }
+            a.dataUrl.clear();   /* 占位: 渲染"已清理", 请求侧跳过 */
+            budget = 0;
+        }
+    }
     for (size_t i = 0; i < g_hist.size(); i++) {
         if (g_hist[i].id == c.id) { g_hist[i] = c; HistSave(); return c.id; }
     }

@@ -163,6 +163,11 @@ struct AiProfile {
     std::wstring model;
     long long ctx = 0;       /* 上下文长度 token; 0 = 按模型名推断 (只影响用量"剩余"显示) */
     long long maxOut = 0;    /* 最大输出 token; 0 = 不发送 max_output_tokens 参数 */
+    /* 多模态输入能力 (按模型实际支持勾选; 默认全关 = 显式声明, 旧档案缺键同样视为关):
+     * 只管"用户能不能附这种输入" — 历史里已有的附件在请求里按同一开关取舍 (关了就不发对应 part)。 */
+    bool img = false;        /* 图片输入 (粘贴/附带图片 → input_image) */
+    bool video = false;      /* 视频输入 (附带视频文件 → input_file data URL) */
+    bool audio = false;      /* 音频输入 (附带音频文件 → input_file data URL) */
 };
 
 struct AiCfg {
@@ -172,6 +177,9 @@ struct AiCfg {
     std::wstring apiKey;
     long long ctx = 0;        /* 活动档案的上下文长度 (派生镜像) */
     long long maxOut = 0;     /* 活动档案的最大输出 (派生镜像) */
+    bool img = false;         /* 活动档案的多模态能力 (派生镜像, 同 ctx/maxOut 口径) */
+    bool video = false;
+    bool audio = false;
     bool reasoning = false;   /* 深度思考: true=effort high, false=none (DeepSeek 须显式传; 进程级, 不随档案) */
     int filePolicy = 2;       /* 文件操作权限 (对话区下方分段控件): 0=禁用 1=只读 2=询问 3=允许;
                                  禁用/只读拒绝 open_file 与 copy_paths, 询问先拒后给确认卡, 允许直接执行 */
@@ -224,9 +232,18 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
+/* 用户消息附带的多模态输入 (随历史落库; 图片经前端压缩, 视频/音频直接 data URL)。
+ * dataUrl = "data:<mime>;base64,<...>" — 请求体 (input_image/input_file) 与
+ * 气泡渲染 (<img src>) 共用同一份; 落库后被存储预算裁剪清空 = 只留占位 (不再上请求)。 */
+struct AiAttach {
+    int kind = 0;             /* 0=图片 1=视频 2=音频 */
+    std::wstring name;        /* 原始文件名 (input_file 的 filename 与卡片文案; 图片可为空) */
+    std::wstring dataUrl;
+};
 struct AiMsg {
     int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 不重发给模型) */
     std::wstring text;
+    std::vector<AiAttach> atts; /* role==0: 附带的图片/视频/音频 (多模态输入, 上限 AI_ATT_MAX 个) */
     std::wstring reason;        /* 推理过程 (只在折叠块显示, 从不发送/入库发送体) */
     bool reasonOpen = false;    /* 折叠块展开态 (流式中自动展开, 完成后收起) */
     bool err = false;           /* 失败消息 (气泡转错误配色) */
@@ -242,6 +259,14 @@ extern std::vector<AiConv> g_hist;
 extern unsigned long long g_nextConvId;
 static const size_t AI_CONV_MAX = 30, AI_MSG_MAX = 200, AI_TEXT_MAX = 60000;
 static const int AI_AGENT_MAX_TURNS = 12;  /* agent 工具循环上限 (最后一轮省略 tools 强制收尾); 12 轮给统计任务留够粗筛/纠错余量 */
+/* 多模态附件上限 (dataUrl 字符数; 前端已压缩图片, 这里是硬闸 — 单条消息总量与历史存储都要够得着):
+ * 历史按会话还有总预算 AI_ATT_HIST_BUDGET (HistUpsert 里最旧的先清成占位), 防大视频把
+ * 存储/请求体撑爆。 */
+static const int AI_ATT_MAX = 4;
+static const size_t AI_ATT_IMG_MAX = 4u * 1024 * 1024;
+static const size_t AI_ATT_VIDEO_MAX = 24u * 1024 * 1024;
+static const size_t AI_ATT_AUDIO_MAX = 12u * 1024 * 1024;
+static const size_t AI_ATT_HIST_BUDGET = 48u * 1024 * 1024;
 
 void HistSave();
 void HistLoad();
@@ -340,7 +365,8 @@ void AbortSend(AiSess* s);
 void SessSaveConv(AiSess* s);
 void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, float scale);
 void SessClose(AiSess* s);
-void SendCurrent(AiSess* s, const std::wstring& text);
+void SendCurrent(AiSess* s, const std::wstring& text, const std::vector<AiAttach>* atts = NULL);
+                                  /* atts = 本条消息附带的多模态输入 (NULL=无); 越闸项剔除并提示 */
 bool AiMsgWndCreate();
 void WorkerMain(AiJob* j);     /* agent 工作线程入口 (SendCurrent 起线程; 实现ai_agent.cpp) */
 
@@ -389,6 +415,9 @@ void WebTouch(AiSess* s);                         /* 会话数据结构性变化
 void WebToast(AiSess* s, const char* utf8, int kind);
                                                   /* 页面内提示 (kind=XJS_PLUGIN_TOAST_*; 面板开着时宿主 Toast 被浏览器子窗盖住) */
 void WebCommand(AiSess* s, const Jv& msg);        /* JS 命令分发 (WebMessageReceived 回调) */
+const void* AgentFetchFileIco(int fileId, int* outLen);
+                                                  /* UI 线程取引擎图标 PNG (pathcheck 用, 定义 ai_agent.cpp):
+                                                   * agent 忙 TryEnter 失败 = NULL, 本轮放弃下轮再试 */
 void WebPushSkin(AiSess* s);                      /* 皮肤变化后向该会话重推调色 (EVT_SKIN) */
 std::wstring WebPaletteJson(AiSess* s);           /* 调色 → {"bg":"#..",...} */
 std::wstring WebCfgJson();                        /* g_cfg → 活动派生值 + 档案表 (密钥只出 hasKey) */

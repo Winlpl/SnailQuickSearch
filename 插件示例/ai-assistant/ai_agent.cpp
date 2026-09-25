@@ -693,6 +693,30 @@ static bool LuaHasTopLevelReturn(const char* s) {
     return false;
 }
 
+/* pathcheck 的图标供给 (ai_web.cpp 在 UI 线程调): TryEnter g_agentCs — agent 正在跑工具就放弃
+ * (本轮无图标, 之后的校验轮再试; 绝不等锁 — UI 线程阻塞等长查询 = 卡死, 返工级)。
+ * 拿到锁才懒建私有结果对象 (与 run_search 同一门槛: 库加载/扫描期不建), itemIndex=-1 同步模式
+ * 直接取真实图标 PNG (引擎自带图标缓存; 返回指针线程本地, 调用方必须立即拷贝)。 */
+const void* AgentFetchFileIco(int fileId, int* outLen) {
+    *outLen = 0;
+    if (fileId <= 0) return NULL;
+    if (!TryEnterCriticalSection(&g_agentCs)) return NULL;
+    const void* png = NULL;
+    xjs_engine* eng = xjs_GetDefaultEngine();
+    if (eng) {
+        if (g_agentRes && !xjs_result_IsEffective(g_agentRes)) g_agentRes = NULL;
+        if (!g_agentRes) {
+            int dbState = xjs_db_GetEngineState(eng);
+            if (dbState != XJS_DB_STATE_LOADING && dbState != XJS_DB_STATE_SCANNING)
+                g_agentRes = xjs_result_Create(eng);
+        }
+        if (g_agentRes)
+            png = xjs_result_GetFileIco(g_agentRes, fileId, -1, 16, outLen, NULL);
+    }
+    LeaveCriticalSection(&g_agentCs);
+    return png;
+}
+
 /* run_search 实体; 返回空串 = 成功, 否则 = 错误描述 (调用方持 g_agentCs) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query, AiToolStep* st) {
     if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
@@ -1582,7 +1606,7 @@ static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st
 }
 
 /* 系统提示词 — "常驻骨架 + Lua 规范附录" (2026-09-25 用户口径: Lua 提示词默认进全局提示词):
- *   常驻 = 角色目标 / 工作方式 / 工具目录(只有名字+一句话, 细节在各工具 description 里) /
+ *   常驻 = 角色目标 / 工作方式 / 模糊联想(答案不是文件名时的四步流程) / 工具目录(只有名字+一句话, 细节在各工具 description 里) /
  *          跨工具规则 / 可点击输出 / 语法速查 / Lua 速查 — 全是"每轮都要用"的行为契约。
  *   附录 = 引擎内嵌 Lua 规范全文, 由 BuildInstructions 拼在骨架之后 (xjs_Query_GetPrompt(2)
  *          合集, 旧引擎无合集回落 0/1 拼接; 规范与骨架速查冲突时以规范为准的适配说明一并写入);
@@ -1606,7 +1630,21 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"**用户没让改就不要替用户提交任何调整**。搜索模式管理与任务类操作（搜索/打开文件/复制路径）仍直接执行。\n"
     L"- 工具调用轮数有限，别在一种写法上反复试错：同一口径连续两次拿不到有效数据，立即换搜索模式（或重读 Lua 规范附录）。\n"
     L"- 得到足够信息后用最终答复总结：找到什么、在哪、关键数据；推荐执行的搜索用 xjs:// 搜索链接给出（见《可点击输出》）。\n"
+    L"- 用户消息可能附带图片/视频/音频（能否读取取决于模型能力）：图片直接看内容；涉及图片内容的问题据实描述，\n"
+    L"  看不清或图里没有的信息如实说明，绝不编造。\n"
     L"- 与任务无关的问题直接回答，不要调用工具。\n"
+    L"\n"
+    L"## 模糊/联想类需求（答案不是文件名时）\n"
+    L"\"帮我找一下黄圣依参演过的电影\"这类问题，答案不是文件名——把原句整段当搜索词必然搜不到东西。按四步走：\n"
+    L"1. 提取实体：从问题里挑出关键对象（人物/作品/系列/歌手/作者/公司/地点等），例：黄圣依。\n"
+    L"2. 联想候选：用你自己的知识把需求展开成**具体候选清单**——人物→其参演/执导/演唱的作品名；系列→各部名称；"
+    L"歌手→专辑/歌名；作者/公司→著作/出品名。把握大的排前面。\n"
+    L"3. 逐个实搜（run_search）：按候选名搜——wildcard 直接写名称（自动包含匹配）或 SQL `FName ILIKE '%片名%'`；"
+    L"顺手把实体名本身也搜一遍兜底（文件名/目录里常带演员名/系列字样）；名字太常见、结果太宽泛时加条件收窄"
+    L"（FileType/Ext/目录/年份），易混候选优先用带年份/副标题的完整名。一轮可以连发多个不同候选的搜索，省轮数。\n"
+    L"4. 汇总诚实作答：只列磁盘真实命中的文件（FileId 链接），某候选命中多时报总数；知识里有但没搜到的明确写"
+    L"\"索引中未找到\"；联想不确定的说明依据——绝不编造文件名、绝不把联想当搜索结果。\n"
+    L"- 轮数有限：优先搜把握大的候选，结果足够成答就收尾，别耗在弱把握候选上。\n"
     L"\n"
     L"## 工具目录（只有名字与一句话；参数细节看各工具的 description，用前先读）\n"
     L"- get_lua_spec：重新取 Lua 脚本规范全文（规范已内置在本提示词文末附录，写脚本前先读附录；一般无需调用）——"
@@ -1905,11 +1943,43 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
     };
     picojson::array input;
     for (auto& m : j->hist) {
-        picojson::object content;
-        content["type"] = picojson::value(m.role ? "output_text" : "input_text");
-        content["text"] = JS(m.text);
+        /* content 数组 = 文字 + 多模态附件 (图片→input_image; 视频/音频→input_file data URL)。
+         * 附件按活动档案能力勾选取舍: 关了就不发对应 part (切档后的旧消息不炸请求);
+         * dataUrl 空 = 已被历史存储预算清空的占位, 跳过。 */
         picojson::array ca;
-        ca.push_back(picojson::value(content));
+        if (!m.text.empty()) {
+            picojson::object content;
+            content["type"] = picojson::value(m.role ? "output_text" : "input_text");
+            content["text"] = JS(m.text);
+            ca.push_back(picojson::value(content));
+        }
+        if (m.role == 0) {
+            for (auto& a : m.atts) {
+                if (a.dataUrl.empty()) continue;
+                picojson::object part;
+                if (a.kind == 0) {
+                    if (!g_cfg.img) continue;
+                    part["type"] = picojson::value("input_image");
+                    part["image_url"] = JS(a.dataUrl);
+                    part["detail"] = picojson::value("auto");
+                } else {
+                    if (a.kind == 1 ? !g_cfg.video : !g_cfg.audio) continue;
+                    part["type"] = picojson::value("input_file");
+                    part["filename"] = JS(a.name.empty() ? (a.kind == 1 ? std::wstring(L"video.bin")
+                                                                        : std::wstring(L"audio.bin"))
+                                                         : a.name);
+                    part["file_data"] = JS(a.dataUrl);
+                }
+                ca.push_back(picojson::value(part));
+            }
+            if (ca.empty() && !m.atts.empty()) {   /* 有附件但全部不可发 (切到能力全关的档案): 文字占位 */
+                picojson::object content;
+                content["type"] = picojson::value("input_text");
+                content["text"] = JS(std::wstring(L"(该条消息附带了图片/视频/音频, 但当前模型未开启对应输入能力, 内容不可见)"));
+                ca.push_back(picojson::value(content));
+            }
+        }
+        if (ca.empty()) continue;
         picojson::object item;
         item["role"] = picojson::value(m.role ? "assistant" : "user");
         item["content"] = picojson::value(ca);

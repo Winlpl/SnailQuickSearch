@@ -78,10 +78,36 @@ void SessClose(AiSess* s) {
     WebSessionDestroy(s);
 }
 
-void SendCurrent(AiSess* s, const std::wstring& textIn) {
+void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAttach>* attsIn) {
     if (s->sending || !g_host) return;
     std::wstring text = TrimW(textIn);
-    if (text.empty()) return;
+    /* 附件闸门 (前端已挡一轮, 这里兜底): 能力勾选/类型/大小/数量 — 越闸项剔除并逐项提示 */
+    std::vector<AiAttach> atts;
+    if (attsIn) {
+        for (const AiAttach& a : *attsIn) {
+            if (atts.size() >= AI_ATT_MAX) {
+                WebToast(s, "每条消息最多 4 个附件, 多余的已忽略", XJS_PLUGIN_TOAST_WARN);
+                break;
+            }
+            static const wchar_t* const MIME[3] = { L"data:image/", L"data:video/", L"data:audio/" };
+            static const wchar_t* const KIND[3] = { L"图片", L"视频", L"音频" };
+            static const size_t CAP[3] = { AI_ATT_IMG_MAX, AI_ATT_VIDEO_MAX, AI_ATT_AUDIO_MAX };
+            if (a.kind < 0 || a.kind > 2 || a.dataUrl.rfind(MIME[a.kind], 0) != 0) continue;   /* 坏条目静默丢 */
+            bool capOn = a.kind == 0 ? g_cfg.img : a.kind == 1 ? g_cfg.video : g_cfg.audio;   /* 活动档案镜像 */
+            if (!capOn) {
+                WebToast(s, U8(std::wstring(L"当前模型未开启") + KIND[a.kind]
+                               + L"输入 (接口设置中勾选), 该附件已忽略").c_str(), XJS_PLUGIN_TOAST_WARN);
+                continue;
+            }
+            if (a.dataUrl.size() > CAP[a.kind]) {
+                WebToast(s, U8(std::wstring(KIND[a.kind]) + L"过大 (超上限), 该附件已忽略").c_str(),
+                         XJS_PLUGIN_TOAST_WARN);
+                continue;
+            }
+            atts.push_back(a);
+        }
+    }
+    if (text.empty() && atts.empty()) return;
     if (g_cfg.apiKey.empty()) {
         WebToast(s, "尚未配置接口密钥 — 请点右上角 接口设置 填写", XJS_PLUGIN_TOAST_WARN);
         return;
@@ -89,6 +115,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn) {
     AiMsg um;
     um.role = 0;
     um.text = text;
+    um.atts = std::move(atts);
     s->msgs.push_back(um);
     WebTouch(s);
     /* 请求要素快照 (线程只读这些; 请求体每轮在 worker 构建 — input 随工具往返增长) */
@@ -121,9 +148,9 @@ void SendCurrent(AiSess* s, const std::wstring& textIn) {
     InterlockedExchange(&j->execPolicy, g_cfg.execPolicy);
     InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
     InterlockedExchange(&j->execDeny, 0);
-    /* 对话快照 (只含 role 0/1 文本消息; 工具往返由 worker 在循环中累计) */
+    /* 对话快照 (只含 role 0/1; 有附件的 role 0 即使无文字也要进上下文; 工具往返由 worker 在循环中累计) */
     for (auto& m : s->msgs)
-        if (m.role != 2 && !m.text.empty()) j->hist.push_back(m);
+        if (m.role != 2 && (!m.text.empty() || !m.atts.empty())) j->hist.push_back(m);
     if (j->hist.size() > 30) j->hist.erase(j->hist.begin(), j->hist.end() - 30);
     while (!j->hist.empty() && j->hist.front().role != 0) j->hist.erase(j->hist.begin());
     s->job = j;
