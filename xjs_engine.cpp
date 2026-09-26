@@ -2284,8 +2284,10 @@ void XjsEngineShutdown(bool warnOnSaveFail) {
         return;
     }
     xjs_sync_AllStop(g_engine, TRUE);
-    /* 保存蜗牛快搜索引库: 先写临时文件, 成功后删原库、临时文件改名顶上 ——
-       保存中途崩溃/断电最多残留一个 .tmp, 原库完整不损坏 (残留 .tmp 由启动加载前清理) */
+    /* 保存蜗牛快搜索引库: 先写临时文件, 成功后 MOVEFILE_REPLACE_EXISTING 原子顶上
+       (同配置 WriteBack 口径) —— 保存中途崩溃/断电最多残留一个 .tmp, 原库完整不损坏。
+       曾用"先删原库再改名": 删除成功后改名失败(杀软短暂锁文件等) = 新旧两库全失,
+       注释"旧库保持不动"在该分支不成立, 已改 (残留 .tmp 由启动加载前清理) */
     std::wstring tmpPath = dbPath + L".tmp";
     std::string utf8 = Utf16ToUtf8(tmpPath.c_str());
     BOOL ok = FALSE;
@@ -2293,12 +2295,10 @@ void XjsEngineShutdown(bool warnOnSaveFail) {
         if (xjs_db_Save(g_engine, utf8.c_str())) { ok = TRUE; break; }
         Sleep(100);
     }
-    if (ok) {
-        DeleteFileW(dbPath.c_str());
-        if (!MoveFileW(tmpPath.c_str(), dbPath.c_str())) ok = FALSE;   /* 同目录改名, 失败即按保存失败口径 */
-    }
+    if (ok && !MoveFileExW(tmpPath.c_str(), dbPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+        ok = FALSE;   /* 原子替换失败即按保存失败口径, 旧库原地不动 */
     if (!ok)
-        DeleteFileW(tmpPath.c_str());   /* 失败删半成品临时文件, 未替换成功的旧库保持不动 */
+        DeleteFileW(tmpPath.c_str());   /* 失败删半成品临时文件, 旧库保持不动 */
     if (!ok && warnOnSaveFail)
         MessageBoxW(g_hWnd, XjsT(L"状态栏.数据库保存失败"), XjsT(L"通用词.警告"), MB_OK | MB_ICONWARNING);
 }
