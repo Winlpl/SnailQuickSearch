@@ -1834,6 +1834,14 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         st->kind = 14;
         return ReadImageToolExec(j, v, st);
     }
+    if (name8 == "web_search") {
+        /* 联网搜索/网页抓取 (ai_net.cpp): 工作线程直跑 WinHTTP, 不碰引擎/宿主/UI;
+           kind 15/16 与卡片样本行 (top = "标题 — URL") 由实体自填 */
+        return WebSearchExec(j, v, st);
+    }
+    if (name8 == "fetch_url") {
+        return FetchUrlExec(j, v, st);
+    }
     if (name8 == "get_lua_spec") {
         /* Lua 规范重读通道 (2026-09-25 起规范全文默认拼进系统提示词附录, 本工具供脚本报错
          * 排查时重读/附录疑似截断时取全文): 引擎内嵌文本工作者线程直读, 无需 UI 编组。
@@ -2130,6 +2138,14 @@ static std::string AgentToolOutput(const std::wstring& err, const AiToolStep& st
  *          合集, 旧引擎无合集回落 0/1 拼接; 规范与骨架速查冲突时以规范为准的适配说明一并写入);
  *          get_lua_spec 工具保留为"重读"通道 (脚本报错排查/怀疑附录被截断时取全文)。
  *   新增工具一律: 加 tools JSON (描述里写全参数语义) + 工具目录加一行; 别再往这里堆细节。 */
+/* 联网工具目录两行 (Agent 设置「联网搜索」开启时插进工具目录 read_image 行之后;
+ * 关闭 = 不插, 提示词字节里就不出现联网工具, tools 数组同步剔除 — 两处口径一致) */
+static const wchar_t* AI_INSTR_WEB =
+    L"- web_search：联网搜索（把查询词发给搜索引擎，返回标题/网址/摘要清单）——时效性问题（新闻/新版本/行情）\n"
+    L"  或本地索引覆盖不到的公开资料时用；摘要只是线索，要引用具体数据前先用 fetch_url 打开对应网址核对；\n"
+    L"  查询词会发给第三方搜索引擎，涉及用户隐私的内容先征得用户同意再搜。\n"
+    L"- fetch_url：抓取一个网页的正文文本（去脚本/样式/标签；与 web_search 配套：先搜索再读详情）。\n";
+
 static const wchar_t* AI_INSTRUCTIONS =
     L"## 角色与目标\n"
     L"你是“蜗牛快搜”内置的 AI 助手(agent 模式)。蜗牛快搜是 Windows 本地文件极速搜索工具：全盘秒级索引，"
@@ -2317,6 +2333,8 @@ static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"copy_paths","description":"把完整路径清单 (每行一条) 复制到剪贴板, 供用户粘贴。不带参数 = 最近一次 run_search 的前 100 条; 也可用 ids (FileId 数组) 或 paths (绝对路径数组) 复制指定清单 (两者可混用, 上限 100 条)。","parameters":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"integer"},"description":"引擎 FileId 数组"},"paths":{"type":"array","items":{"type":"string"},"description":"绝对路径数组"}}}},
   {"type":"function","name":"read_file","description":"读取本地文件的内容给你分析。文本文件自动识别编码 (UTF-8/UTF-16/GBK 等本地编码统一转 UTF-8); docx/pptx/xlsx 自动解包抽取文字 (pptx 带分页标记; xlsx 每行=一行、单元格间制表符, 日期为序列数); 其它二进制 (含 PDF/旧版 doc/xls/ppt) 不支持, 会明确报错不硬猜。文件过大只回传头尾并注明省略量。也可传 id (FileId) 读索引中的文件。受文件操作权限档约束: 「禁用」拒绝。","parameters":{"type":"object","properties":{"path":{"type":"string","description":"文件绝对路径"},"id":{"type":"integer","description":"引擎 FileId (与 path 二选一)"}}}},
   {"type":"function","name":"read_image","description":"把一张本地图片文件注入本对话供你直接查看 (视觉): 截图报错分析、照片内容描述、图表解读等, 用户说\"看看这张图/这个截图\"时用。超过 4MB 或非常见格式会自动压缩转格式 (最长边约 2000px); GIF 取第一帧。需要当前模型开启图片输入能力 (未开启会报错, 如实告知用户)。","parameters":{"type":"object","properties":{"path":{"type":"string","description":"图片文件绝对路径"},"id":{"type":"integer","description":"引擎 FileId (与 path 二选一)"}}}},
+  {"type":"function","name":"web_search","description":"联网搜索: 把查询词发给搜索引擎, 返回结果清单 (标题/网址/摘要)。用于时效性问题 (新闻/软件新版本/价格行情/天气)、本地索引覆盖不到的公开资料、需要核实知识时效的场合。结果 JSON: results=[{title,url,snippet}] (可能少于请求条数)。摘要只是线索: 要引用具体数据前, 先用 fetch_url 打开对应 url 核对正文。本地文件相关的问题仍用 run_search, 不要用联网搜索替代。查询词会发给第三方搜索引擎, 涉及用户隐私的内容先征得用户同意再搜。","parameters":{"type":"object","properties":{"query":{"type":"string","description":"搜索词 (自然语言或关键词, 中英文均可)"},"count":{"type":"integer","description":"返回条数 (1~10, 默认 8)"}},"required":["query"]}},
+  {"type":"function","name":"fetch_url","description":"抓取一个网页的正文文本 (http/https): 自动转码为 UTF-8, 去掉脚本/样式/标签, 过长只回传头尾并注明省略量。与 web_search 配套: 先搜索, 再读某条结果的详细内容。由脚本渲染的整页应用可能拿不到正文; 图片/PDF 等二进制会明确报错 — 都如实告知用户即可, 不要编造网页内容。","parameters":{"type":"object","properties":{"url":{"type":"string","description":"网页绝对地址 (以 http:// 或 https:// 开头)"}},"required":["url"]}},
   {"type":"function","name":"file_op","description":"对文件/文件夹执行动作: copy=复制, move=移动 (改名=移动到新路径), rename=批量改名, delete=删除 (默认进回收站, 可还原; permanent=true 才彻底删除), mkdir=新建文件夹 (含多级)。源可用 paths (绝对路径数组) 与 ids (引擎 FileId 数组) 混合指定。rename 每项 {from, to}: **from 必填 = 改名前的完整路径文本** (用搜索结果里的旧文件名 + 目录拼出), to=新文件名 (留在原目录) 或新完整路径; rename 不支持用 FileId 寻址 — id 反查到的是索引最新名, 文件改过名后无法当「改名前」路径。受文件操作权限档约束: 「禁用/只读」拒绝写操作; 「询问」时本次调用**暂停**并在卡片上列出全部明细, 用户点「允许一次」才执行 (5 分钟未响应按取消); 「允许」直接执行。默认不覆盖已存在的目标 (overwrite=true 才覆盖); 一次 ≤128 项, 执行后逐项返回成功/失败与更改记录 changes (每个成功项的 action/from/to; 向用户报告结果或引用改动后的路径时**以 changes 为准**); 另有 unchanged=源与目标相同而未执行的项数 (文件已经是目标状态, 常见于改过名后重复提交 — **不要把它算作改动成功**, 如实告知用户无需更改)。不要用 run_command 的 del/move/copy 替代本工具; 用户没有要求时绝不主动提出删除/移动。","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["copy","move","rename","delete","mkdir"],"description":"动作"},"paths":{"type":"array","items":{"type":"string"},"description":"源绝对路径数组 (与 ids 可混用; mkdir 不用)"},"ids":{"type":"array","items":{"type":"integer"},"description":"引擎 FileId 数组 (自动解析为路径; rename 不用)"},"target":{"type":"string","description":"copy/move: 目标目录 (须已存在); mkdir: 要创建的目录"},"renames":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string","description":"改名前的完整路径 (目录 + 搜索结果里的旧文件名, 原样照抄旧名)"},"to":{"type":"string","description":"新文件名 (留在原目录) 或新完整路径"}},"required":["from","to"]},"description":"rename 动作专用: 每项 {from, to} — from=改名前完整路径文本, 必填"},"overwrite":{"type":"boolean","description":"目标已存在时覆盖 (默认 false=跳过并报告)"},"permanent":{"type":"boolean","description":"delete 专用: true=彻底删除不进回收站 (确认卡会标警告)"}},"required":["action"]}},
 )json"   /* 两段相邻拼接 — 单个字符串字面量超过约16KB 会触发 C2026 (同 ai_web_ui 的分段口径);
             边界约定: 前段以 "[" 开头、不含 "]"; 后段以 "]" 结尾、不含 "[" — 拼起来才是完整数组 */ R"json(
@@ -2372,6 +2390,13 @@ void BuildInstructions() {
         s += "\n## 用户自定义指令（用户在设置里配置，与默认行为冲突时以本节为准）\n";
         s += U8(g_cfg.customInstr.c_str());
         s += "\n";
+    }
+    /* 联网工具目录 (webSearch 关 = 不插 — 提示词不含联网工具行; 锚点措辞漂移时兜底追加尾部) */
+    if (g_cfg.webSearch) {
+        std::string web8 = U8(AI_INSTR_WEB);
+        size_t pos = s.find(U8(L"- file_op：文件动作"));
+        if (pos != std::string::npos) s.insert(pos, web8);
+        else s += web8;
     }
     std::string spec;
     const char* p = xjs_Query_GetPrompt(2);
@@ -2498,6 +2523,32 @@ static const picojson::value& ToolsP() {
     return p;
 }
 
+/* tools 数组的"无联网"版 (Agent 设置关联网搜索时发这份 — 工具不进请求, 模型无从调用;
+ * 也进程一次解析过滤, 避免每请求现拷) */
+static const picojson::value& ToolsPNoWeb() {
+    static picojson::value p = [] {
+        picojson::value v;
+        JParseU8(v, AI_TOOLS_JSON);
+        if (v.is<picojson::array>()) {
+            picojson::array out;
+            for (const auto& t : v.get<picojson::array>()) {
+                if (t.is<picojson::object>()) {
+                    const picojson::object& ob = t.get<picojson::object>();
+                    auto it = ob.find("name");
+                    if (it != ob.end() && it->second.is<std::string>()) {
+                        const std::string& n = it->second.get<std::string>();
+                        if (n == "web_search" || n == "fetch_url") continue;
+                    }
+                }
+                out.push_back(t);
+            }
+            v = picojson::value(out);
+        }
+        return v;
+    }();
+    return p;
+}
+
 /* 每轮请求体: input = 对话快照 + 已发生的工具往返 (call→output 交错) + 环境快照 +
    循环护栏提醒 + 本轮模型产出; withTools=false = 收尾轮 (省略 tools 并明示直接回答)。
    省两个大头的口径 (见"工具结果省 token"节):
@@ -2610,7 +2661,7 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
     body["stream"] = JB(true);
     std::string instrA = InstrSnapshot();   /* 与设置保存的重建互斥 (2026-09-26 起可重建) */
     body["instructions"] = JS(W8(instrA.c_str()));   /* 恒定字节 = 跨请求前缀缓存的事实源 */
-    if (withTools) body["tools"] = ToolsP();
+    if (withTools) body["tools"] = g_cfg.webSearch ? ToolsP() : ToolsPNoWeb();
     picojson::object reasoning;
     reasoning["effort"] = picojson::value(g_cfg.reasoning ? "high" : "none");
     body["reasoning"] = picojson::value(reasoning);
@@ -3257,6 +3308,13 @@ static void AiAskSystemNotify(const std::wstring& what) {
                 }
                 bool foTool = (c.name == "file_op");
                 bool fileReadTool = (c.name == "read_file" || c.name == "read_image");
+                bool webTool = (c.name == "web_search" || c.name == "fetch_url");
+                if (webTool) {   /* 卡头在入队前就有查询/地址 (同 execTool 口径) */
+                    Jv cv = JsonParseW(W8(c.args.c_str()));
+                    local.kind = (c.name == "web_search") ? 15 : 16;
+                    local.argz = TrimW(cv.S(local.kind == 15 ? L"query" : L"url"));
+                    ArgzCut(&local.argz);
+                }
                 AiFileOp fo;
                 std::wstring foPrep;   /* 非空 = Prepare 失败的原因 (直接作为工具错误) */
                 if (foTool) {
@@ -3442,6 +3500,12 @@ static void AiAskSystemNotify(const std::wstring& what) {
                         err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
                 } else if (execTool) {   /* 允许档: 直接执行 */
                     err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
+                } else if (webTool && !g_cfg.webSearch) {
+                    /* 关闭态的三重防线之一 (tools 数组已剔除+提示词无目录行, 此处兜底模型
+                       拿旧上下文仍调用): 拒绝回执写成可恢复指引 (dsh 口径) */
+                    err = L"已拒绝: 联网搜索当前已在 Agent 设置中关闭。请告知用户到 接口设置 → "
+                          L"Agent 标签页 打开「联网搜索」后, 再重新调用本工具";
+                    local.state = 3;
                 } else {
                     err = AgentToolExec(j, c.name, c.args, j->tok, &local);
                 }

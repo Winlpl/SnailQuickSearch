@@ -92,6 +92,7 @@ static picojson::value WebCfgValue() {
     o["httpTo"] = JN(g_cfg.httpTimeoutSec);
     o["notify"] = JB(g_cfg.notifyDone);
     o["cardsOpen"] = JB(g_cfg.toolCardsOpen);
+    o["web"] = JB(g_cfg.webSearch);
     o["instr"] = JS(g_cfg.customInstr);
     /* 多模态能力 (活动档案镜像): 输入区据此显隐附件入口 */
     o["img"] = JB(g_cfg.img);
@@ -474,7 +475,7 @@ bool MdToHtml(const std::wstring& text, std::wstring* out) {
 static std::wstring StepStatText(const AiToolStep& st) {
     if (st.state <= 1) return st.state == 0 ? L"排队中…" : L"执行中…";
     if (st.state == 2) {
-        if (st.kind == 0 && st.count >= 0) {
+        if ((st.kind == 0 || st.kind == 15) && st.count >= 0) {
             wchar_t nb[64];
             swprintf(nb, 64, L"✓ %d 条 · %lld ms", st.count, st.elapsedMs);
             return nb;
@@ -503,6 +504,8 @@ static const wchar_t* StepBadge(int kind) {
         case 12: return L"读取";
         case 13: return L"文件";
         case 14: return L"图片";
+        case 15: return L"网搜";
+        case 16: return L"网页";
     }
     return L"工具";
 }
@@ -532,6 +535,8 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             cmd = L"[" + (st.mode.empty() ? L"cmd" : st.mode) + L"] " + st.query;
         } else if (st.kind == 0 && !st.query.empty()) {
             cmd = st.query;
+        } else if ((st.kind == 15 || st.kind == 16) && !st.argz.empty()) {
+            cmd = st.argz;   /* 网搜=查询词 / 网页=地址 */
         } else {
             cmd = !st.argz.empty() ? (st.name.empty() ? st.argz : st.name + L" " + st.argz)
                                    : (st.name.empty() ? L"工具" : st.name);
@@ -716,6 +721,38 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
         }
         if (!st.top.empty()) {
             *out += L"<div class=\"ssamples\" style=\"display:none\">";
+            if (st.kind == 15) {
+                /* 网搜样本行 = "标题 — URL" (web_search 实体拼装, 末次出现的 " — " 是分隔符):
+                   标题渲染成可点链接 (a 点击 → openurl), 完整地址挂在 href; 尾巴补域名 */
+                for (size_t ti = 0; ti < st.top.size(); ti++) {
+                    wchar_t no[16];
+                    swprintf(no, 16, L"%d. ", (int)(ti + 1));
+                    *out += no;
+                    const std::wstring& row = st.top[ti];
+                    size_t sp = row.rfind(L" — ");
+                    if (sp != std::wstring::npos) {
+                        *out += L"<a class=\"ssch-link\" href=\"";
+                        HtmlEscape(out, row.substr(sp + 3));
+                        *out += L"\">";
+                        HtmlEscape(out, row.substr(0, sp));
+                        *out += L"</a>";
+                        const std::wstring& u = row;
+                        size_t h0 = u.find(L"://"), d0 = (h0 == std::wstring::npos) ? 0 : h0 + 3;
+                        size_t d1 = u.find(L'/', d0);
+                        std::wstring dom = u.substr(d0, (d1 == std::wstring::npos ? u.size() : d1) - d0);
+                        if (!dom.empty()) {
+                            *out += L"<span class=\"ssch-u\">";
+                            HtmlEscape(out, dom);
+                            *out += L"</span>";
+                        }
+                    } else {
+                        *out += L"<span class=\"ssch-t\">";
+                        HtmlEscape(out, row);
+                        *out += L"</span>";
+                    }
+                    if (ti + 1 < st.top.size()) *out += L"\n";
+                }
+            } else {
             /* file_op 的样本 = 操作前源路径 (历史事实, 同更改记录口径挂 data-rec 禁校验改写);
                其余卡片样本 = 现存索引路径, 照常校验 (图标/点击) */
             bool rec = st.kind == 13;
@@ -732,6 +769,7 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
                 HtmlEscape(out, st.top[ti]);
                 *out += L"</span>";
                 if (ti + 1 < st.top.size()) *out += L"\n";
+            }
             }
             *out += L"</div>";
         }
@@ -2069,6 +2107,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         g_cfg.httpTimeoutSec = rdN(L"httpTo", g_cfg.httpTimeoutSec);
         if ((v = msg.Get(L"notify")) != NULL && v->t == 1) g_cfg.notifyDone = v->b;
         if ((v = msg.Get(L"cardsOpen")) != NULL && v->t == 1) g_cfg.toolCardsOpen = v->b;
+        if ((v = msg.Get(L"web")) != NULL && v->t == 1) g_cfg.webSearch = v->b;
         if ((v = msg.Get(L"instr")) != NULL && v->t == 3) g_cfg.customInstr = v->str;
         /* 夹取收口在 ai_core.cpp (与 CfgLoad 同一函数) */
         CfgClampAgent();

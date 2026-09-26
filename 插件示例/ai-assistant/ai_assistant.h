@@ -5,6 +5,9 @@
  *   ai_core.cpp    基础设施: 编码转换 / 简易 JSON / 颜色 / 配置 / 多对话历史
  *   ai_agent.cpp   agent 大脑: 系统提示词组装 / 工具定义 / 引擎直连工具执行 /
  *                  请求体构建 / SSE 轮 (function calling) / 工作线程循环
+ *   ai_file.cpp    文件助手: 读取 (编码识别/Office 抽取) / 图片压缩注入 / 文件动作
+ *   ai_net.cpp     联网访问: HTTP GET (WinHTTP) / 搜索引擎结果解析 (web_search) /
+ *                  网页正文提取 (fetch_url)
  *   ai_session.cpp 会话层: 会话池 / 发送入口 / 流泵 (UI 抽取 → Web 增量同步) / 消息窗口
  *   ai_web.cpp     Web 前端宿主: 系统 WebView2 生命周期 (环境/控制器/子窗口) /
  *                  C++↔JS JSON 桥 / 皮肤调色派生 / markdown→HTML (md4c) / 消息 HTML 生成
@@ -221,6 +224,9 @@ struct AiCfg {
     int httpTimeoutSec = 120; /* 单轮请求超时秒 (30..600, WinHTTP receive 超时): 慢思考模型可调大 */
     bool notifyDone = true;   /* 后台完成系统通知: 面板不在前台时任务完成/失败发 Win10 通知。
                                  权限询问提醒不受它约束 (安全提醒恒发) */
+    bool webSearch = true;    /* 联网搜索 (web_search/fetch_url): 关 = 两工具从 tools 数组剔除
+                                 + 提示词工具目录不含联网行 + WorkerMain 干净拒绝 (三处同口径)。
+                                 变更后必须 BuildInstructions() 重建 */
     bool toolCardsOpen = false;  /* 工具卡片默认展开 (前端渲染缺省态; 用户手动开合仍按会话自持) */
     std::wstring customInstr;    /* 自定义指令 (≤4000 字符): 拼进系统提示词「自定义指令」节 (骨架之后、
                                  Lua 附录之前); 为空 = 不拼该节, 提示词字节与默认一致 (provider 前缀
@@ -269,7 +275,8 @@ struct AiFileChange {           /* file_op 逐项更改记录 (成功与失败�
 struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史落库, 载入时在途态折算为已中止) */
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths 3=设置 4=窗口 5=搜索框
                                    6=模式 7=插件 8=皮肤 9=规范 10=捐赠 11=run_command 命令
-                                   12=read_file 13=file_op 14=read_image (未知工具照显 name) */
+                                   12=read_file 13=file_op 14=read_image 15=web_search
+                                   16=fetch_url (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
@@ -363,6 +370,33 @@ std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st);
           /* 执行 (worker 线程, 逐项 SHFileOperation; 结果进 st->res8/top; j 只用于 abort) */
 std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st);             /* read_file 实体 */
 std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st);  /* read_image 实体 (图片注入 j->injImgs) */
+void AiOutHeadTail(size_t* head, size_t* tail);            /* 内容回传头尾上限 (头 80%+尾 20%, 总量
+                                                              = readCapKB; ai_file.cpp 收口) */
+std::string AiCapUtf8HeadTail(const std::string& content8);/* 内容封顶 (UTF-8 边界落刀 + 精确省略量
+                                                              标记; read_file 与 fetch_url 共用) */
+
+/* ==================== 联网访问 (实现 ai_net.cpp) ====================
+ * web_search / fetch_url 两工具实体 (2.10.0): 搜索引擎结果清单 (Bing 主路,
+ * DuckDuckGo Lite 回落) 与网页正文提取。全部 agent 工作线程调用, j 只用于
+ * 「停止」(j->hReq 登记 = 并发关句柄打断阻塞读, 与 SSE 主请求同口径)。
+ * 纯解析函数不带网络, 供 test\test_ai_net.cpp 直测。 */
+struct AiWebHit {
+    std::wstring title, url, snippet;
+};
+void WebParseBingRss(const std::string& xml8, int maxN, std::vector<AiWebHit>* out);
+                                                  /* bing 结果 RSS (format=rss) 的 item 解析 (主路) */
+void WebParseBingHtml(const std::string& html8, int maxN, std::vector<AiWebHit>* out);
+                                                  /* b_algo 块解析 (RSS 失效回落); bing/ck 跳转还原 */
+void WebParseDdg(const std::string& html8, int maxN, std::vector<AiWebHit>* out);
+                                                  /* DuckDuckGo Lite result-link 解析 (再回落); uddg= 还原 */
+void WebHtmlToText(const std::string& html8, std::string* out8);
+                                                  /* 网页 → 正文: 去 script/style/标签/注释,
+                                                     实体解码, 块级边界换行, 空白折叠 */
+std::wstring WebUnwrapResultUrl(const std::wstring& u);
+                                                  /* 搜索结果跳转链接 → 真实 URL (bing/ck 的
+                                                     u=a1<base64url>、ddg 的 uddg=<百分号编码>) */
+std::wstring WebSearchExec(AiJob* j, const Jv& v, AiToolStep* st);   /* web_search 实体 */
+std::wstring FetchUrlExec(AiJob* j, const Jv& v, AiToolStep* st);   /* fetch_url 实体 */
 
 /* ==================== agent (实现 ai_agent.cpp) ==================== */
 

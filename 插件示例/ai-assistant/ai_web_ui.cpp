@@ -429,6 +429,10 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .sout,.ssamples{margin:0;padding:6px 8px;max-height:200px;overflow:auto;border-top:1px solid var(--glass-border);
         background:color-mix(in srgb,var(--text-primary) 4%,transparent);font-family:Consolas,'Cascadia Mono',monospace;
         font-size:11px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
+/* 网搜卡片样本行 (web_search): 标题=可点链接走 openurl, 完整地址挂在 href; 尾部域名弱化 */
+.ssch-link{color:var(--accent-cyan);text-decoration:none}
+.ssch-link:hover{text-decoration:underline}
+.ssch-u{margin-left:6px;color:var(--text-tertiary);font-size:10px}
 /* lua 脚本导出的文件 (常显块 — 不随卡片折叠收起, 会话结束后仍可见; 路径 .ai-path 可点击) */
 .swrote{margin:6px 8px 8px;padding:6px 9px;border:1px solid color-mix(in srgb,var(--accent-violet) 35%,var(--glass-border));
         border-radius:7px;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);
@@ -876,10 +880,11 @@ textarea,input{user-select:text;-webkit-user-select:text}
           <div class="ai-caps-row">
             <button class="ai-reason-toggle" id="a-notify" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>后台完成时系统通知</button>
             <button class="ai-reason-toggle" id="a-cardsopen" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>工具卡片默认展开</button>
+            <button class="ai-reason-toggle" id="a-web" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>联网搜索</button>
           </div></div>
 )AIWEBUI"
            LR"AIWEBUI(        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，越大记得越全也越耗 token（默认 30）。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件回传正文上限，超出部分留头 80% 尾 20% 并注明省略量（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效；两项开关分别控制后台完成提醒与工具卡片的默认展开。</span></div>
+          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，越大记得越全也越耗 token（默认 30）。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件/网页回传正文上限，超出部分留头 80% 尾 20% 并注明省略量（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效。开关：后台完成提醒、工具卡片默认展开，以及联网搜索 = 允许 AI 联网搜索并读取网页（web_search / fetch_url，查询词会发给搜索引擎；关闭后 AI 不再具备联网能力）。</span></div>
         <div class="ai-config-actions">
           <button class="ai-btn" id="b-agent-cancel" type="button">取消</button>
           <button class="ai-btn ai-btn-primary" id="b-agent-save" type="button">保存</button>
@@ -1309,6 +1314,7 @@ function fillAgentForm(){
   $('a-instr').value=S.cfg.instr||'';
   $('a-notify').setAttribute('aria-pressed',S.cfg.notify!==false?'true':'false');
   $('a-cardsopen').setAttribute('aria-pressed',S.cfg.cardsOpen?'true':'false');
+  $('a-web').setAttribute('aria-pressed',S.cfg.web!==false?'true':'false');
 }
 function saveAgent(){
   /* 每项越界即整体不保存 (接口页 token 校验同口径, 不静默改一半) */
@@ -1323,6 +1329,7 @@ function saveAgent(){
         cmdTo:numOr($('a-cmdto').value,120),httpTo:numOr($('a-httpto').value,120),
         notify:$('a-notify').getAttribute('aria-pressed')==='true',
         cardsOpen:$('a-cardsopen').getAttribute('aria-pressed')==='true',
+        web:$('a-web').getAttribute('aria-pressed')==='true',
         instr:String($('a-instr').value||'').slice(0,4000)});
   showToast('Agent 设置已保存','ok');
   cfgToggle(false);   /* 保存成功即收起面板 */
@@ -2615,7 +2622,7 @@ function bind(){
   $('cfgTabAgent').addEventListener('click',()=>setCfgTab('agent'));
   $('b-agent-cancel').addEventListener('click',()=>cfgToggle(false));
   $('b-agent-save').addEventListener('click',saveAgent);
-  ['a-notify','a-cardsopen'].forEach(id=>{
+  ['a-notify','a-cardsopen','a-web'].forEach(id=>{
     $(id).addEventListener('click',()=>{
       const b=$(id);
       const on=b.getAttribute('aria-pressed')==='true';

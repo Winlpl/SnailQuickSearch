@@ -963,10 +963,25 @@ std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st) {
 
 static const size_t RF_READ_CAP = 8ull * 1024 * 1024;        /* 文本读取上限 */
 /* 内容回传头尾: 总量 = Agent 设置 readCapKB (4..512, 缺省 30KB), 头 80% + 尾 20% (同旧 24+6 比例) */
-static void RfOutHeadTail(size_t* head, size_t* tail) {
+void AiOutHeadTail(size_t* head, size_t* tail) {
     size_t total = (size_t)(g_cfg.readCapKB > 0 ? g_cfg.readCapKB : 30) * 1024;
     *head = total * 4 / 5;
     *tail = total - *head;
+}
+/* 内容封顶: 超 AiOutHeadTail 上限时头尾保留 + 中段带精确省略量标记 (省略数恒给精确值口径),
+ * UTF-8 字符边界落刀; read_file 与 fetch_url (ai_net.cpp) 共用 */
+std::string AiCapUtf8HeadTail(const std::string& content8) {
+    size_t rfHead, rfTail;
+    AiOutHeadTail(&rfHead, &rfTail);
+    size_t cap = rfHead + rfTail;
+    if (content8.size() <= cap) return content8;
+    size_t headEnd = Utf8Floor(content8, rfHead);
+    size_t tailBegin = Utf8Floor(content8, content8.size() - rfTail);
+    if (tailBegin <= headEnd) tailBegin = headEnd;
+    std::string cut = content8.substr(0, headEnd);
+    cut += "\n…[中间省略 " + std::to_string(tailBegin - headEnd) + " 字节]…\n";
+    cut += content8.substr(tailBegin);
+    return cut;
 }
 
 /* read_file 实体: 文本 (编码识别) / docx·pptx·xlsx (解包抽文字); 其它二进制明确报错 */
@@ -1017,19 +1032,8 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
         if (utf16 && content8.find('\0') != std::string::npos)
             return L"内容含二进制数据, read_file 只支持文本文件";
     }
-    /* 内容封顶: 头+尾+精确省略量 (省略数恒给精确值口径; 标记随 content 内联; 总量走 Agent 设置) */
-    size_t rfHead, rfTail;
-    RfOutHeadTail(&rfHead, &rfTail);
-    size_t cap = rfHead + rfTail;
-    if (content8.size() > cap) {
-        size_t headEnd = Utf8Floor(content8, rfHead);
-        size_t tailBegin = Utf8Floor(content8, content8.size() - rfTail);
-        if (tailBegin <= headEnd) tailBegin = headEnd;
-        std::string cut = content8.substr(0, headEnd);
-        cut += "\n…[中间省略 " + std::to_string(tailBegin - headEnd) + " 字节]…\n";
-        cut += content8.substr(tailBegin);
-        content8 = cut;
-    }
+    /* 内容封顶: 头+尾+精确省略量 (与 fetch_url 共用收口) */
+    content8 = AiCapUtf8HeadTail(content8);
     picojson::object o;
     o["path"] = JS(path);
     o["格式或编码"] = JS(kindName);

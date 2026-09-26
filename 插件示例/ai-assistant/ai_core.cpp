@@ -277,6 +277,7 @@ void CfgSave() {
     root["httpTimeoutSec"] = JN(g_cfg.httpTimeoutSec);
     root["notifyDone"] = JB(g_cfg.notifyDone);
     root["toolCardsOpen"] = JB(g_cfg.toolCardsOpen);
+    root["webSearch"] = JB(g_cfg.webSearch);
     root["customInstr"] = JS(g_cfg.customInstr);
     root["activeId"] = JS(g_cfg.activeId);
     picojson::array profs;
@@ -394,6 +395,8 @@ void CfgLoad() {
             if (nd && nd->t == 1) g_cfg.notifyDone = nd->b;
             const Jv* tco = v.Get(L"toolCardsOpen");
             if (tco && tco->t == 1) g_cfg.toolCardsOpen = tco->b;
+            const Jv* ws = v.Get(L"webSearch");
+            if (ws && ws->t == 1) g_cfg.webSearch = ws->b;
             const Jv* ci = v.Get(L"customInstr");
             if (ci && ci->t == 3) g_cfg.customInstr = ci->str;
             CfgClampAgent();

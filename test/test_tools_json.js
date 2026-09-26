@@ -25,7 +25,12 @@ try {
 }
 const ok = Array.isArray(arr) && arr.length > 0 && arr.every(t => t && typeof t === 'object' && typeof t.name === 'string');
 if (!ok) { console.error('FAIL: 数组含 null/非对象元素或结构异常, 共', arr.length, '项'); fails++; }
-const expect = 28;
+const expect = 30;   /* 2.10.0: +web_search +fetch_url */
 if (arr.length !== expect) { console.error(`FAIL: 工具数 ${arr.length} != 期望 ${expect} (新增/删除工具后请更新本断言)`); fails++; }
+/* 联网两件必须真实存在 (ToolsPNoWeb 靠名字过滤, 拼丢 = 关闭态误发/开启态缺工具) */
+const names = new Set(arr.filter(t => typeof t.name === 'string').map(t => t.name));
+for (const need of ['web_search', 'fetch_url']) {
+  if (!names.has(need)) { console.error(`FAIL: 缺工具 ${need}`); fails++; }
+}
 console.log(fails === 0 ? `PASS: ${arr.length} 个工具定义完整无缺` : `${fails} failed`);
 process.exit(fails);
