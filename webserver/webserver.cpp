@@ -1,7 +1,9 @@
 // 蜗牛快搜官网静态服务器 —— httplib.h,把本目录 web\
 // 子目录以静态站点形式跑起来,供本地预览与局域网访问。
 //
-// 用法: webserver.exe [端口]    默认 8080,监听 0.0.0.0(局域网内可打开)
+// 用法: webserver.exe [--lan] [端口]   默认 8080, 仅本机 127.0.0.1 可访问;
+//       --lan 显式改监听 0.0.0.0 供局域网访问(启动时打印安全警告)。
+//       局域网暴露必须显式声明: 无认证静态服务, 防止预览服务无意间开到全网卡。
 // 构建: build.bat(本目录)     产物 webserver.exe 留在本目录
 //
 // 说明: 启动时把工作目录切到 exe 所在目录,文档根按 web 子目录相对解析,
@@ -13,6 +15,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <string>
 
 static std::wstring ExeDirPath()
@@ -26,8 +29,21 @@ static std::wstring ExeDirPath()
 
 int main(int argc, char** argv)
 {
+    // 参数: --lan 开关 + 可选端口。端口严格解析(1..65535), 不再裸 atoi ——
+    // "8080x" 之类的坏输入过去被静默截断, 现在当场报错
+    bool lan = false;
     int port = 8080;
-    if (argc >= 2) port = atoi(argv[1]);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--lan") == 0) { lan = true; continue; }
+        char* end = nullptr;
+        long v = strtol(argv[i], &end, 10);
+        if (end == argv[i] || *end != '\0' || v < 1 || v > 65535) {
+            printf("ERROR: bad argument '%s' (usage: webserver.exe [--lan] [port 1..65535]).\n", argv[i]);
+            return 1;
+        }
+        port = (int)v;
+    }
+    const char* bindAddr = lan ? "0.0.0.0" : "127.0.0.1";
 
     WSAData wsa = {};
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -79,28 +95,33 @@ int main(int argc, char** argv)
 
     printf("SnailQuickSearch website server (cpp-httplib %s)\n", CPPHTTPLIB_VERSION);
     printf("Document root: web\n");
+    printf("Bind    : %s:%d\n", bindAddr, port);
     printf("Local   : http://localhost:%d/\n", port);
+    if (lan)
+        printf("WARNING: LAN mode -- any device on this network can open this site (no auth).\n");
 
-    // 局域网地址提示: 列出本机全部 IPv4
-    char host[256] = {};
-    if (gethostname(host, sizeof(host)) == 0) {
-        addrinfo hints = {};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo* list = nullptr;
-        if (getaddrinfo(host, nullptr, &hints, &list) == 0) {
-            for (addrinfo* p = list; p; p = p->ai_next) {
-                auto* sa = reinterpret_cast<sockaddr_in*>(p->ai_addr);
-                char ip[64] = {};
-                if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)))
-                    printf("Network : http://%s:%d/\n", ip, port);
+    // 局域网地址提示: 列出本机全部 IPv4 (仅 --lan 模式; 仅本机模式下列出来只会误导)
+    if (lan) {
+        char host[256] = {};
+        if (gethostname(host, sizeof(host)) == 0) {
+            addrinfo hints = {};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo* list = nullptr;
+            if (getaddrinfo(host, nullptr, &hints, &list) == 0) {
+                for (addrinfo* p = list; p; p = p->ai_next) {
+                    auto* sa = reinterpret_cast<sockaddr_in*>(p->ai_addr);
+                    char ip[64] = {};
+                    if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)))
+                        printf("Network : http://%s:%d/\n", ip, port);
+                }
+                freeaddrinfo(list);
             }
-            freeaddrinfo(list);
         }
     }
     printf("Press Ctrl+C to stop.\n\n");
 
-    if (!svr.listen("0.0.0.0", port)) {
+    if (!svr.listen(bindAddr, port)) {
         printf("ERROR: cannot listen on port %d (in use or denied?).\n", port);
         return 1;
     }
