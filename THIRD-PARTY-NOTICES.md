@@ -439,3 +439,17 @@ Microsoft Edge WebView2 运行时渲染界面 (运行时为 Windows 系统组件
 加载库的分发与使用受 Microsoft Webview2 SDK 随附许可条款约束, 详见
 https://learn.microsoft.com/microsoft-edge/webview2/ 。
 
+### 3. WinToastLib
+
+The MIT License (MIT)
+
+Copyright (C) 2016-2019 Mohammed Boujemaoui <mohabouje@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+> 静态编译进 ai-assistant.dll (系统通知中心 toast 直发, 不再借 PowerShell 进程), 不单独分发。
+

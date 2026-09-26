@@ -171,8 +171,7 @@ inline std::wstring JDumpW(const picojson::value& v) { return W8(v.serialize().c
  * 密钥不出宿主 (前端只见 hasKey): 复制/切换档案时密钥在 C++ 侧搬运。 */
 
 struct AiProfile {
-    std::wstring id;         /* "p"+时间戳+序号 (CfgGenProfileId 生成, 前端原样回传) */
-    std::wstring name;       /* 显示名 (空 = 用模型名兜底, 再空 = "未命名模型") */
+    std::wstring id;         /* "p"+时间戳+序号 (CfgGenProfileId 生成, 前端原样回传) */    std::wstring name;       /* 显示名 (空 = 用模型名兜底, 再空 = "未命名模型") */
     std::wstring baseUrl;
     std::wstring apiKey;     /* 内存明文; 落盘加密 (XorSecret+本机 GUID), 明文永不回传前端 */
     std::wstring model;
@@ -184,6 +183,10 @@ struct AiProfile {
     bool video = false;      /* 视频输入 (附带视频文件 → input_file data URL) */
     bool audio = false;      /* 音频输入 (附带音频文件 → input_file data URL) */
 };
+
+/* 工具调用上限的默认与夹取上限 (CfgLoad/agentCfg/前端三处同值) */
+static const int AI_AGENT_TURNS_DEF = 30;
+static const int AI_AGENT_TURNS_MAX = 100;
 
 struct AiCfg {
     std::wstring baseUrl = L"https://api.deepseek.com";
@@ -204,6 +207,24 @@ struct AiCfg {
     bool syncResults = false; /* 结果同步 (对话区勾选): 开启后每次 run_search 完成把结果 FileId 全集
                                  经宿主 window.resetResult 重置进发起窗口的列表 (AI 搜到什么, 用户
                                  左侧列表就是什么; 含 lua_exec 的顶层 return 集合) */
+    /* ---- Agent 行为设置 (进程级; 设置面板「Agent」标签页, WebCommand "agentCfg" 整包写入;
+     *      全部带默认值 = 旧配置文件缺键时行为不变。数值在 CfgLoad/agentCfg 两处同款夹取) ---- */
+    int maxTurns = AI_AGENT_TURNS_DEF;   /* 工具调用上限 (1..AI_AGENT_TURNS_MAX): SSE→工具执行的循环
+                                 轮数, 末轮省略 tools 强制收尾。曾为编译期常量 12, 2026-09-26 起可调 */
+    int maxCtxMsgs = 30;      /* 随请求携带的历史消息上限 (4..200, 只数 role 0/1): 长对话记忆窗口,
+                                 调大记得更早的问答, token 消耗也更大 */
+    int searchSample = 20;    /* run_search 回喂样本条数 (3..50): 完整路径进卡片/历史, 模型只拿
+                                 [FileId,文件名] 对; 系统提示词"前 N 条"措辞随它重建 */
+    int readCapKB = 30;       /* read_file 单文件内容回传上限 KB (4..512): 头 80% + 尾 20% + 精确省略量
+                                 (曾硬编码 24+6KB; 比例不变只调总量) */
+    int cmdTimeoutSec = 120;  /* run_command 缺省超时秒 (3..600; 命令参数未带 timeoutMs 时用) */
+    int httpTimeoutSec = 120; /* 单轮请求超时秒 (30..600, WinHTTP receive 超时): 慢思考模型可调大 */
+    bool notifyDone = true;   /* 后台完成系统通知: 面板不在前台时任务完成/失败发 Win10 通知。
+                                 权限询问提醒不受它约束 (安全提醒恒发) */
+    bool toolCardsOpen = false;  /* 工具卡片默认展开 (前端渲染缺省态; 用户手动开合仍按会话自持) */
+    std::wstring customInstr;    /* 自定义指令 (≤4000 字符): 拼进系统提示词「自定义指令」节 (骨架之后、
+                                 Lua 附录之前); 为空 = 不拼该节, 提示词字节与默认一致 (provider 前缀
+                                 缓存不受损)。变更后必须 BuildInstructions() 重建 */
     std::vector<AiProfile> profiles;   /* 档案表 = 事实源 (上限 50, AiProfileMax) */
     std::wstring activeId;             /* 当前使用档案的 id (失效回落第一条, 与前端同规) */
 };
@@ -211,6 +232,7 @@ extern AiCfg g_cfg;
 constexpr int AiProfileMax = 50;
 void CfgSave();
 void CfgLoad();
+void CfgClampAgent();                      /* Agent 数值设置夹取 (CfgLoad 与 WebCommand "agentCfg" 共用) */
 AiProfile* CfgActive();                    /* activeId 校验失效回落第一条; 空表 = NULL */
 void CfgApplyActive();                     /* 活动档案 → 派生镜像 (切档/保存后必须调) */
 std::wstring CfgDisplayName(const AiProfile* p);   /* name || model || 未命名模型 (前端同款兜底) */
@@ -297,7 +319,6 @@ struct AiConv {
 extern std::vector<AiConvRef> g_hist;   /* 历史索引 (侧栏列表只读这里的元数据; 正文按需 HistGet) */
 extern unsigned long long g_nextConvId;
 static const size_t AI_CONV_MAX = 30, AI_MSG_MAX = 200, AI_TEXT_MAX = 60000;
-static const int AI_AGENT_MAX_TURNS = 12;  /* agent 工具循环上限 (最后一轮省略 tools 强制收尾); 12 轮给统计任务留够粗筛/纠错余量 */
 /* 多模态附件上限 (dataUrl 字符数; 前端已压缩图片, 这里是硬闸 — 单条消息总量与历史存储都要够得着):
  * 历史按会话还有总预算 AI_ATT_HIST_BUDGET (HistUpsert 里最旧的先清成占位), 防大视频把
  * 存储/请求体撑爆。 */
@@ -348,6 +369,7 @@ std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st);  /* read_
 void AgentToolInit();
 void AgentToolShutdown();
 void BuildInstructions();      /* 系统提示词 = 常驻骨架 + 引擎内嵌 Lua 规范全文附录 (进程一次) */
+void AiToastEnsureIdentity();  /* 系统通知身份预建 (自有 AUMID + 开始菜单快捷方式; 幂等, 任意线程) */
 
 /* ==================== 会话 (定义 ai_session.cpp) ==================== */
 
@@ -476,6 +498,7 @@ std::wstring ColHexA(const Gdiplus::Color& c);     /* → "#rrggbbaa" */
  *   {t:"toast",...}  页面内提示 (面板被浏览器子窗盖住, 宿主 Toast 不可见 — WebToast)
  * 命令协议 (JS → C++, postMessage): 见 WebCommand (ai_web.cpp) — send/stop/close/
  *   profSave/profNew/profDel/profActive (模型档案: 保存/新建·复制/删除/切换) /
+ *   agentCfg (Agent 行为设置整包: 轮数/历史上限/样本/读取上限/超时/通知/卡片/自定义指令) /
  *   policy/pallow/pdeny/retry/new/load/del/clearHist/copy/openurl/ready +
  *   search/searchfill (搜索卡片: 词+模式, 区分是否立即执行) / open/reveal/copypath
  *   (文件路径链接: 单击打开 / 右键定位·复制)。

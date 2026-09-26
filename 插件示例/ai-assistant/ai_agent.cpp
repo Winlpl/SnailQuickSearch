@@ -8,6 +8,11 @@
  * (多窗排队等锁同样可被停止打断)。
  */
 #include "ai_assistant.h"
+#include "../../WinToast/wintoastlib.h"   /* 系统通知直发 WinRT (2026-09-26 起, 取代借 PowerShell 发 toast) */
+#include <wrl/client.h>
+#include <wrl/wrappers/corewrappers.h>
+#include <windows.data.xml.dom.h>
+#include <windows.foundation.h>
 
 /* ==================== 引擎直连 (agent 工具执行层) ====================
  * 插件进程 = 宿主进程, 加载器按模块名绑到宿主已加载的 xunjieso.dll 同一实例;
@@ -1228,13 +1233,16 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
                      "需要时把统计拆小或分批输出重跑)";
         }
     }
-    /* 样本 TOP 20: 完整路径进 st->top (卡片展开显示/历史落库用); 喂模型的 JSON 现场拼进
-     * res8 — 模型只拿 [FileId,文件名], **不拿路径** (回答里的文件链接只写 ID, 打开/定位/
-     * 复制路径由程序按 ID 解析; GetPath/GetName 指针为线程本地缓存, 必须立即拷贝) */
+    /* 样本 TOP N (Agent 设置 searchSample, 缺省 20): 完整路径进 st->top (卡片展开显示/历史落库用);
+     * 喂模型的 JSON 现场拼进 res8 — 模型只拿 [FileId,文件名], **不拿路径** (回答里的文件链接只写 ID,
+     * 打开/定位/复制路径由程序按 ID 解析; GetPath/GetName 指针为线程本地缓存, 必须立即拷贝) */
     g_agentTopIds.clear();
     st->top.clear();
     picojson::array files;
-    int n = st->count < 20 ? st->count : 20;
+    int sampleN = g_cfg.searchSample;
+    if (sampleN < 3) sampleN = 3;
+    if (sampleN > 50) sampleN = 50;
+    int n = st->count < sampleN ? st->count : sampleN;
     for (int i = 0; i < n; i++) {
         int fid = xjs_result_GetFileId(g_agentRes, i);
         if (fid < 0) continue;
@@ -2301,7 +2309,7 @@ static const wchar_t* AI_INSTRUCTIONS =
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与前 20 条样本。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与样本 (样本条数上限以系统提示词为准)。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[FileId,文件名],…] (FileId=引擎文件 ID, 是文件的唯一引用方式: 回答里的文件动作链接 xjs://open|reveal?id= 填它, 文件名仅用于展示), output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"}},"required":["mode","query"]}},
   {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」或 5 分钟未确认则本次调用以失败返回; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
@@ -2338,8 +2346,33 @@ static const char* AI_TOOLS_JSON = R"json([
    附录头写 agent 环境适配说明: 规范原文是"产出脚本给用户"的口吻 (-3/-4 模式编号、print、
    输出格式章节), 与本 agent "自己写脚本自己跑" 的用法差异都在这里一次性说清。 */
 static std::string g_instrA;
+static SRWLOCK g_instrCs = SRWLOCK_INIT;   /* g_instrA 读写锁: worker 每轮请求读快照,
+                                              设置保存 (agentCfg) 在 UI 线程重建写 */
+/* 子串全量替换 (UTF-8 字节串; 提示词措辞随设置参数化的工具) */
+static void InstrReplaceAll(std::string& s, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
 void BuildInstructions() {
     std::string s = U8(AI_INSTRUCTIONS);
+    /* 样本条数措辞随 searchSample 参数化 (默认 20 时保持原文 = 字节不变, 前缀缓存不受损) */
+    if (g_cfg.searchSample != 20) {
+        wchar_t nb[24];
+        swprintf(nb, 24, L"%d", g_cfg.searchSample);
+        std::string n8 = U8(nb);
+        InstrReplaceAll(s, "样本只给前 20 条", "样本只给前 " + n8 + " 条");
+        InstrReplaceAll(s, "仅列前 20", "仅列前 " + n8);
+    }
+    /* 用户自定义指令: 骨架之后、Lua 附录之前 (冲突时模型以本节为准; 空 = 不拼, 默认字节不变) */
+    if (!g_cfg.customInstr.empty()) {
+        s += "\n## 用户自定义指令（用户在设置里配置，与默认行为冲突时以本节为准）\n";
+        s += U8(g_cfg.customInstr.c_str());
+        s += "\n";
+    }
     std::string spec;
     const char* p = xjs_Query_GetPrompt(2);
     if (p && *p) {
@@ -2362,7 +2395,17 @@ void BuildInstructions() {
         s += spec;
         s += "\n";
     }
-    g_instrA = s;
+    AcquireSRWLockExclusive(&g_instrCs);
+    g_instrA = std::move(s);
+    ReleaseSRWLockExclusive(&g_instrCs);
+}
+
+/* worker 侧取提示词快照 (每轮请求一次拷贝; 与重建互斥 — 裸读 std::string = 撕裂/UAF) */
+static std::string InstrSnapshot() {
+    AcquireSRWLockShared(&g_instrCs);
+    std::string s = g_instrA;
+    ReleaseSRWLockShared(&g_instrCs);
+    return s;
 }
 
 /* 运行环境快照 (每次请求实时采集, 由 AgentBuildBody 作为注入型 user 项拼在 input 末尾):
@@ -2565,7 +2608,8 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
         body["max_output_tokens"] = JN(g_cfg.maxOut);
     body["input"] = picojson::value(input);
     body["stream"] = JB(true);
-    body["instructions"] = JS(W8(g_instrA.c_str()));   /* 恒定字节 = 跨请求前缀缓存的事实源 */
+    std::string instrA = InstrSnapshot();   /* 与设置保存的重建互斥 (2026-09-26 起可重建) */
+    body["instructions"] = JS(W8(instrA.c_str()));   /* 恒定字节 = 跨请求前缀缓存的事实源 */
     if (withTools) body["tools"] = ToolsP();
     picojson::object reasoning;
     reasoning["effort"] = picojson::value(g_cfg.reasoning ? "high" : "none");
@@ -2919,53 +2963,136 @@ static bool AiToastWanted() {
     return true;
 }
 
-/* 经 PowerShell 发 Win10 通知: 借系统 PowerShell 自身 AUMID — 零系统修改 (不建开始菜单
- * 快捷方式), -EncodedCommand 免引号转义, CREATE_NO_WINDOW 不闪控制台, 发完不等。
- * 宿主自带 Toast 是窗口内自绘, 窗口在后台就看不见。
- * 安全口径 (AI 生成的文本视为不可信输入): 正文先过 AiToastSafeText 白名单 — 引号/反引号/
- * 美元符/管道等脚本敏感字符全部剔除, 剩余文本即使拼接位置出错也构不成可执行语法;
- * 单引号转义保留作双保险; powershell.exe 钉死 System32 绝对路径, 杜绝 PATH 劫持。 */
-static std::wstring AiToastSafeText(const std::wstring& in, size_t cap) {
-    std::wstring out;
-    for (wchar_t c : in) {
-        if (out.size() >= cap) break;
-        if (c == L'\n' || c == L'\r' || c == L'\t') { out += L' '; continue; }   /* 折行展平 */
-        if (c < 0x20 || c == 0x7F) continue;
-        if (wcschr(L"'\"`$;|&<>", c)) continue;   /* 脚本敏感字符 (cmd 与 PS 双语境) 直接剔除 */
-        out += c;
+/* 系统通知 (2026-09-26, 根目录 WinToast\ 随包收录): 不再借 PowerShell 子进程 — 拉起
+ * powershell.exe 会被安全防护软件当"隐藏执行 PowerShell"敏感行为拦截报警 (用户实测),
+ * 一条通知起一个进程也本就太重。
+ * 身份 = 自有 AUMID + 用户开始菜单快捷方式 (横幅可靠显示的前提, 实测定案): Windows 只给
+ * "开始菜单里找得到该 AUMID"的应用弹横幅 — 借系统 PowerShell 的 AUMID 从本进程发, Show
+ * 返回成功但横幅不弹; 老脚本能弹是因为它跑在 powershell.exe 进程**内**。快捷方式 =
+ * 开始菜单\Programs\蜗牛快搜 AI 助手.lnk (指向宿主 exe, 每用户一份可删, 被清理时下次
+ * 自动重建)。**面板首开即预建** (AiToastEnsureIdentity, SessOpen 调) — 首条后台通知
+ * 大概率在身份注册之后才发。
+ * 初始化对齐用户参考实现走库的标准 initialize(): 含 SetCurrentProcessExplicitAppUserModelID,
+ * 宿主窗口早已存在时该步可能失败 — 失败分两种降级 (见 AiToastEnsureIdentity)。
+ * 发送 = reminder 场景 XML 直发 (WinToastLib 模板不支持 scenario, 见 AiSystemToast 头注释)。
+ * 正文经 IXmlDocument::CreateTextNode = XML 注入安全; 只留展示清洗 (折行展平/剔控制
+ * 字符/限长)。 */
+struct AiToastLib : WinToastLib::WinToast {
+    void armDirect() { _isInitialized = true; }   /* 跳过 initialize 未竟步骤的降级通道 */
+};
+static AiToastLib s_toast;                  /* 进程级单例 (身份事实源); 读写经 s_toastCs */
+static SRWLOCK s_toastCs = SRWLOCK_INIT;
+static bool s_toastArmed = false;
+
+/* 通知身份预建 (幂等, 任意线程): 面板首开 (SessOpen) 与首条通知 (worker) 都会调。
+ * 走库的标准初始化 (对齐用户参考实现): CoInit + 校验/创建开始菜单快捷方式 +
+ * SetCurrentProcessExplicitAppUserModelID。宿主窗口早已存在, 末步可能失败 — 失败分两种:
+ * 快捷方式没建出来 (ShellLinkNotCreated) = 自有身份解析不了, 回退借系统 PowerShell 的
+ * AUMID (Show 仍成功, 至少进通知中心); 只有末步挂了 = 快捷方式已就位, 降级 armDirect
+ * 继续用自有身份。 */
+void AiToastEnsureIdentity() {
+    if (!WinToastLib::WinToast::isCompatible()) return;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);   /* RPC_E_CHANGED_MODE = 已按别的模式初始化, 照用 */
+    AcquireSRWLockExclusive(&s_toastCs);
+    if (!s_toastArmed) {
+        s_toast.setAppName(L"蜗牛快搜 AI 助手");
+        s_toast.setAppUserModelId(L"SnailQuickSearch.AIAssistant");
+        WinToastLib::WinToast::WinToastError ierr = WinToastLib::WinToast::NoError;
+        s_toast.initialize(&ierr);
+        if (ierr != WinToastLib::WinToast::NoError) {
+            if (ierr == WinToastLib::WinToast::ShellLinkNotCreated) {
+                s_toast.setAppUserModelId(   /* 建不出快捷方式 → 回退: 横幅可能不弹但通知仍入中心 */
+                    L"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe");
+            }
+            s_toast.armDirect();   /* 降级: 跳过未竟步骤, 至少 showToast 可用 */
+        }
+        s_toastArmed = true;
     }
-    while (!out.empty() && out.back() == L' ') out.pop_back();
-    return out;
+    ReleaseSRWLockExclusive(&s_toastCs);
 }
+
+/* 通知 = reminder 场景 XML 直发 (2026-09-26 实测定案): 机器开了勿扰/等价抑制时,
+ * 普通横幅被平台静默吞掉 (事件回执 = Dismissed(ApplicationHidden), Show 照样成功,
+ * Setting 照样 Enabled — 三重假象, 冒烟事件判定才定位到); scenario="reminder" 属
+ * "系统提醒", 勿扰默认放行, 且**常驻到用户点掉** (不自动消失) — 本就是"叫人回来"
+ * 的语义。WinToastLib 的模板路径不支持 scenario, 故发送走直构 XML; 库仍负责身份
+ * (initialize/快捷方式, AiToastEnsureIdentity)。
+ * 骨架常量拼接, 动态正文经 IXmlDocument::CreateTextNode 进 text 节点 = XML 注入
+ * 安全 (与旧 PS 同层); "打开窗口"按钮 (foreground) 经 AUMID 快捷方式拉起宿主 exe
+ * = 单实例守卫唤回窗口; "知道了" = 系统关闭按钮 (不需要激活回调)。
+ * COM: 提权态与非提权态行为一致 (冒烟两种都验过); 每线程 CoInitializeEx(MTA),
+ * RPC_E_CHANGED_MODE = 已按别的模式初始化, 照用。 */
 static void AiSystemToast(const std::wstring& bodyRaw) {
-    std::wstring body = AiToastSafeText(bodyRaw, 150);
-    if (body.empty()) return;
-    std::wstring q;
-    for (wchar_t c : body) {   /* PS 单引号串转义 (白名单后应无引号 — 双保险) */
-        if (c == L'\'') q += L"''";
-        else q += c;
+    if (!WinToastLib::WinToast::isCompatible()) return;
+    std::wstring body;   /* 展示清洗: 折行展平 + 控制字符剔除 + 限长 (无脚本层, 不滤标点) */
+    for (wchar_t c : bodyRaw) {
+        if (c == L'\n' || c == L'\r' || c == L'\t') {
+            if (!body.empty() && body.back() != L' ') body += L' ';
+            continue;
+        }
+        if (c < 0x20 || c == 0x7F) continue;
+        body += c;
+        if (body.size() >= 200) break;
     }
-    wchar_t windir[MAX_PATH + 1];
-    UINT wn = GetWindowsDirectoryW(windir, MAX_PATH);
-    if (wn == 0 || wn > MAX_PATH - 40) return;
-    std::wstring psExe = std::wstring(windir) + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-    std::wstring ps =
-        L"[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime];"
-        L"[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime];"
-        L"$a='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
-        L"$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
-        L"$t=$x.GetElementsByTagName('text');"
-        L"[void]$t.Item(0).AppendChild($x.CreateTextNode('蜗牛快搜 · AI 助手'));"
-        L"[void]$t.Item(1).AppendChild($x.CreateTextNode('" + q + L"'));"
-        L"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($a).Show([Windows.UI.Notifications.ToastNotification]::new($x))";
-    std::wstring cmd =
-        L"\"" + psExe + L"\" -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " +
-        W8(AiB64Enc((const unsigned char*)ps.c_str(), ps.size() * sizeof(wchar_t)).c_str());
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    if (CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+    while (!body.empty() && body.back() == L' ') body.pop_back();
+    if (body.empty()) return;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    AiToastEnsureIdentity();
+    std::wstring aumi;   /* 身份串 (arm 后只读; 拷出来再用, 不持锁跨 COM 调用) */
+    AcquireSRWLockShared(&s_toastCs);
+    aumi = s_toast.appUserModelId();
+    ReleaseSRWLockShared(&s_toastCs);
+    if (aumi.empty()) return;
+    HRESULT hr;
+    /* toast XML: 骨架常量 + 正文占位空 <text>, 组装后 CreateTextNode 补正文 */
+    ComPtr<IXmlDocumentIO> doc;
+    {
+        ComPtr<IActivationFactory> af;   /* XmlDocument 默认构造类: ActivateInstance 而非 statics */
+        hr = RoGetActivationFactory(
+            Microsoft::WRL::Wrappers::HStringReference(RuntimeClass_Windows_Data_Xml_Dom_XmlDocument).Get(), IID_PPV_ARGS(&af));
+        ComPtr<IInspectable> ins;
+        if (SUCCEEDED(hr)) hr = af->ActivateInstance(&ins);
+        if (SUCCEEDED(hr)) hr = ins.As(&doc);
+    }
+    if (SUCCEEDED(hr))
+        hr = doc->LoadXml(Microsoft::WRL::Wrappers::HStringReference(
+            L"<toast scenario=\"reminder\"><visual><binding template=\"ToastText02\">"
+            L"<text>蜗牛快搜 AI 助手</text><text></text>"
+            L"</binding></visual>"
+            L"<actions><action content=\"打开窗口\" activationType=\"foreground\"/>"
+            L"<action content=\"知道了\" arguments=\"dismiss\" activationType=\"system\"/></actions>"
+            L"</toast>").Get());
+    if (SUCCEEDED(hr)) {   /* 正文进第 2 个 text 节点 (CreateTextNode = 注入安全) */
+        ComPtr<IXmlDocument> xmlDoc;
+        hr = doc.As(&xmlDoc);
+        ComPtr<IXmlNodeList> texts;
+        if (SUCCEEDED(hr)) hr = xmlDoc->GetElementsByTagName(Microsoft::WRL::Wrappers::HStringReference(L"text").Get(), &texts);
+        ComPtr<IXmlNode> node;
+        if (SUCCEEDED(hr)) hr = texts->Item(1, &node);
+        ComPtr<IXmlText> tnode;
+        if (SUCCEEDED(hr)) hr = xmlDoc->CreateTextNode(Microsoft::WRL::Wrappers::HStringReference(body.c_str()).Get(), &tnode);
+        if (SUCCEEDED(hr)) {
+            ComPtr<IXmlNode> snode, appended;
+            hr = tnode.As(&snode);
+            if (SUCCEEDED(hr)) hr = node->AppendChild(snode.Get(), &appended);
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        ComPtr<IToastNotificationManagerStatics> mgr;
+        hr = RoGetActivationFactory(
+            Microsoft::WRL::Wrappers::HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotificationManager).Get(),
+            IID_PPV_ARGS(&mgr));
+        ComPtr<IToastNotifier> notifier;
+        if (SUCCEEDED(hr)) hr = mgr->CreateToastNotifierWithId(Microsoft::WRL::Wrappers::HStringReference(aumi.c_str()).Get(), &notifier);
+        ComPtr<IToastNotificationFactory> factory;
+        if (SUCCEEDED(hr)) hr = RoGetActivationFactory(
+            Microsoft::WRL::Wrappers::HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotification).Get(),
+            IID_PPV_ARGS(&factory));
+        ComPtr<IXmlDocument> xmlDoc;
+        ComPtr<IToastNotification> toast;
+        if (SUCCEEDED(hr)) hr = doc.As(&xmlDoc);
+        if (SUCCEEDED(hr)) hr = factory->CreateToastNotification(xmlDoc.Get(), &toast);
+        if (SUCCEEDED(hr)) notifier->Show(toast.Get());   /* 失败静默 (通知非关键路径) */
     }
 }
 
@@ -2990,7 +3117,9 @@ static void AiAskSystemNotify(const std::wstring& what) {
     if (!hs) hs = WinHttpOpen(L"snail-quicksearch-ai-assistant", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     HINTERNET hc = NULL;
     if (hs) {
-        WinHttpSetTimeouts(hs, 15000, 30000, 30000, 120000);   /* 单轮超时; 多轮总时长由轮数×超时构成 */
+        int recvTo = g_cfg.httpTimeoutSec * 1000;   /* 单轮请求超时 (Agent 设置, 30..600s);
+                                                       多轮总时长由轮数×超时构成 */
+        WinHttpSetTimeouts(hs, 15000, 30000, 30000, recvTo);
         hc = WinHttpConnect(hs, whost, j->port, 0);
     }
     bool aborted = false, truncated = false, failed = false;
@@ -3007,9 +3136,12 @@ static void AiAskSystemNotify(const std::wstring& what) {
         int emptyRetry = 0;                 /* 空响应 (无工具调用也无文本) 原样重发次数 */
         int txRetry = 0;                    /* 传输中断整轮重试计数 (成功轮归零) */
         bool overflowRetried = false;       /* 上下文超限自愈每作业只做一次 (dsh maxOverflowRetries=1) */
-        for (int turn = 0; turn < AI_AGENT_MAX_TURNS; turn++) {
+        const int maxTurns = g_cfg.maxTurns > 0 ? g_cfg.maxTurns : AI_AGENT_TURNS_DEF;
+                                            /* 工具调用上限 (Agent 设置, 发送时点取一次;
+                                               末轮省略 tools 强制收尾口径不变) */
+        for (int turn = 0; turn < maxTurns; turn++) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { aborted = true; break; }
-            bool lastTurn = turn == AI_AGENT_MAX_TURNS - 1;
+            bool lastTurn = turn == maxTurns - 1;
             std::vector<AiCall> turnCalls;
             ULONGLONG turnT0 = GetTickCount64();
             bool transient = false;
@@ -3106,7 +3238,7 @@ static void AiAskSystemNotify(const std::wstring& what) {
                 bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
                 bool execTool = (c.name == "run_command");
                 std::wstring exShell, exCmd, exDir, exDesc;
-                long long exTimeout = 120000;
+                long long exTimeout = (long long)g_cfg.cmdTimeoutSec * 1000;   /* 缺省超时 (Agent 设置) */
                 if (execTool) {
                     Jv cv = JsonParseW(W8(c.args.c_str()));
                     exCmd = TrimW(cv.S(L"command"));
@@ -3387,8 +3519,9 @@ static void AiAskSystemNotify(const std::wstring& what) {
         if (m.role == 0 && !m.text.empty()) ask = m.text;
     LeaveCriticalSection(&j->cs);
     if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
-    /* 窗口不在前台 → Win10 通知 (任务完成/失败; 用户自己"停止"的 = 人在场, 不打扰) */
-    if (!aborted && AiToastWanted()) {
+    /* 窗口不在前台 → Win10 通知 (任务完成/失败; 用户自己"停止"的 = 人在场, 不打扰;
+     * notifyDone = Agent 设置里的开关, 关了就不打扰 — 权限询问提醒不受它约束恒发) */
+    if (!aborted && g_cfg.notifyDone && AiToastWanted()) {
         std::wstring body = (failed ? L"任务失败: " : L"任务完成: ") + ask;
         if (body.size() > 100) {
             body.resize(100);

@@ -62,8 +62,16 @@ void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, flo
     s->scale = scale > 0 ? scale : 1.0f;
     if (!s->web) {
         static bool s_dataLoaded = false;   /* cfg/历史进程级一份, 多窗共享 */
-        if (!s_dataLoaded) { s_dataLoaded = true; CfgLoad(); HistLoad(); }
+        if (!s_dataLoaded) {
+            s_dataLoaded = true;
+            CfgLoad();
+            HistLoad();
+            BuildInstructions();   /* CfgLoad 晚于 Init 的首次构建 — 存储里的
+                                      自定义指令/样本条数措辞必须在此补进提示词 */
+        }
     }
+    AiToastEnsureIdentity();   /* 通知身份预建 (自有 AUMID + 开始菜单快捷方式; 幂等) —
+                                  赶在首条后台通知之前注册, 横幅才弹 */
     SessLoadSkinOf(s);
     WebSessionCreate(s);   /* 子窗口 + WebView2 控制器 (异步; ready 后 JS 拉 boot) */
 }
@@ -154,7 +162,12 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     /* 对话快照 (只含 role 0/1; 有附件的 role 0 即使无文字也要进上下文; 工具往返由 worker 在循环中累计) */
     for (auto& m : s->msgs)
         if (m.role != 2 && (!m.text.empty() || !m.atts.empty())) j->hist.push_back(m);
-    if (j->hist.size() > 30) j->hist.erase(j->hist.begin(), j->hist.end() - 30);
+    /* 历史消息上限 (Agent 设置 maxCtxMsgs, 4..200, 缺省 30): 长对话记忆窗口 —
+       调大记得更早的问答, token 消耗也更大 */
+    {
+        size_t ctxN = g_cfg.maxCtxMsgs > 0 ? (size_t)g_cfg.maxCtxMsgs : 30;
+        if (j->hist.size() > ctxN) j->hist.erase(j->hist.begin(), j->hist.end() - ctxN);
+    }
     while (!j->hist.empty() && j->hist.front().role != 0) j->hist.erase(j->hist.begin());
     s->job = j;
     s->sending = true;

@@ -41,11 +41,13 @@ if not exist "..\..\webview2\x64\WebView2Loader.dll" (
 
 :: UI = embedded WebView2 frontend (system Edge runtime renders; no GDI+ bitmap
 :: pipeline anymore). md4c is compiled straight in (markdown -> HTML for bubbles).
+:: WinToast is compiled straight in too (system toast notifications, no PowerShell).
 cl /nologo /EHsc /std:c++20 /O2 /MP /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ^
    /I..\..\webview2\include ^
    ai_core.cpp ai_agent.cpp ai_session.cpp ai_web.cpp ai_web_ui.cpp ai_plugin.cpp ai_file.cpp ^
    ..\..\md4c\md4c.c ^
-   /link /OUT:ai-assistant.dll winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib ^
+   ..\..\WinToast\wintoastlib.cpp ^
+   /link /OUT:ai-assistant.dll winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib ^
    ..\..\xunjieso.lib
 if errorlevel 1 (
     echo Build failed!

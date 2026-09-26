@@ -962,7 +962,12 @@ std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st) {
 /* ==================== read_file ==================== */
 
 static const size_t RF_READ_CAP = 8ull * 1024 * 1024;        /* 文本读取上限 */
-static const size_t RF_OUT_HEAD = 24 * 1024, RF_OUT_TAIL = 6 * 1024;   /* 内容回传头尾 */
+/* 内容回传头尾: 总量 = Agent 设置 readCapKB (4..512, 缺省 30KB), 头 80% + 尾 20% (同旧 24+6 比例) */
+static void RfOutHeadTail(size_t* head, size_t* tail) {
+    size_t total = (size_t)(g_cfg.readCapKB > 0 ? g_cfg.readCapKB : 30) * 1024;
+    *head = total * 4 / 5;
+    *tail = total - *head;
+}
 
 /* read_file 实体: 文本 (编码识别) / docx·pptx·xlsx (解包抽文字); 其它二进制明确报错 */
 std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
@@ -1012,11 +1017,13 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
         if (utf16 && content8.find('\0') != std::string::npos)
             return L"内容含二进制数据, read_file 只支持文本文件";
     }
-    /* 内容封顶: 头+尾+精确省略量 (省略数恒给精确值口径; 标记随 content 内联) */
-    size_t cap = RF_OUT_HEAD + RF_OUT_TAIL;
+    /* 内容封顶: 头+尾+精确省略量 (省略数恒给精确值口径; 标记随 content 内联; 总量走 Agent 设置) */
+    size_t rfHead, rfTail;
+    RfOutHeadTail(&rfHead, &rfTail);
+    size_t cap = rfHead + rfTail;
     if (content8.size() > cap) {
-        size_t headEnd = Utf8Floor(content8, RF_OUT_HEAD);
-        size_t tailBegin = Utf8Floor(content8, content8.size() - RF_OUT_TAIL);
+        size_t headEnd = Utf8Floor(content8, rfHead);
+        size_t tailBegin = Utf8Floor(content8, content8.size() - rfTail);
         if (tailBegin <= headEnd) tailBegin = headEnd;
         std::string cut = content8.substr(0, headEnd);
         cut += "\n…[中间省略 " + std::to_string(tailBegin - headEnd) + " 字节]…\n";

@@ -115,6 +115,14 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-config-input:focus{outline:none;border-color:var(--accent-violet)}
 .ai-config-hint{font-size:11px;line-height:1.6;color:var(--text-tertiary)}
 .ai-config-actions{display:flex;justify-content:flex-end;gap:8px}
+/* 设置面板两标签页 (接口 / Agent): 下划线选中态, 同一浮层分页 */
+.ai-cfg-tabs{display:flex;gap:2px;border-bottom:1px solid var(--glass-border);margin-bottom:2px}
+.ai-cfg-tab{border:0;background:transparent;padding:5px 12px 7px;color:var(--text-tertiary);font:inherit;
+            font-size:12px;cursor:default;border-bottom:2px solid transparent;transition:color 120ms ease}
+.ai-cfg-tab:hover{color:var(--text-secondary)}
+.ai-cfg-tab[aria-selected="true"]{color:var(--accent-violet);border-bottom-color:var(--accent-violet)}
+/* 自定义指令多行输入框 (单行 ai-config-input 的放高版) */
+.ai-config-area{height:auto;min-height:64px;padding:6px 8px;resize:vertical;line-height:1.55}
 /* 深度思考开关 (参考实现无此行; 本插件的 reasoning.effort 功能保留, 样式随面板) */
 .ai-reason-toggle{display:inline-flex;align-items:center;gap:7px;border:0;background:transparent;padding:0;
                   color:var(--text-secondary);font:inherit;font-size:12px;cursor:default}
@@ -795,7 +803,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
           </button>
           <div class="ai-model-menu" id="modelMenu" role="listbox" hidden></div>
         </div>
-        <button class="ai-btn" id="b-set" type="button" title="接口设置"><span class="glyph" aria-hidden="true">&#xE713;</span><span class="ellipsis-text">接口设置</span></button>
+        <button class="ai-btn" id="b-set" type="button" title="设置"><span class="glyph" aria-hidden="true">&#xE713;</span><span class="ellipsis-text">设置</span></button>
         <button class="ai-btn" id="b-hist" type="button" title="历史对话"><span class="glyph" aria-hidden="true">&#xE81C;</span><span class="ellipsis-text">历史对话</span></button>
         <button class="ai-btn" id="b-new" type="button" title="新对话"><span class="glyph" aria-hidden="true">&#xE72C;</span><span class="ellipsis-text">新对话</span></button>
         <button class="ai-btn icononly" id="b-close" type="button" title="关闭"><span class="glyph" aria-hidden="true">&#xE8BB;</span></button>
@@ -804,6 +812,12 @@ textarea,input{user-select:text;-webkit-user-select:text}
 
     <!-- 接口设置: 管理模型档案 (每条档案是一套完整接口配置, 跨服务商时地址与密钥随档案走) -->
     <div class="ai-config-panel" id="cfgPanel" hidden>
+)AIWEBUI"
+           LR"AIWEBUI(      <div class="ai-cfg-tabs" role="tablist" aria-label="设置分类">
+        <button class="ai-cfg-tab" id="cfgTabApi" type="button" role="tab" aria-selected="true">接口</button>
+        <button class="ai-cfg-tab" id="cfgTabAgent" type="button" role="tab" aria-selected="false">Agent</button>
+      </div>
+      <div id="cfgPageApi">
       <div class="ai-config-row"><label class="ai-config-label" for="f-prof">模型</label>
         <div class="ai-config-profile-row">
           <select class="ai-config-input" id="f-prof"></select>
@@ -840,6 +854,36 @@ textarea,input{user-select:text;-webkit-user-select:text}
       <div class="ai-config-actions">
         <button class="ai-btn" id="b-cancel" type="button">取消</button>
         <button class="ai-btn ai-btn-primary" id="b-save" type="button">保存</button>
+      </div>
+      </div>
+)AIWEBUI"
+           LR"AIWEBUI(      <div id="cfgPageAgent" hidden>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-turns">工具调用上限</label>
+          <input class="ai-config-input" id="a-turns" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="1-100"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-ctx">历史消息上限</label>
+          <input class="ai-config-input" id="a-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-200"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-sample">搜索样本条数</label>
+          <input class="ai-config-input" id="a-sample" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-50"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-readcap">读取内容上限</label>
+          <input class="ai-config-input" id="a-readcap" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-512 (KB)"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-cmdto">命令默认超时</label>
+          <input class="ai-config-input" id="a-cmdto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-600 (秒)"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-httpto">请求超时</label>
+          <input class="ai-config-input" id="a-httpto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="30-600 (秒)"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-instr">自定义指令</label>
+          <textarea class="ai-config-input ai-config-area" id="a-instr" rows="4" spellcheck="false" placeholder="例如：回答尽量简洁；找文件时优先按修改时间排序…（留空 = 不追加）"></textarea></div>
+        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+          <div class="ai-caps-row">
+            <button class="ai-reason-toggle" id="a-notify" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>后台完成时系统通知</button>
+            <button class="ai-reason-toggle" id="a-cardsopen" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>工具卡片默认展开</button>
+          </div></div>
+)AIWEBUI"
+           LR"AIWEBUI(        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，越大记得越全也越耗 token（默认 30）。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件回传正文上限，超出部分留头 80% 尾 20% 并注明省略量（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效；两项开关分别控制后台完成提醒与工具卡片的默认展开。</span></div>
+        <div class="ai-config-actions">
+          <button class="ai-btn" id="b-agent-cancel" type="button">取消</button>
+          <button class="ai-btn ai-btn-primary" id="b-agent-save" type="button">保存</button>
+        </div>
       </div>
     </div>
 
@@ -1037,12 +1081,15 @@ function epolicyMeta(v){for(const p of EPOLICY)if(p.v===v)return p;return EPOLIC
 /* ==================== 状态 ==================== */
 const S={
   cfg:{url:'',model:'',hasKey:false,reasoning:false,policy:2,epolicy:2,sync:false,name:'',ctx:0,maxOut:0,active:'',profs:[],
-       img:false,video:false,audio:false},
+       img:false,video:false,audio:false,
+       maxTurns:30,maxCtxMsgs:30,searchSample:20,readCapKB:30,cmdTo:120,httpTo:120,
+       notify:true,cardsOpen:false,instr:''},
   pal:null, convs:[], msgs:[], cur:0,
   atts:[],          /* 待发送附件 [{u:dataUrl,k:kind,n:文件名}] (发送后清空) */
   sending:false, net:0, phase:0, note:'',   /* note = 过程状态条 (重试/自愈中, status 推送带) */
   usage:{has:false,up:0,uo:0,ut:0,uch:0,lp:0,lc:0,tps:0},
   sideOpen:false, cfgOpen:false, policyOpen:false, epolicyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
+  cfgTab:'api',     /* 设置面板当前标签页: 'api' 接口 / 'agent' Agent */
   profDirty:false,  /* 表单里有未保存的编辑: 挡住 C++ 整包下发把正在敲的内容冲掉 */
   delArmed:false, delTimer:0, modelTimer:0,
   clearArmed:false, clearTimer:0,   /* 清空记录两步确认 (首击待确认, 4s 内再击才清) */
@@ -1236,10 +1283,49 @@ function cfgToggle(open){
     /* 关闭面板 = 放弃未保存的编辑; 打开时从活动档案重填 */
     S.profDirty=false;profDisarm();
     renderProfSelect();fillProfForm();
+    fillAgentForm();setCfgTab(S.cfgTab||'api');
     setTimeout(()=>{try{$('f-prof').focus();}catch(e){}},0);
   }
   $('cfgPanel').hidden=!open;
   $('b-set').setAttribute('aria-expanded',open?'true':'false');
+}
+
+/* ==================== Agent 行为设置 (「Agent」标签页; 整包发 agentCfg, C++ 校验落盘) ==================== */
+function setCfgTab(tab){
+  S.cfgTab=tab==='agent'?'agent':'api';
+  $('cfgPageApi').hidden=S.cfgTab!=='api';
+  $('cfgPageAgent').hidden=S.cfgTab!=='agent';
+  $('cfgTabApi').setAttribute('aria-selected',S.cfgTab==='api'?'true':'false');
+  $('cfgTabAgent').setAttribute('aria-selected',S.cfgTab==='agent'?'true':'false');
+}
+function numOr(v,def){const n=parseInt(v,10);return isFinite(n)&&n>0?n:0;}
+function fillAgentForm(){
+  $('a-turns').value=String(S.cfg.maxTurns||30);
+  $('a-ctx').value=String(S.cfg.maxCtxMsgs||30);
+  $('a-sample').value=String(S.cfg.searchSample||20);
+  $('a-readcap').value=String(S.cfg.readCapKB||30);
+  $('a-cmdto').value=String(S.cfg.cmdTo||120);
+  $('a-httpto').value=String(S.cfg.httpTo||120);
+  $('a-instr').value=S.cfg.instr||'';
+  $('a-notify').setAttribute('aria-pressed',S.cfg.notify!==false?'true':'false');
+  $('a-cardsopen').setAttribute('aria-pressed',S.cfg.cardsOpen?'true':'false');
+}
+function saveAgent(){
+  /* 每项越界即整体不保存 (接口页 token 校验同口径, 不静默改一半) */
+  const V=[[$('a-turns'),1,100],[$('a-ctx'),4,200],[$('a-sample'),3,50],
+           [$('a-readcap'),4,512],[$('a-cmdto'),3,600],[$('a-httpto'),30,600]];
+  for(const [el,lo,hi] of V){
+    const n=numOr(el.value,0);
+    if(n<lo||n>hi){showToast('「'+el.placeholder+'」范围内填写数字','warn');try{el.focus();}catch(e){};return;}
+  }
+  post({c:'agentCfg',maxTurns:numOr($('a-turns').value,30),maxCtxMsgs:numOr($('a-ctx').value,30),
+        searchSample:numOr($('a-sample').value,20),readCapKB:numOr($('a-readcap').value,30),
+        cmdTo:numOr($('a-cmdto').value,120),httpTo:numOr($('a-httpto').value,120),
+        notify:$('a-notify').getAttribute('aria-pressed')==='true',
+        cardsOpen:$('a-cardsopen').getAttribute('aria-pressed')==='true',
+        instr:String($('a-instr').value||'').slice(0,4000)});
+  showToast('Agent 设置已保存','ok');
+  cfgToggle(false);   /* 保存成功即收起面板 */
 }
 
 /* ==================== 对话流 ==================== */
@@ -1423,9 +1509,10 @@ function toolGroupHtml(k0,e2){
   }
   let cards='';
   for(let k=k0;k<e2;k++) cards+=S.msgs[k].html||'';
-  /* 含待确认卡/待应用调整卡的组默认展开 (按钮必须可达); 其余默认折叠 */
+  /* 含待确认卡/待应用调整卡的组默认展开 (按钮必须可达); 其余缺省 =
+     Agent 设置「工具卡片默认展开」(开 = 组也整组展开, 折叠了卡片就看不见) */
   const wait=(cards.match(/data-act="adjApply"/g)||[]).length;
-  const open=S.toolGrp[key]!==undefined?S.toolGrp[key]:(ask>0||wait>0);
+  const open=S.toolGrp[key]!==undefined?S.toolGrp[key]:(ask>0||wait>0||S.cfg.cardsOpen===true);
   let sum=wait?('待应用 × '+wait):ask?('等待确认 × '+ask):(running?('执行中… × '+running)
     :(failed?(failed+' 次失败'+(done?' · 完成 '+done:'')):('完成 '+done+' 次')));
   return '<div class="ai-toolgrp'+(open?' open':'')+'" data-k0="'+k0+'">'
@@ -1452,11 +1539,13 @@ function userRowHtml(m,mi){
     b.classList.toggle('ai-bubble-short',!text||(!block&&b.querySelectorAll('p').length===1&&text.length<=30));
   });
 }
-/* 样本列表展开态回放 (msgs 全量重推后 JS 自持的展开态不丢; 箭头随开合转向) */
+/* 样本列表展开态回放 (msgs 全量重推后 JS 自持的展开态不丢; 箭头随开合转向)。
+ * 未手动开合过的卡片缺省态 = Agent 设置「工具卡片默认展开」(S.cfg.cardsOpen) */
 function applyOpenSteps(){
   document.querySelectorAll('#threadInner .step').forEach(card=>{
     const gi=+card.getAttribute('data-gi');
-    const open=!!S.openSteps[S.cur+':'+gi];
+    const key=S.cur+':'+gi;
+    const open=S.openSteps[key]!==undefined?!!S.openSteps[key]:(S.cfg.cardsOpen===true);
     const body=card.querySelector('.ssamples');
     if(body) body.style.display=open?'':'none';
     card.classList.toggle('open',open);
@@ -2521,6 +2610,18 @@ function bind(){
   $('b-close').addEventListener('click',()=>post({c:'close'}));
   $('b-cancel').addEventListener('click',()=>cfgToggle(false));
   $('b-save').addEventListener('click',saveProf);
+  /* Agent 标签页: 切页 / 保存 / 取消 / 两勾选 (与接口页同面板, 点外/Esc 收起共用) */
+  $('cfgTabApi').addEventListener('click',()=>setCfgTab('api'));
+  $('cfgTabAgent').addEventListener('click',()=>setCfgTab('agent'));
+  $('b-agent-cancel').addEventListener('click',()=>cfgToggle(false));
+  $('b-agent-save').addEventListener('click',saveAgent);
+  ['a-notify','a-cardsopen'].forEach(id=>{
+    $(id).addEventListener('click',()=>{
+      const b=$(id);
+      const on=b.getAttribute('aria-pressed')==='true';
+      b.setAttribute('aria-pressed',on?'false':'true');
+    });
+  });
   /* 模型档案: 下拉切换 / 新建 / 复制 / 删除 (删除是两步确认); 保存成功/点外/Esc 均收起面板 */
   $('f-prof').addEventListener('change',()=>selectProf($('f-prof').value));
   $('f-prof-add').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:0});});

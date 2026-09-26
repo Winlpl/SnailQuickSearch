@@ -83,6 +83,16 @@ static picojson::value WebCfgValue() {
     o["policy"] = JN(g_cfg.filePolicy);
     o["epolicy"] = JN(g_cfg.execPolicy);
     o["sync"] = JB(g_cfg.syncResults);   /* 结果同步勾选 (输入区 chip 开关) */
+    /* Agent 行为设置 (「Agent」标签页; agentCfg 命令整包写回) */
+    o["maxTurns"] = JN(g_cfg.maxTurns);
+    o["maxCtxMsgs"] = JN(g_cfg.maxCtxMsgs);
+    o["searchSample"] = JN(g_cfg.searchSample);
+    o["readCapKB"] = JN(g_cfg.readCapKB);
+    o["cmdTo"] = JN(g_cfg.cmdTimeoutSec);
+    o["httpTo"] = JN(g_cfg.httpTimeoutSec);
+    o["notify"] = JB(g_cfg.notifyDone);
+    o["cardsOpen"] = JB(g_cfg.toolCardsOpen);
+    o["instr"] = JS(g_cfg.customInstr);
     /* 多模态能力 (活动档案镜像): 输入区据此显隐附件入口 */
     o["img"] = JB(g_cfg.img);
     o["video"] = JB(g_cfg.video);
@@ -1020,7 +1030,9 @@ void WebSessionRect(AiSess* s) {
     WebApplyZoom(s);
 }
 
-/* ---- JS 命令 (WebMessageReceived; 实现 WebCommand 在本文件尾部) ---- */
+/* ---- JS 命令 (WebMessageReceived; 实现 WebCommand 在本文件尾部) ----
+ * 命令清单见 ai_assistant.h 推送协议节; agentCfg = Agent 行为设置整包 (轮数/历史上限/
+ * 样本/读取上限/两种超时/后台通知/卡片缺省展开/自定义指令) — 夹取+落盘+重建提示词+广播 */
 void WebCommand(AiSess* s, const Jv& msg);
 
 /* ---- 事件回调 (持有 AiSess* — g_sess 是静态数组, 地址进程级稳定) ---- */
@@ -2038,6 +2050,30 @@ void WebCommand(AiSess* s, const Jv& msg) {
         }
         CfgApplyActive();
         CfgSave();
+        CfgBroadcast();
+        return;
+    }
+    if (c == L"agentCfg") {   /* Agent 行为设置 (「Agent」标签页): 整包写回 — 数值越界夹取
+                                 (与 CfgLoad 同口径), 自定义指令截断 4000 字。保存后重建
+                                 系统提示词 (样本条数措辞/自定义指令节), 再广播给全部会话。 */
+        const Jv* v;
+        auto rdN = [&](const wchar_t* k, int def) -> int {
+            const Jv* x = msg.Get(k);
+            return (x && x->t == 2) ? (int)x->num : def;
+        };
+        g_cfg.maxTurns = rdN(L"maxTurns", g_cfg.maxTurns);
+        g_cfg.maxCtxMsgs = rdN(L"maxCtxMsgs", g_cfg.maxCtxMsgs);
+        g_cfg.searchSample = rdN(L"searchSample", g_cfg.searchSample);
+        g_cfg.readCapKB = rdN(L"readCapKB", g_cfg.readCapKB);
+        g_cfg.cmdTimeoutSec = rdN(L"cmdTo", g_cfg.cmdTimeoutSec);
+        g_cfg.httpTimeoutSec = rdN(L"httpTo", g_cfg.httpTimeoutSec);
+        if ((v = msg.Get(L"notify")) != NULL && v->t == 1) g_cfg.notifyDone = v->b;
+        if ((v = msg.Get(L"cardsOpen")) != NULL && v->t == 1) g_cfg.toolCardsOpen = v->b;
+        if ((v = msg.Get(L"instr")) != NULL && v->t == 3) g_cfg.customInstr = v->str;
+        /* 夹取收口在 ai_core.cpp (与 CfgLoad 同一函数) */
+        CfgClampAgent();
+        CfgSave();
+        BuildInstructions();   /* 提示词含样本条数措辞与自定义指令节, 变更后必须重建 */
         CfgBroadcast();
         return;
     }

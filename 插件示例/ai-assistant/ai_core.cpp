@@ -239,6 +239,23 @@ static bool ValidUtf8(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), NULL, 0);
     return n > 0;
 }
+/* Agent 数值设置的统一夹取 (CfgLoad 与 WebCommand "agentCfg" 两处同口径; 前端同值):
+ * turn=工具轮数, msgs=历史条数, sample=样本条数, kb=read_file 上限, sec=两种超时秒 */
+static int AiCfgClamp(int v, int lo, int hi) {
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+void CfgClampAgent() {
+    g_cfg.maxTurns = AiCfgClamp(g_cfg.maxTurns, 1, AI_AGENT_TURNS_MAX);
+    g_cfg.maxCtxMsgs = AiCfgClamp(g_cfg.maxCtxMsgs, 4, 200);
+    g_cfg.searchSample = AiCfgClamp(g_cfg.searchSample, 3, 50);
+    g_cfg.readCapKB = AiCfgClamp(g_cfg.readCapKB, 4, 512);
+    g_cfg.cmdTimeoutSec = AiCfgClamp(g_cfg.cmdTimeoutSec, 3, 600);
+    g_cfg.httpTimeoutSec = AiCfgClamp(g_cfg.httpTimeoutSec, 30, 600);
+    if (g_cfg.customInstr.size() > 4000) g_cfg.customInstr.resize(4000);
+}
+
 void CfgSave() {
     if (!g_host) return;
     std::wstring mk = MachineKeyStr();
@@ -251,6 +268,16 @@ void CfgSave() {
     root["filePolicy"] = JN(g_cfg.filePolicy);
     root["execPolicy"] = JN(g_cfg.execPolicy);
     root["syncResults"] = JB(g_cfg.syncResults);
+    /* Agent 行为设置 (面板「Agent」标签页; 键与 WebCfgValue 下发同名) */
+    root["maxTurns"] = JN(g_cfg.maxTurns);
+    root["maxCtxMsgs"] = JN(g_cfg.maxCtxMsgs);
+    root["searchSample"] = JN(g_cfg.searchSample);
+    root["readCapKB"] = JN(g_cfg.readCapKB);
+    root["cmdTimeoutSec"] = JN(g_cfg.cmdTimeoutSec);
+    root["httpTimeoutSec"] = JN(g_cfg.httpTimeoutSec);
+    root["notifyDone"] = JB(g_cfg.notifyDone);
+    root["toolCardsOpen"] = JB(g_cfg.toolCardsOpen);
+    root["customInstr"] = JS(g_cfg.customInstr);
     root["activeId"] = JS(g_cfg.activeId);
     picojson::array profs;
     for (const AiProfile& p : g_cfg.profiles) {
@@ -352,6 +379,24 @@ void CfgLoad() {
                 g_cfg.execPolicy = (ep->num == 1) ? 2 : (int)ep->num;
             const Jv* sy = v.Get(L"syncResults");
             if (sy && sy->t == 1) g_cfg.syncResults = sy->b;
+            /* Agent 行为设置: 数值缺键 = 结构体默认值 (旧配置文件行为不变), 读到才覆盖 */
+            auto rdN = [&v](const wchar_t* k, int def) -> int {
+                const Jv* x = v.Get(k);
+                return (x && x->t == 2) ? (int)x->num : def;
+            };
+            g_cfg.maxTurns = rdN(L"maxTurns", g_cfg.maxTurns);
+            g_cfg.maxCtxMsgs = rdN(L"maxCtxMsgs", g_cfg.maxCtxMsgs);
+            g_cfg.searchSample = rdN(L"searchSample", g_cfg.searchSample);
+            g_cfg.readCapKB = rdN(L"readCapKB", g_cfg.readCapKB);
+            g_cfg.cmdTimeoutSec = rdN(L"cmdTimeoutSec", g_cfg.cmdTimeoutSec);
+            g_cfg.httpTimeoutSec = rdN(L"httpTimeoutSec", g_cfg.httpTimeoutSec);
+            const Jv* nd = v.Get(L"notifyDone");
+            if (nd && nd->t == 1) g_cfg.notifyDone = nd->b;
+            const Jv* tco = v.Get(L"toolCardsOpen");
+            if (tco && tco->t == 1) g_cfg.toolCardsOpen = tco->b;
+            const Jv* ci = v.Get(L"customInstr");
+            if (ci && ci->t == 3) g_cfg.customInstr = ci->str;
+            CfgClampAgent();
             const Jv* av = v.Get(L"activeId");
             if (av && av->t == 3) g_cfg.activeId = av->str;
             const Jv* ps = v.Get(L"profiles");
