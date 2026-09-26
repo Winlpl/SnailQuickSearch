@@ -1,7 +1,11 @@
 /*
- * test_ai_file.cpp — read_file/AiTextToUtf8 纯逻辑单元验证 (临时测试设施)
- * 链 ai_core.obj + ai_file.obj (build.bat 产物), 不起引擎不碰 UI;
+ * test_ai_file.cpp — read_file/AiTextToUtf8 纯逻辑单元验证
+ * 链 ai_core.obj + ai_file.obj (插件示例\ai-assistant\build.bat 产物), 不起引擎不碰 UI;
  * 样本由 test_fixtures.js 造在 %TEMP%\aft。通过=输出 0 失败, 非零=失败数。
+ * 构建 (仓库根执行, 先跑过插件 build.bat 让 .obj 在位; /I 解决 include 定位; 库集同插件 build.bat):
+ *   cl /nologo /EHsc /std:c++20 /utf-8 /MT /DUNICODE /D_UNICODE /Fotest\ /I插件示例\ai-assistant test\test_ai_file.cpp 插件示例\ai-assistant\ai_core.obj 插件示例\ai-assistant\ai_file.obj ^
+ *      /Fe:test\test_ai_file.exe /link winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib xunjieso.lib
+ *   (注意 /Fotest\ 不带引号 — /Fo"test\" 的 \" 会被解析成转义引号吞掉后续源文件, 报 D8003)
  */
 #include "ai_assistant.h"
 #include <stdio.h>

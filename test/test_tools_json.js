@@ -4,7 +4,7 @@
 'use strict';
 const fs = require('fs'), path = require('path');
 
-const src = fs.readFileSync(path.join(__dirname, 'ai_agent.cpp'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', '插件示例', 'ai-assistant', 'ai_agent.cpp'), 'utf8');
 let segs = [], m, re = /R"json\(([\s\S]*?)\)json"/g;
 while ((m = re.exec(src)) !== null) segs.push(m[1]);
 // 只取工具定义那段 (以 "[" 开头的第一段) 与它的续段: 从含 "name":"run_search" 的段开始连续拼接
