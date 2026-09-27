@@ -507,6 +507,7 @@ static const wchar_t* StepBadge(int kind) {
         case 14: return L"图片";
         case 15: return L"网搜";
         case 16: return L"网页";
+        case 17: case 18: return L"资源管理器";
     }
     return L"工具";
 }

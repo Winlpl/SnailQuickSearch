@@ -284,7 +284,8 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     int kind = 0;               /* 0=run_search 1=open_file 2=copy_paths 3=设置 4=窗口 5=搜索框
                                    6=模式 7=插件 8=皮肤 9=规范 10=捐赠 11=run_command 命令
                                    12=read_file 13=file_op 14=read_image 15=web_search
-                                   16=fetch_url (未知工具照显 name) */
+                                   16=fetch_url 17=list_explorer_windows
+                                   18=explorer_window_op (未知工具照显 name) */
     std::wstring name;          /* 工具名 (模型传回; 未知工具也照显) */
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
@@ -391,6 +392,28 @@ std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st);
           /* 执行 (worker 线程, 逐项 SHFileOperation; 结果进 st->res8/top; j 只用于 abort) */
 std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st);             /* read_file 实体 */
 std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st);  /* read_image 实体 (图片注入 j->injImgs) */
+
+/* ---- 资源管理器窗口枚举 (list_explorer_windows, 2.12.0, 实现收口 ai_file.cpp):
+ * 用户已打开的文件管理器窗口/标签页清单 — 以"用户当前浏览位置"为上下文继续任务。
+ * Shell COM 只读 (IShellWindows), 不碰文件内容/引擎/宿主/UI, 免权限 (同
+ * get_window_selection 的读环境面口径); 全部 agent 工作线程调用。 */
+struct ExplorerWinInfo {
+    long long hwnd = 0;        /* 顶层窗口句柄 (Win11 多标签共用 hwnd, 各标签一条) */
+    std::wstring title;        /* 文件夹显示名 (LocationName) */
+    std::wstring path;         /* 完整路径; 空 = 虚拟位置 (isVirtual=true) */
+    bool isVirtual = false;    /* 此电脑/回收站/控制面板/快速访问等无文件系统路径的位置 */
+    bool isForeground = false; /* 此刻的前台窗口 (结果 JSON 标 active) */
+};
+std::wstring ExplorerUrlToPath(const std::wstring& url);
+          /* file:// URL → Windows 路径 (百分号转义按 UTF-8 解码 / UNC 保留 / ::{CLSID}
+             虚拟命名空间=空串; '+' 不还原空格); 纯函数, test\test_ai_file.cpp 直测 */
+bool ExplorerWindowEnumerator(std::vector<ExplorerWinInfo>* out, std::wstring* err);
+          /* 枚举当前打开的资源管理器窗口 (每窗口/标签页一条; 过滤 不可见+非 explorer.exe);
+             失败 = false (err=原因) */
+std::wstring ListExplorerWindowsExec(const Jv& v, AiToolStep* st);  /* list_explorer_windows 实体 */
+std::wstring ExplorerWindowOpExec(const Jv& v, AiToolStep* st);     /* explorer_window_op 实体 (kind 18):
+          activate/close/minimize/maximize/restore 按 hwnd 定向 (须仍在现枚举窗口集内) +
+          open=path 开文件夹; 全部瞬时动作直执行 (任务类先例), 见 ai_file.cpp 实现头注释 */
 void AiOutHeadTail(size_t* head, size_t* tail);            /* 内容回传头尾上限 (头 80%+尾 20%, 总量
                                                               = readCapKB; ai_file.cpp 收口) */
 std::string AiCapUtf8HeadTail(const std::string& content8);/* 内容封顶 (UTF-8 边界落刀 + 精确省略量

@@ -3,8 +3,10 @@
  * 链 ai_core.obj + ai_file.obj (插件示例\ai-assistant\build.bat 产物), 不起引擎不碰 UI;
  * 样本由 test_fixtures.js 造在 %TEMP%\aft。通过=输出 0 失败, 非零=失败数。
  * 覆盖: 编码识别 / 文本与 docx·pptx·xlsx 读取 / file_op 更改记录 /
- *       AiWindowLines (offset/limit 行窗口分页) / AiSpillText (外溢落盘)。
- * 构建 (仓库根执行, 先跑过插件 build.bat 让 .obj 在位; /I 解决 include 定位; 库集同插件 build.bat):
+ *       AiWindowLines (offset/limit 行窗口分页) / AiSpillText (外溢落盘) /
+ *       ExplorerUrlToPath (file:// URL → Windows 路径, list_explorer_windows 的纯函数)。
+ * 构建 (仓库根执行, 先跑过插件 build.bat 让 .obj 在位): **test\build_test_ai_file.bat** 一键编译+运行;
+ * 手敲等价命令 (库集同插件 build.bat; /I 解决 include 定位):
  *   cl /nologo /EHsc /std:c++20 /utf-8 /MT /DUNICODE /D_UNICODE /Fotest\ /I插件示例\ai-assistant test\test_ai_file.cpp 插件示例\ai-assistant\ai_core.obj 插件示例\ai-assistant\ai_file.obj ^
  *      /Fe:test\test_ai_file.exe /link winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib xunjieso.lib
  *   (注意 /Fotest\ 不带引号 — /Fo"test\" 的 \" 会被解析成转义引号吞掉后续源文件, 报 D8003)
@@ -499,6 +501,76 @@ int main() {
             DeleteFileW(p2.c_str());
         }
         CHECK(AiSpillText("", "t").empty(), "spill-empty-rejected");
+    }
+
+    /* ---- ExplorerUrlToPath (file:// URL → Windows 路径, 直调纯函数) ---- */
+    {
+        CHECK(ExplorerUrlToPath(L"file:///D:/Music/%E5%91%A8%E6%9D%B0%E4%BC%A6") == L"D:\\Music\\周杰伦",
+              "url-decode-utf8");
+        CHECK(ExplorerUrlToPath(L"file:///D:/My%20Docs/a.txt") == L"D:\\My Docs\\a.txt", "url-decode-space");
+        CHECK(ExplorerUrlToPath(L"file:///D:/%E9%9F%B3%E4%B9%90/%2520.txt") == L"D:\\音乐\\%20.txt",
+              "url-decode-single-pass-percent");
+        CHECK(ExplorerUrlToPath(L"file://SERVER/Share/Dir") == L"\\\\SERVER\\Share\\Dir", "url-unc");
+        CHECK(ExplorerUrlToPath(L"file:///D:/Music/") == L"D:\\Music", "url-trailing-slash");
+        CHECK(ExplorerUrlToPath(L"file:///D:/") == L"D:\\", "url-drive-root-kept");
+        CHECK(ExplorerUrlToPath(L"file:///D:/a+b.txt") == L"D:\\a+b.txt", "url-plus-kept");
+        CHECK(ExplorerUrlToPath(L"file:///D:/音乐") == L"D:\\音乐", "url-raw-wide-kept");
+        CHECK(ExplorerUrlToPath(L"file:///D:/%E9%9F%B3%E4%B9%90") == L"D:\\音乐", "url-cjk-folder");
+        CHECK(ExplorerUrlToPath(L"") == L"", "url-empty");
+        CHECK(ExplorerUrlToPath(L"https://example.com/a") == L"", "url-nonfile");
+        CHECK(ExplorerUrlToPath(L"file:///::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") == L"",
+              "url-virtual-guid");
+        CHECK(ExplorerUrlToPath(L"file://::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") == L"",
+              "url-virtual-guid-noslash");
+    }
+
+    /* ---- ExplorerWindowEnumerator (Shell COM 冒烟: 不断言窗口数, 只验证枚举路径真机可用) ---- */
+    {
+        std::vector<ExplorerWinInfo> wins;
+        std::wstring err;
+        bool ok = ExplorerWindowEnumerator(&wins, &err);
+        CHECK(ok, "explorer-enum-call-ok");
+        printf("  [smoke] %d 个资源管理器窗口/标签页\n", (int)wins.size());
+        for (auto& w : wins)
+            printf("    hwnd=%llu %s | %s%s\n", (unsigned long long)w.hwnd, U8(w.title).c_str(),
+                   w.isVirtual ? "(虚拟)" : U8(w.path).c_str(), w.isForeground ? " [前台]" : "");
+    }
+
+    /* ---- ExplorerWindowOpExec (参数校验分支直调; 不触真窗口, 无副作用) ---- */
+    {
+        auto Op = [](const wchar_t* action, long long hwnd, const wchar_t* path) {
+            AiToolStep st;
+            Jv v;
+            v.t = 5;
+            Jv a;
+            a.t = 3;
+            a.str = action;
+            v.obj.push_back({ L"action", std::move(a) });
+            if (hwnd) {
+                Jv h;
+                h.t = 2;
+                h.num = (double)hwnd;
+                v.obj.push_back({ L"hwnd", std::move(h) });
+            }
+            if (path && *path) {
+                Jv p;
+                p.t = 3;
+                p.str = path;
+                v.obj.push_back({ L"path", std::move(p) });
+            }
+            return ExplorerWindowOpExec(v, &st);
+        };
+        CHECK(Op(L"bogus", 0, NULL).find(L"action 只接受") != std::wstring::npos, "op-bad-action");
+        CHECK(Op(L"open", 0, NULL).find(L"open 需要 path") != std::wstring::npos, "op-open-need-path");
+        CHECK(Op(L"open", 0, L"Z:\\不存在的文件夹__xyz").find(L"不是可访问的文件夹") != std::wstring::npos,
+              "op-open-not-folder");
+        CHECK(Op(L"close", 0, NULL).find(L"hwnd 必填") != std::wstring::npos, "op-need-hwnd");
+        /* hwnd=999999 不是资源管理器窗口 → 拒绝 (已死句柄走"已失效", 活着但非 Shell 窗口
+         * 走"不是当前打开的资源管理器窗口" — 两条都是正确的目标校验拒绝) */
+        std::wstring stale = Op(L"close", 999999, NULL);
+        CHECK(stale.find(L"已失效") != std::wstring::npos ||
+              stale.find(L"不是当前打开的资源管理器窗口") != std::wstring::npos,
+              "op-stale-hwnd-rejected");
     }
 
     printf("\n%d failed\n", fails);

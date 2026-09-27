@@ -22,7 +22,8 @@
 #include "ai_assistant.h"
 #include <shellapi.h>    /* SHFileOperationW (删除=回收站 FOF_ALLOWUNDO) */
 #include <wincodec.h>    /* WIC (read_image 解码/缩放/重编码) */
-#include <wrl/client.h>  /* ComPtr (WIC 接口指针管理) */
+#include <wrl/client.h>  /* ComPtr (WIC/Shell COM 接口指针管理) */
+#include <exdisp.h>      /* IShellWindows/IWebBrowser2 (list_explorer_windows 枚举) */
 #include <functional>
 
 /* ==================== 通用小工具 ==================== */
@@ -1325,6 +1326,266 @@ std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st) {
     o["bytes"] = JN((long long)raw.size());
     o["格式"] = JS(fmtName);
     o["说明"] = JS(L"图片已附加到本次请求, 直接看图描述/分析; 看不清或图里没有的信息如实说明");
+    st->res8 = picojson::value(o).serialize();
+    return L"";
+}
+
+/* ==================== 资源管理器窗口枚举 (list_explorer_windows, 2.12.0) ====================
+ * 用户已打开的文件管理器 (Windows 资源管理器) 窗口/标签页清单 — 以"用户当前正在浏览的
+ * 位置"为上下文继续任务 (顺藤摸瓜、报告用户开着哪些位置等)。Shell COM 只读枚举,
+ * 不碰文件内容/引擎/宿主/UI, 免权限 (同 get_window_selection 的读环境面口径)。
+ */
+
+/* file:// URL → Windows 路径 (纯函数, test\test_ai_file.cpp 直测)。
+ * 百分号转义按 UTF-8 字节解码 (Explorer 对非 ASCII 文件夹名发 %E9.. 形), 裸非 ASCII
+ * 宽字符照留; UNC 形 file://server/share → \\server\share; ::{CLSID} 虚拟命名空间
+ * (此电脑/回收站/控制面板…) = 空串, 调用方标 virtual; 非 file: 协议 = 空串。
+ * '+' 不还原成空格 (那是表单编码, 不是 URI 路径); 单遍解码不二次展开 (%25 → %)。 */
+std::wstring ExplorerUrlToPath(const std::wstring& url) {
+    if (_wcsnicmp(url.c_str(), L"file:", 5) != 0) return L"";
+    std::wstring rest = url.substr(5);
+    if (rest.rfind(L"//", 0) != 0) return L"";
+    rest = rest.substr(2);
+    if (rest.rfind(L"::{", 0) == 0 || rest.rfind(L"/::{", 0) == 0) return L"";   /* 虚拟命名空间 */
+    std::wstring path;
+    if (!rest.empty() && rest[0] == L'/')
+        path = rest.substr(1);                    /* file:///D:/... → D:/... */
+    else
+        path = L"\\\\" + rest;                    /* file://server/share → \\server\share */
+    /* 百分号 → 字节流; 段间夹杂的裸宽字符先冲刷字节流 (UTF-8→宽) 再原样接上 */
+    std::string u8;
+    std::wstring out;
+    auto flush = [&]() {
+        if (u8.empty()) return;
+        int wl = MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), NULL, 0);
+        if (wl > 0) {
+            std::wstring w((size_t)wl, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), &w[0], wl);
+            out += w;
+        }
+        u8.clear();
+    };
+    auto hx = [](wchar_t h) { return (int)(h <= L'9' ? h - L'0' : (towlower(h) - L'a' + 10)); };
+    for (size_t i = 0; i < path.size(); i++) {
+        wchar_t c = path[i];
+        if (c == L'%' && i + 2 < path.size() && iswxdigit(path[i + 1]) && iswxdigit(path[i + 2])) {
+            u8.push_back((char)((hx(path[i + 1]) << 4) | hx(path[i + 2])));
+            i += 2;
+        } else if ((unsigned)c >= 0x80) {
+            flush();
+            out.push_back(c);
+        } else {
+            u8.push_back((char)c);                /* ASCII 照走字节流 ('/' 统一在最后转) */
+        }
+    }
+    flush();
+    for (auto& ch : out)
+        if (ch == L'/') ch = L'\\';
+    while (out.size() > 3 && out.back() == L'\\') out.pop_back();   /* 去尾分隔 (盘根 D:\ 保留) */
+    return out;
+}
+
+/* ExplorerWindowEnumerator — 枚举当前打开的资源管理器窗口 (Shell COM IShellWindows):
+ * 每个窗口/标签页一条 (Win11 多标签共用顶层 hwnd 各占一条), 过滤 不可见 与 非
+ * explorer.exe 宿主 (FullName 尾段比对, 排除残留 IE/自动化宿主; FullName 不可得时保留)。
+ * 失败 = false (err=原因)。CoInitializeEx 模式照 WicShrinkToJpeg (SUCCEEDED 含 S_FALSE,
+ * 配对 CoUninitialize; RPC_E_CHANGED_MODE = 已按别的模式初始化, COM 照用)。 */
+bool ExplorerWindowEnumerator(std::vector<ExplorerWinInfo>* out, std::wstring* err) {
+    HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    bool comHere = SUCCEEDED(co);
+    bool ok = false;
+    Microsoft::WRL::ComPtr<IShellWindows> sw;
+    do {
+        if (FAILED(CoCreateInstance(__uuidof(ShellWindows), NULL, CLSCTX_ALL,
+                                    __uuidof(IShellWindows), (void**)sw.GetAddressOf()))) {
+            *err = L"无法连接 Shell 窗口枚举服务 (CoCreateInstance 失败)";
+            break;
+        }
+        long n = 0;
+        if (FAILED(sw->get_Count(&n))) { *err = L"枚举 Shell 窗口失败"; break; }
+        ok = true;
+        for (long i = 0; i < n; i++) {
+            VARIANT vi;
+            VariantInit(&vi);
+            vi.vt = VT_I4;
+            vi.lVal = i;
+            Microsoft::WRL::ComPtr<IDispatch> disp;
+            if (FAILED(sw->Item(vi, &disp)) || !disp) continue;
+            Microsoft::WRL::ComPtr<IWebBrowser2> wb;
+            if (FAILED(disp.As(&wb)) || !wb) continue;
+            SHANDLE_PTR hp = 0;
+            wb->get_HWND(&hp);
+            HWND hwnd = (HWND)(intptr_t)hp;
+            if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) continue;
+            BSTR full = NULL;
+            if (SUCCEEDED(wb->get_FullName(&full)) && full) {
+                const wchar_t* exe = wcsrchr(full, L'\\');
+                exe = exe ? exe + 1 : full;
+                bool keep = _wcsicmp(exe, L"explorer.exe") == 0;
+                SysFreeString(full);
+                if (!keep) continue;
+            }
+            ExplorerWinInfo wi;
+            wi.hwnd = (long long)(intptr_t)hwnd;
+            wi.isForeground = (GetForegroundWindow() == hwnd);   /* 用户正看着的窗口 */
+            BSTR name = NULL;
+            if (SUCCEEDED(wb->get_LocationName(&name)) && name) {
+                wi.title = name;
+                SysFreeString(name);
+            }
+            BSTR url = NULL;
+            if (SUCCEEDED(wb->get_LocationURL(&url)) && url) {
+                wi.path = ExplorerUrlToPath(url);
+                SysFreeString(url);
+            }
+            if (wi.path.empty()) wi.isVirtual = true;
+            /* 去重 (同 hwnd+路径+标题的重复条目 = Shell 偶发重报) */
+            bool dup = false;
+            for (auto& e : *out)
+                if (e.hwnd == wi.hwnd && e.path == wi.path && e.title == wi.title) { dup = true; break; }
+            if (!dup) out->push_back(std::move(wi));
+        }
+    } while (0);
+    sw.Reset();
+    if (comHere) CoUninitialize();
+    return ok;
+}
+
+/* list_explorer_windows 实体 (ai_agent.cpp AgentToolExec 分发, kind 17)。
+ * 结果 JSON: count + windows=[{hwnd,title,path}] — path 缺失 = 虚拟位置,
+ * 同条补 virtual=true (工具 description 已声明该口径)。 */
+std::wstring ListExplorerWindowsExec(const Jv& v, AiToolStep* st) {
+    (void)v;
+    std::vector<ExplorerWinInfo> wins;
+    std::wstring err;
+    if (!ExplorerWindowEnumerator(&wins, &err)) return err;
+    picojson::object out;
+    out["count"] = JN((long long)wins.size());
+    picojson::array arr;
+    for (auto& w : wins) {
+        picojson::object o;
+        o["hwnd"] = JN(w.hwnd);
+        if (!w.title.empty()) o["title"] = JS(w.title);
+        if (!w.path.empty())
+            o["path"] = JS(w.path);
+        else
+            o["virtual"] = picojson::value(true);
+        if (w.isForeground) o["active"] = picojson::value(true);
+        arr.push_back(picojson::value(o));
+    }
+    out["windows"] = picojson::value(arr);
+    st->res8 = picojson::value(out).serialize();
+    wchar_t nb[48];
+    swprintf(nb, 48, L"%d 个窗口", (int)wins.size());
+    st->argz = nb;
+    return L"";
+}
+
+/* explorer_window_op 实体 (kind 18, ai_agent.cpp 分发): 对 list_explorer_windows 列出的
+ * 窗口执行管理动作。全部为瞬时界面动作 (不改任何持久设置), 按"任务类直执行"先例
+ * (open_file/set_search) 不走提案卡, 行为约束 (只做用户明确要求的动作) 住工具 description。
+ * 目标 hwnd 必须仍在本次现枚举的 Shell 窗口集内 (防陈旧句柄 / 误指其它程序的窗口) —
+ * 每次动作前重枚举一次, 顺带拿到窗口标题进卡片 (argz)。 */
+std::wstring ExplorerWindowOpExec(const Jv& v, AiToolStep* st) {
+    std::wstring act = TrimW(v.S(L"action"));
+    static const wchar_t* ACTS[] = { L"activate", L"close", L"minimize", L"maximize", L"restore", L"open" };
+    int ai = -1;
+    for (int i = 0; i < 6; i++)
+        if (act == ACTS[i]) { ai = i; break; }
+    if (ai < 0)
+        return L"action 只接受 activate | close | minimize | maximize | restore | open";
+
+    /* open: 打开文件夹 (ShellExecute 系统默认行为 — 该文件夹已在某窗口打开时激活那个窗口,
+     * 否则开新窗口)。必须是已存在的文件夹; 打开/定位文件走 open_file。 */
+    if (ai == 5) {
+        std::wstring p = TrimW(v.S(L"path"));
+        if (p.size() >= 2 && p.front() == L'"' && p.back() == L'"') p = p.substr(1, p.size() - 2);
+        for (auto& c : p) if (c == L'/') c = L'\\';
+        if (p.empty() || !FilePathOk(p)) return L"open 需要 path (文件夹绝对路径)";
+        DWORD at = GetFileAttributesW(p.c_str());
+        if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY))
+            return L"不是可访问的文件夹: " + p + L" (打开/定位文件用 open_file)";
+        HINSTANCE r = ShellExecuteW(NULL, L"open", p.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        if ((intptr_t)r <= 32) return L"打开失败 (ShellExecute 错误)";
+        st->argz = p.size() > 120 ? p.substr(0, 120) + L"…" : p;
+        picojson::object o;
+        o["ok"] = picojson::value(true);
+        o["action"] = JS(L"open");
+        o["path"] = JS(p);
+        st->res8 = picojson::value(o).serialize();
+        return L"";
+    }
+
+    /* 其余动作按 hwnd 定向 */
+    const Jv* hv = v.Get(L"hwnd");
+    long long hwndN = hv && hv->t == 2 ? (long long)hv->num : 0;
+    if (!hwndN) return L"hwnd 必填 (list_explorer_windows 获取)";
+    HWND hwnd = (HWND)(intptr_t)hwndN;
+    if (!IsWindow(hwnd))
+        return L"hwnd 已失效 (窗口已关闭? 先 list_explorer_windows 重新获取)";
+    std::vector<ExplorerWinInfo> wins;
+    std::wstring err;
+    if (!ExplorerWindowEnumerator(&wins, &err)) return err;
+    std::wstring title;
+    bool known = false;
+    for (auto& w : wins)
+        if (w.hwnd == hwndN) { known = true; title = w.title; break; }
+    if (!known)
+        return L"hwnd 不是当前打开的资源管理器窗口 (已关闭? 先 list_explorer_windows 重新获取)";
+
+    std::wstring note;
+    std::wstring tgt = title.empty() ? std::to_wstring(hwndN) : title;
+    picojson::object o;
+    o["ok"] = picojson::value(true);
+    o["action"] = JS(act);
+    o["hwnd"] = JN(hwndN);
+    if (!title.empty()) o["title"] = JS(title);
+
+    if (ai == 0) {
+        /* activate: 先还原/显示, 抢前台用 AttachThreadInput 对账 (跨进程前台锁的通行解法),
+         * 结束后 GetForegroundWindow 复核 — 未落前台在 note 如实说, 不假装成功 */
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        else ShowWindow(hwnd, SW_SHOW);
+        bool fg = GetForegroundWindow() == hwnd;
+        if (!fg) {
+            DWORD myTid = GetCurrentThreadId();
+            HWND fgh = GetForegroundWindow();
+            DWORD fgTid = fgh ? GetWindowThreadProcessId(fgh, NULL) : 0;
+            DWORD tgTid = GetWindowThreadProcessId(hwnd, NULL);
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, TRUE);
+            if (tgTid && tgTid != myTid) AttachThreadInput(myTid, tgTid, TRUE);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, FALSE);
+            if (tgTid && tgTid != myTid) AttachThreadInput(myTid, tgTid, FALSE);
+            fg = GetForegroundWindow() == hwnd;
+        }
+        o["foreground"] = picojson::value(fg);
+        if (!fg) note = L"窗口已显示但前台焦点未落到它 (可能被系统前台锁策略拦截)";
+        st->argz = L"激活 " + tgt;
+    } else if (ai == 1) {
+        /* close: WM_CLOSE (礼貌关闭, 整个窗口含全部标签页) + 短轮询拿真实 closed 结果 */
+        bool sent = PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0;
+        bool closed = false;
+        for (int i = 0; sent && i < 3 && !closed; i++) {
+            Sleep(250);
+            closed = !IsWindow(hwnd);
+        }
+        o["closed"] = picojson::value(closed);
+        if (!sent) note = L"关闭消息发送失败";
+        else if (!closed) note = L"关闭请求已发送, 窗口仍在 (可能弹出了确认框或被拦截)";
+        st->argz = L"关闭 " + tgt;
+    } else {
+        ShowWindow(hwnd, ai == 2 ? SW_MINIMIZE : ai == 3 ? SW_MAXIMIZE : SW_RESTORE);
+        bool done = ai == 2 ? IsIconic(hwnd) != 0
+                  : ai == 3 ? IsZoomed(hwnd) != 0
+                  : (!IsIconic(hwnd) && !IsZoomed(hwnd));
+        o["done"] = picojson::value(done);
+        if (!done) note = L"窗口状态未按预期变化";
+        st->argz = std::wstring(ai == 2 ? L"最小化 " : ai == 3 ? L"最大化 " : L"还原 ") + tgt;
+    }
+    if (st->argz.size() > 80) st->argz.resize(80);
+    if (!note.empty()) o["note"] = JS(note);
     st->res8 = picojson::value(o).serialize();
     return L"";
 }

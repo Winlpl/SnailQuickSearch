@@ -2157,6 +2157,18 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         st->kind = 14;
         return ReadImageToolExec(j, v, st);
     }
+    if (name8 == "list_explorer_windows") {
+        /* 资源管理器窗口枚举 (ai_file.cpp ExplorerWindowEnumerator): Shell COM 只读,
+           不碰引擎/宿主/UI, 免权限 (同 get_window_selection 的读环境面口径) */
+        st->kind = 17;
+        return ListExplorerWindowsExec(v, st);
+    }
+    if (name8 == "explorer_window_op") {
+        /* 资源管理器窗口管理 (ai_file.cpp ExplorerWindowOpExec): 瞬时界面动作直执行
+           (任务类先例 open_file/set_search), 目标 hwnd 现枚举校验防陈旧句柄 */
+        st->kind = 18;
+        return ExplorerWindowOpExec(v, st);
+    }
     if (name8 == "web_search") {
         /* 联网搜索/网页抓取 (ai_net.cpp): 工作线程直跑 WinHTTP, 不碰引擎/宿主/UI;
            kind 15/16 与卡片样本行 (top = "标题 — URL") 由实体自填 */
@@ -2519,6 +2531,10 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- read_image：把本地图片注入对话给视觉模型看（用户说\"看看这张图/截图\"时用）。\n"
     L"- file_op：文件动作（复制/移动/重命名/删除到回收站/新建文件夹），源支持 FileId+路径批量混用。\n"
     L"- get_window_selection：读某窗口当前选中的文件（用户指\"选中的/这些文件\"要做判断、统计或批量操作建议时用）。\n"
+    L"- list_explorer_windows：列出用户当前打开的资源管理器窗口/标签页（各条完整路径+标题+前台标记）—"
+    L"用户指\"我打开的窗口/正浏览的位置\"、要以用户当前浏览上下文继续任务时用。\n"
+    L"- explorer_window_op：资源管理器窗口管理（激活/关闭/最小化/最大化/还原/打开文件夹，按 list_explorer_windows"
+    L" 的 hwnd 定向）——只做用户明确要求的动作。\n"
     L"- set_search：把关键词置入用户窗口的搜索框并执行（run_search 是你的私有搜索，不动用户界面）。\n"
     L"- list_windows / get_window_state / set_window_settings / control_window / create_window：窗口查看与代办。\n"
     L"- get_global_settings / set_global_settings / list_skins：全局设置读写 / 皮肤名清单。\n"
@@ -2640,6 +2656,10 @@ static const char* AI_TOOLS_JSON = R"json([
   {"type":"function","name":"set_global_settings","description":"提交对全局设置的修改。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才逐项执行。键: 双击Ctrl目标=\"\"(禁用)|\"默认窗口\"|档案名; 绘制引擎=\"d2d\"|\"gdiplus\"(应用后重启生效)。","parameters":{"type":"object","properties":{"settings":{"type":"object","description":"要修改的全局设置键值对"}},"required":["settings"]}},
   {"type":"function","name":"list_skins","description":"列出全部可用皮肤名 (set_window_settings 的\"皮肤\"键只接受这些名字)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"get_window_selection","description":"读取一个搜索窗口当前选中的文件清单。结果 JSON: win=窗口名称, total=选中总数, files=[[引擎FileId,文件名],…] (FileId=文件的唯一引用方式, 回答里的文件动作链接 xjs://open|reveal?id= 填它; 不含路径); files 长度<total 时仅详列了前若干条。用户说\"我选中的这些/当前选中的文件\"要做判断、统计或给出批量操作建议时调用; 没有选中时 total=0。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"limit":{"type":"integer","description":"最多详列多少条 (默认 200; 选中数为全量, 超出部分不展开)"}},"required":[]}},
+)json"   /* 2.12.0 +list_explorer_windows — 续段相邻拼接 (单段 ≤16KB 防 C2026, 分段口径同上);
+            本段起 = 环境感知与代办类工具 */ R"json(
+  {"type":"function","name":"list_explorer_windows","description":"列出用户当前在文件管理器 (Windows 资源管理器) 里打开的窗口与标签页。结果 JSON: count=标签页总数, windows=[{hwnd,title,path,active}] — 每个打开的标签页一条 (Win11 多标签共用同一 hwnd, 各标签各占一条); title=文件夹显示名, path=该标签页正在浏览的完整路径; path 缺省且 virtual=true = 系统虚拟位置 (此电脑/回收站/控制面板/快速访问等, 看 title 知道是哪); active=true = 此刻的前台窗口。何时用: 用户说\"我打开了哪些窗口/文件夹\"\"看看我现在开着哪些位置\"\"我正在看的这个文件夹里…\"时, 或需要以用户当前的浏览位置为上下文继续任务 (如沿用户正浏览的文件夹继续找文件/统计); explorer_window_op 的 hwnd 也从这里取。只读操作, 不改动任何窗口。路径是精确数据, 回答里逐字符照抄、绝不缩写。","parameters":{"type":"object","properties":{},"required":[]}},
+  {"type":"function","name":"explorer_window_op","description":"对用户已打开的文件管理器 (资源管理器) 窗口执行管理动作。hwnd 取 list_explorer_windows 的返回; 全部是瞬时动作 (不改任何设置)。activate=激活到前台 (自动还原最小化; 结果 foreground=false 表示窗口已显示但系统没给焦点); close=关闭窗口 — **关的是整个窗口 (含全部标签页), 标签页无法恢复**; minimize/maximize/restore=最小化/最大化/还原; open=打开文件夹 (用 path 参数, 必须是已存在的文件夹; 系统默认行为: 该文件夹已在某窗口打开时激活那个窗口, 否则开新窗口; 打开/定位文件用 open_file)。**只做用户明确要求的动作** — 用户指名要动哪个窗口 (名字/位置/前台) 先 list_explorer_windows 核对再操作; 不要主动批量整理、关闭或最小化用户的窗口; close 的结果 closed=false 时如实告知。","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["activate","close","minimize","maximize","restore","open"],"description":"动作"},"hwnd":{"type":"integer","description":"目标窗口句柄 (list_explorer_windows 返回的 hwnd; activate/close/minimize/maximize/restore 必填)"},"path":{"type":"string","description":"文件夹绝对路径 (仅 open 用)"}},"required":["action"]}},
   {"type":"function","name":"list_languages","description":"列出全部可用界面语言 (代码 + 母语名称)。set_language 的 language 参数只接受这些代码 (另加 auto=跟随系统)。","parameters":{"type":"object","properties":{},"required":[]}},
   {"type":"function","name":"get_language","description":"查询一个搜索窗口当前的界面语言设置 (语言代码; auto=跟随系统)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"}},"required":[]}},
   {"type":"function","name":"set_language","description":"提交切换一个搜索窗口的界面语言。**不会直接生效**: 列成\"待应用的调整\"卡片, 用户点\"应用\"才切换 (应用后所有窗口标题各自按新语言刷新并落盘)。语言代码先 list_languages 查 (用户说的是\"中文/英文/泰语\"这类母语名, 映射成代码再调)。","parameters":{"type":"object","properties":{"window":{"type":"string","description":"窗口名称 (留空=当前对话所在窗口)"},"language":{"type":"string","enum":["auto","zh","zh-TW","en","ko","th","ms"],"description":"语言代码 (auto=跟随系统)"}},"required":["language"]}},
