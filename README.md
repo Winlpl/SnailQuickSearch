@@ -124,7 +124,7 @@ skin\                  ← 皮肤主题
 - **构建**:双击 `build.bat` 即可——每次全量编译(rc 资源 → 全部源码并行 → 链接),产物 `SnailQuickSearch.exe` 输出到仓库根目录。
 
 ```bat
-git clone <本仓库>
+git clone https://github.com/Winlpl/SnailQuickSearch.git
 build.bat
 ```
 
