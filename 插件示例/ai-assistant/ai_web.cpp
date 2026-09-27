@@ -2017,6 +2017,12 @@ void WebCommand(AiSess* s, const Jv& msg) {
         return;
     }
     if (c == L"stop") {
+        if (!s->job && s->sending) {   /* 兜底自愈: 挂着发送态却没有作业 (任何路径漏复位)
+                                           时, 停止钮至少能把会话放回空闲 — 该钮永不失效 */
+            s->sending = false;
+            WebSyncSession(s);
+            return;
+        }
         AbortSend(s);
         return;
     }

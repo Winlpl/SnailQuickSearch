@@ -81,6 +81,9 @@ void SessClose(AiSess* s) {
     SessSaveConv(s);   /* 未落库的当前对话保存 (关面板不丢) */
     s->inUse = false;
     if (s->job) { s_orphans.push_back(s->job); s->job = NULL; }   /* 流未完 → 孤儿 (泵清扫 join) */
+    s->sending = false;   /* 作业已移交孤儿表, 会话不得停留发送态 — sending 唯一复位点在
+                             泵的作业收尾分支, 而 jobless 会话被泵整段跳过, 漏复位 =
+                             重开面板后停止钮指向空作业永远无效、输入也被 sending 闸封死 */
     s->msgs.clear();
     s->sampleSeen.clear();   /* 关闭 AI 助手 = 清空会话级样本去重缓存 (2026-09-27 用户口径) */
     s->curId = 0;
