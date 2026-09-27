@@ -1937,9 +1937,12 @@ static int ResolveClickablePath(xjs_engine* eng, const std::wstring& raw,
 }
 
 /* ---- 引擎图标 → data URL (PNG, 引擎 GetFileIco 同步模式) ----
- * 缓存键 = "<dir>"/"<noext>"/小写扩展名 (同类文件同图标, 路径级缓存会爆; 超 256 项整表清,
- * 校验是周期性的自动重建)。新提取按批限额 (fresh 计数) — UI 线程一次解几十个图标会卡帧;
- * agent 占用 g_agentCs 时 AgentFetchFileIco 返回 NULL 即跳过, 下一轮校验再试。 */
+ * 缓存键: 目录 "<dir>" / 无扩展名 "<noext>" / 小写扩展名 — 这三类图标本就全局一致 (所有 .txt
+ * 同一个记事本图标), 扩展名键命中率高且不随会话膨胀; 但 exe/lnk/msi 等**图标随文件本身**
+ * (每个 exe 一个样), 必须按完整路径缓存 — 曾一律用扩展名键, 第一个被提取的 exe 污染全部
+ * exe 链接 (网易云显示酷狗图标, 2026-09-28 实锤)。超 256 项整表清, 校验是周期性的自动重建;
+ * 新提取按批限额 (fresh 计数) — UI 线程一次解几十个图标会卡帧; agent 占用 g_agentCs 时
+ * AgentFetchFileIco 返回 NULL 即跳过, 下一轮校验再试。 */
 static std::map<std::wstring, std::wstring> g_icoCache;
 static SRWLOCK g_icoCs = SRWLOCK_INIT;
 static bool IcoDataUrlOf(int fid, const std::wstring& path, int* fresh, std::wstring* out) {
@@ -1955,7 +1958,16 @@ static bool IcoDataUrlOf(int fid, const std::wstring& path, int* fresh, std::wst
             std::wstring e = path.substr(dot + 1);
             if (e.size() <= 8) {
                 for (auto& c : e) c = (wchar_t)towlower(c);
-                key = e;
+                static const wchar_t* kPerFileIco[] = {
+                    L"exe", L"lnk", L"msi", L"com", L"scr", L"url", L"ico", L"cur" };
+                bool perFile = false;
+                for (const wchar_t* x : kPerFileIco) if (e == x) { perFile = true; break; }
+                if (perFile) {
+                    key = L"p:";
+                    for (wchar_t c : path) key += (wchar_t)towlower(c);
+                } else {
+                    key = e;
+                }
             }
         }
     }

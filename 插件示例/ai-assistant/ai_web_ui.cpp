@@ -1942,7 +1942,14 @@ function enhance(root){
   linkifyPaths(scope);
   schedulePathCheck();
 }
-/* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
+)AIWEBUI"
+/* ---- pathcheck 图标补投递 (2026-09-28 实锤 "exe 链接全裸没图标"): 链接有效性校验一次性落
+   data-ok, 但图标提取是尽力而为 — agent 正在执行工具时 TryEnter g_agentCs 失败 / 扫描期不建
+   私有结果对象 / 本批 16 个新提取配额耗尽, 都只缺图标不缺链接有效性; 校验已过就不再发, 图标
+   永远缺席 (同批文件夹图标命中共享 <dir> 缓存照常显示, 图标随文件本身的 exe 却全裸)。ok 且
+   无图标的链接挂 data-needico 走 3s 慢轮补投递, data-ict 计数封顶 40 (~2 分钟) 防拿不到图标
+   的死循环; 新链接优先占批内名额, 补投递垫后; 重渲重建 DOM 计数自然重置。 ---- */
+           LR"AIWEBUI(/* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
    真实存在性 — 不存在按解析梯子继续试 (more 向后并词/去尾词回退, 与点击解析同一梯子),
    仍不存在 = 退回纯文本, 不画链接不做字符特殊处理。校验异步: enhance 落地后 300ms
    去抖汇总未校验的 .ai-path, 单批 ≤64 条, 余量随回复的 schedulePathCheck 下一轮续检。
@@ -1953,46 +1960,65 @@ function schedulePathCheck(){
   if(pvTimer)return;
   pvTimer=setTimeout(function(){pvTimer=0;sendPathCheck();},300);
 }
+let icoTimer=0;
+function scheduleIcoRetry(){
+  if(icoTimer)return;
+  icoTimer=setTimeout(function(){icoTimer=0;sendPathCheck();},3000);
+}
 function sendPathCheck(){
-  const spans=document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-ok]):not([data-bad])');
   const ps=[],ids=[],seen={};
-  spans.forEach(function(sp){
-    if(sp.hasAttribute('data-badid'))return;   /* 渲染期已判定的编造 ID: 保持禁用态 */
-    if(sp.hasAttribute('data-id')){const id=sp.getAttribute('data-id');
+  const add=function(sp,isId){
+    if(isId){const id=sp.getAttribute('data-id');
       if(!seen['i'+id]){seen['i'+id]=1;ids.push(id);}return;}
     const p=sp.getAttribute('data-path');
     if(p&&!seen['p'+p]){seen['p'+p]=1;ps.push(p);}
+  };
+  document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-ok]):not([data-bad])').forEach(function(sp){
+    if(sp.hasAttribute('data-badid'))return;   /* 渲染期已判定的编造 ID: 保持禁用态 */
+    add(sp,sp.hasAttribute('data-id'));
+  });
+  document.querySelectorAll('.ai-path[data-needico]').forEach(function(sp){
+    if(sp.querySelector('.ai-path-ic')){sp.removeAttribute('data-needico');return;}
+    if(sp.hasAttribute('data-rec'))return;
+    const t=+(sp.getAttribute('data-ict')||0);
+    if(t>=40){sp.removeAttribute('data-needico');return;}
+    sp.setAttribute('data-ict',t+1);
+    add(sp,sp.hasAttribute('data-id'));
   });
   if(ps.length||ids.length)post({c:'pathcheck',ps:ps.slice(0,64),ids:ids.slice(0,64)});
 }
 function applyPathCheck(rs){
   const byKey={};
   (rs||[]).forEach(function(r){byKey[(r.k||'')+'|'+(r.v||'')]=r;});
-  document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-ok]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-ok]):not([data-bad])').forEach(function(sp){
+  let icoRetry=false;
+  document.querySelectorAll('.ai-path[data-path]:not([data-rec]):not([data-bad]),.ai-path[data-id]:not([data-rec]):not([data-bad])').forEach(function(sp){
     if(sp.hasAttribute('data-badid'))return;
     const isId=sp.hasAttribute('data-id');
     const key=isId?('i|'+sp.getAttribute('data-id')):('p|'+sp.getAttribute('data-path'));
     const r=byKey[key];
     if(!r)return;   /* 不在本批 (超上限的余量) */
-    if(!r.ok){sp.replaceWith(document.createTextNode(sp.textContent));return;}   /* 不存在 = 纯文本 */
-    sp.setAttribute('data-ok','1');
-    if(!isId&&r.q){
-      const q=r.q,old=sp.getAttribute('data-path'),shown=sp.textContent;
-      if(q!==old){
-        sp.setAttribute('data-path',q);   /* 点击/右键直接用校正后的真路径 */
-        sp.removeAttribute('data-more');
-        if(q.indexOf(shown)===0&&shown.length<q.length){
-          /* 继续解析并入了更长路径: 后续文本对上才补齐显示 (对不上只改 data-path, 点击已通) */
-          const add=q.slice(shown.length),nx=sp.nextSibling;
-          if(nx&&nx.nodeType===3&&nx.nodeValue.indexOf(add)===0){
-            nx.nodeValue=nx.nodeValue.slice(add.length);
+    if(!r.ok){
+      if(!sp.hasAttribute('data-ok'))sp.replaceWith(document.createTextNode(sp.textContent));return;}   /* 不存在 = 纯文本; 已 ok 的补投递轮不翻转 */
+    if(!sp.hasAttribute('data-ok')){
+      sp.setAttribute('data-ok','1');
+      if(!isId&&r.q){
+        const q=r.q,old=sp.getAttribute('data-path'),shown=sp.textContent;
+        if(q!==old){
+          sp.setAttribute('data-path',q);   /* 点击/右键直接用校正后的真路径 */
+          sp.removeAttribute('data-more');
+          if(q.indexOf(shown)===0&&shown.length<q.length){
+            /* 继续解析并入了更长路径: 后续文本对上才补齐显示 (对不上只改 data-path, 点击已通) */
+            const add=q.slice(shown.length),nx=sp.nextSibling;
+            if(nx&&nx.nodeType===3&&nx.nodeValue.indexOf(add)===0){
+              nx.nodeValue=nx.nodeValue.slice(add.length);
+              sp.textContent=q;
+            }
+          }else if(shown.indexOf(q)===0){
+            /* 粘连的正文词被回退剥掉: 剥下的余量还原为纯文本 */
             sp.textContent=q;
-          }
-        }else if(shown.indexOf(q)===0){
-          /* 粘连的正文词被回退剥掉: 剥下的余量还原为纯文本 */
-          sp.textContent=q;
-          sp.parentNode.insertBefore(document.createTextNode(shown.slice(q.length)),sp.nextSibling);
-        }else sp.textContent=q;   /* 名字模糊校正等: 直接落磁盘权威拼写 */
+            sp.parentNode.insertBefore(document.createTextNode(shown.slice(q.length)),sp.nextSibling);
+          }else sp.textContent=q;   /* 名字模糊校正等: 直接落磁盘权威拼写 */
+        }
       }
     }
     if(r.ic&&!sp.querySelector('.ai-path-ic')){   /* 引擎真图标置前 (data URL; 先落文字再插图标);
@@ -2002,8 +2028,13 @@ function applyPathCheck(rs){
       if(r.q&&r.q!==r.v)S.ic[String(r.q).toLowerCase()]=r.ic;
       if(Object.keys(S.ic).length>512)S.ic={};
       sp.insertAdjacentHTML('afterbegin','<img class="ai-path-ic" src="'+r.ic+'" alt="" aria-hidden="true">');
+      sp.removeAttribute('data-needico');
+    }else if(!sp.querySelector('.ai-path-ic')){
+      sp.setAttribute('data-needico','1');   /* 校验过了但图标没拿到 (agent 忙/扫描期/配额尽): 挂补投递慢轮重试 */
+      icoRetry=true;
     }
   });
+  if(icoRetry)scheduleIcoRetry();
   schedulePathCheck();
 }
 /* ---- 右键菜单 (文件路径 / 搜索卡片的操作项; 点外/Esc/滚动/缩放关闭) ---- */
