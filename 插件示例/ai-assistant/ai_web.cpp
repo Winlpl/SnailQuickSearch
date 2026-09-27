@@ -2300,6 +2300,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         std::vector<AiAttach> atts = s->msgs[lastU].atts;   /* 重跑同一条提问: 附件原样带上 */
         std::wstring prompt = s->msgs[lastU].text;
         s->msgs.resize(lastU);
+        SessRebuildSampleSeen(s);   /* 被重跑轮次提交过的 ID 退出会话去重缓存 */
         SendCurrent(s, prompt, &atts);
         return;
     }
@@ -2315,6 +2316,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         s->msgs.erase(s->msgs.begin() + mi, s->msgs.begin() + end);
         s->ckpt.clear();   /* 检查点覆盖的前缀已被删, 失效 (重算一次, 不落盘) */
         s->ckptCovered = 0;
+        SessRebuildSampleSeen(s);   /* 被删轮次提交过的 ID 退出会话去重缓存 */
         if (s->stepBase > (int)s->msgs.size()) s->stepBase = (int)s->msgs.size();
         if (s->msgs.empty()) {
             /* 删光 = 会话一并移出历史: SessSaveConv 对空会话跳过, 不删则旧内容残留索引,
@@ -2342,6 +2344,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         s->curId = 0;
         s->ckpt.clear();   /* 新会话无历史, 检查点一并清 */
         s->ckptCovered = 0;
+        SessRebuildSampleSeen(s);   /* 新会话无记录 = 会话级去重缓存清空 */
         WebTouch(s);
         WebSyncSession(s);
         WebSyncHist();   /* 保存后的当前对话可能新进历史 */
@@ -2362,6 +2365,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         s->uLastPrompt = s->uLastCompletion = s->uLastCacheHit = 0;
         s->uTokPerSec = 0;
         s->curId = conv.id;
+        SessRebuildSampleSeen(s);   /* 打开会话: 从聊天记录恢复会话级去重缓存 (已提交过的 ID) */
         WebTouch(s);
         WebSyncSession(s);
         WebSyncHist();
@@ -2370,7 +2374,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
     if (c == L"del") {
         unsigned long long id = (unsigned long long)(msg.Get(L"id") ? msg.Get(L"id")->num : 0);
         HistRemove(id);   /* 正文文件 + 索引条目一并删除 */
-        if (s->curId == id) { s->curId = 0; s->msgs.clear(); WebTouch(s); WebSyncSession(s); }
+        if (s->curId == id) { s->curId = 0; s->msgs.clear(); s->sampleSeen.clear(); WebTouch(s); WebSyncSession(s); }
         WebSyncHist();
         return;
     }
@@ -2378,6 +2382,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         HistClearAll();   /* 每个会话的正文文件 + 索引一并清掉 */
         s->curId = 0;
         s->msgs.clear();
+        s->sampleSeen.clear();   /* 全部会话已删, 会话级去重缓存一并清 */
         s->usageHas = false;
         s->uPrompt = s->uCompletion = s->uTotal = s->uCacheHit = s->uCacheWrite = 0;
         s->uLastPrompt = s->uLastCompletion = s->uLastCacheHit = 0;

@@ -82,8 +82,30 @@ void SessClose(AiSess* s) {
     s->inUse = false;
     if (s->job) { s_orphans.push_back(s->job); s->job = NULL; }   /* 流未完 → 孤儿 (泵清扫 join) */
     s->msgs.clear();
+    s->sampleSeen.clear();   /* 关闭 AI 助手 = 清空会话级样本去重缓存 (2026-09-27 用户口径) */
     s->curId = 0;
     WebSessionDestroy(s);
+}
+
+/* 会话级样本去重缓存 ← 聊天记录重建 (2026-09-27 用户口径"打开会话要重新从聊天记录中恢复"):
+ * 扫 role==2 步骤的 res8 (「结果」载荷), files 数组首槽 = 引擎 FileId (run_search 与
+ * get_window_selection 同形态) — 模型见过的条目重新进缓存。msgs 空 = 清空 (新会话/删除)。
+ * 仅 UI 线程 (load/new/del/delturn 等命令路径)。 */
+void SessRebuildSampleSeen(AiSess* s) {
+    s->sampleSeen.clear();
+    for (const AiMsg& m : s->msgs) {
+        if (m.role != 2) continue;
+        for (const AiToolStep& st : m.steps) {
+            if (st.res8.empty()) continue;
+            Jv v = JsonParseW(W8(st.res8.c_str()));
+            if (v.t != 5) continue;
+            const Jv* fl = v.Get(L"files");
+            if (!fl || fl->t != 4) continue;
+            for (const Jv& e : fl->arr)
+                if (e.t == 4 && !e.arr.empty() && e.arr[0].t == 2)
+                    s->sampleSeen.insert((int)e.arr[0].num);
+        }
+    }
 }
 
 void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAttach>* attsIn) {
@@ -178,17 +200,34 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     }
     InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
     InterlockedExchange(&j->execDeny, 0);
-    /* 对话快照 (只含 role 0/1; 有附件的 role 0 即使无文字也要进上下文; 工具往返由 worker 在循环中累计) */
+    /* 对话快照 (2026-09-27 用户口径"会话上下文不允许任何丢失"): role==2 工具卡片一并进
+     * hist — AgentBuildBody 把步骤重建为 function_call/output 对跨轮完整重发, 模型始终
+     * 记得此前做过什么、拿到过什么 (只发文字历史时模型对"第一轮搜了几次"全靠编造,
+     * 会话-107 实锤); 当轮工具往返仍由 worker 在循环中累计。有附件的 role 0 即使无文字
+     * 也要进上下文。 */
     for (auto& m : s->msgs)
-        if (m.role != 2 && (!m.text.empty() || !m.atts.empty())) j->hist.push_back(m);
+        if (m.role == 2 ? !m.steps.empty() : (!m.text.empty() || !m.atts.empty())) j->hist.push_back(m);
     j->autoCompact = g_cfg.autoCompact;   /* 压缩开关发送时定格 */
     j->ckpt = s->ckpt;                    /* 检查点快照进作业 (worker 消费, 泵收尾抄回) */
     j->ckptCovered = s->ckptCovered;
+    j->sampleSeenSess = s->sampleSeen;    /* 会话级样本去重缓存快照 (泵收尾抄回, ckpt 同款) */
     /* 记忆窗口: autoCompact 开 = 交给压缩按 token 管理 (不硬裁); 关 = maxCtxMsgs 条数硬裁
-       (Agent 设置 4..200, 缺省 30 — 调大记得更早的问答, token 消耗也更大) */
+       (Agent 设置 4..200, 缺省 30 — 调大记得更早的问答, token 消耗也更大)。
+       条数只数文字消息 (role 0/1, 与设置项口径一致); role==2 工具卡片随所属轮整体保留
+       或整体裁掉 — 每条卡片的 call/output 对自包含, 从轮边界裁不会拆散配对 */
     if (!j->autoCompact) {
         size_t ctxN = g_cfg.maxCtxMsgs > 0 ? (size_t)g_cfg.maxCtxMsgs : 30;
-        if (j->hist.size() > ctxN) j->hist.erase(j->hist.begin(), j->hist.end() - ctxN);
+        size_t seen = 0, start = j->hist.size();
+        for (size_t i = j->hist.size(); i-- > 0; ) {
+            if (j->hist[i].role == 2) continue;
+            if (++seen > ctxN) {
+                start = i + 1;   /* 该消息起整轮裁掉: 保留区从下一轮的提问 (role 0) 开始 */
+                while (start < j->hist.size() && j->hist[start].role != 0) start++;
+                break;
+            }
+        }
+        if (start > 0 && start < j->hist.size())
+            j->hist.erase(j->hist.begin(), j->hist.begin() + start);
     }
     while (!j->hist.empty() && j->hist.front().role != 0) j->hist.erase(j->hist.begin());
     s->job = j;
@@ -272,6 +311,13 @@ static void PumpStreams() {
                 j->ckptTaken = true;
                 LeaveCriticalSection(&j->cs);
             }
+            /* 会话级样本去重缓存抄回 (回答完成**不**清空 — 会话关闭/切换才清, 2026-09-27
+               用户口径; worker 收尾后不再改, 与 ckpt 同款收尾抄回) */
+            if (state != 0) {
+                EnterCriticalSection(&j->cs);
+                s.sampleSeen = std::move(j->sampleSeenSess);
+                LeaveCriticalSection(&j->cs);
+            }
             /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
              * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
              * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。 */
@@ -308,7 +354,11 @@ static void PumpStreams() {
                                    m.steps[0].name != steps[seen].name ||
                                    m.steps[0].mode != steps[seen].mode ||
                                    m.steps[0].query != steps[seen].query ||
-                                   m.steps[0].filter != steps[seen].filter;
+                                   m.steps[0].filter != steps[seen].filter ||
+                                   m.steps[0].req != steps[seen].req ||
+                                   m.steps[0].arg != steps[seen].arg ||
+                                   m.steps[0].cid != steps[seen].cid ||
+                                   m.steps[0].res8 != steps[seen].res8;
                     if (changed && !uiResolved) {
                         m.steps.assign(1, steps[seen]);
                         WebTouch(&s);

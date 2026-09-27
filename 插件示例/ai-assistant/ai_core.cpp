@@ -496,7 +496,8 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
     for (const AiMsg& m : c.msgs) {
         picojson::object om;
         if (m.role == 2) {
-            /* 工具卡片组: query/err 截到 512 字符 (绘制端同款上限, 存整段脚本无展示出口) */
+            /* 全字段落库, 禁止截断 (2026-09-27 用户口径"提交过的禁止丢失"): query 含整段
+             * lua 脚本/长 SQL, err/adj.err 含完整失败原因 — 都是事后追溯与重放的唯一来源 */
             om["r"] = JN(2);
             picojson::array steps;
             for (const AiToolStep& t : m.steps) {
@@ -508,21 +509,18 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
                 os["name"] = JS(t.name);
                 if (!t.argz.empty()) os["argz"] = JS(t.argz);
                 if (!t.mode.empty()) os["mode"] = JS(t.mode);
-                if (!t.query.empty()) os["query"] = JS(t.query.substr(0, 512));
+                if (!t.query.empty()) os["query"] = JS(t.query);
                 if (!t.filter.empty()) os["筛选器"] = JS(t.filter);
                 if (!t.req.empty()) os["要求返回"] = JS(t.req);
                 if (!t.res8.empty()) {
-                    /* 结果载荷随历史落库 (2026-09-27 用户口径"会话文件不丢已提交的数据"):
-                     * 封顶 32KB, 超长截断并带精确省略量 */
-                    std::string r = t.res8;
-                    if (r.size() > 32768) {
-                        size_t orig = r.size();
-                        r.resize(32768);
-                        r += "…[落库截断, 省略 " + std::to_string(orig - 32768) + " 字节]";
-                    }
-                    os["结果"] = picojson::value(r);
+                    /* 结果载荷随历史落库 (2026-09-27 用户口径"给 AI 提交过的必须完整记录"):
+                     * 全量保存不截断 — 截断版重开会话再回喂 = 模型拿到的是被改写过的历史 */
+                    os["结果"] = picojson::value(t.res8);
                 }
-                if (!t.err.empty()) os["err"] = JS(t.err.substr(0, 512));
+                /* 跨轮完整回喂的事实源 (2026-09-27): 原始参数 JSON 与 call_id, UTF-8 原文直存 */
+                if (!t.arg.empty()) os["参数"] = picojson::value(t.arg);
+                if (!t.cid.empty()) os["调用ID"] = picojson::value(t.cid);
+                if (!t.err.empty()) os["err"] = JS(t.err);
                 if (!t.adj.items.empty()) {
                     /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
                     picojson::object oa;
@@ -535,7 +533,7 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
                         oi["val"] = JS(it.val);
                         oi["json"] = JS(W8(it.json.c_str()));
                         oi["st"] = JN(it.state);
-                        if (!it.err.empty()) oi["err"] = JS(it.err.substr(0, 200));
+                        if (!it.err.empty()) oi["err"] = JS(it.err);
                         items.push_back(picojson::value(oi));
                     }
                     oa["items"] = picojson::value(items);
@@ -631,6 +629,9 @@ static bool HistConvFromJson(const Jv& jc, AiConv& c) {
                         t.filter = jst.S(L"筛选器");
                         t.req = jst.S(L"要求返回");
                         t.res8 = U8(jst.S(L"结果"));   /* 结果载荷 (UTF-8 存取) */
+                        t.arg = U8(jst.S(L"参数"));    /* 原始参数 JSON (旧会话无此键 = 空,
+                                                           AgentBuildBody 从既有字段近似重建) */
+                        t.cid = U8(jst.S(L"调用ID"));  /* call_id (缺失时按消息下标合成) */
                         t.err = jst.S(L"err");
                         const Jv* jtp = jst.Get(L"top");
                         if (jtp && jtp->t == 4)

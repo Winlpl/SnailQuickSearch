@@ -89,7 +89,6 @@ static size_t g_emitDrop = 0;    /* 截断丢弃的字节量 (读取点取走, �
 static std::string g_rowBuf;     /* ai.row 数据行 (逗号衔接的 JSON 行, 完成后包成 [..] 回喂; 同锁同封顶) */
 static bool g_rowCut = false;
 static int g_rowDrop = 0;        /* 装不下的行数 (精确省略行数回喂模型) */
-static std::string g_srchSet8;   /* g_agentRes 搜索设置 JSON 快照 (创建时取一次, 注入系统提示词; 经 g_emitCs 护) */
 
 /* UI 编组在飞登记 (声明提前 — AgentToolInit/Shutdown 在此就触碰; 机制本体见下方"宿主扩展 API"节) */
 static CRITICAL_SECTION s_uiCs;
@@ -1039,10 +1038,6 @@ static xjs_result* AgentEnsureResult() {
     xjs_result_LuaRegisterFunction(g_agentRes, "ai", "read", AgentLuaRead);
     xjs_result_LuaRegisterFunction(g_agentRes, "ai", "write", AgentLuaWrite);
     xjs_result_LuaRegisterFunction(g_agentRes, "ai", "saveas", AgentLuaSaveAs);
-    const char* ss = xjs_result_GetSearchSettings(g_agentRes);
-    EnterCriticalSection(&g_emitCs);
-    g_srchSet8 = ss ? ss : "";
-    LeaveCriticalSection(&g_emitCs);
     g_agentResWired = true;
     return g_agentRes;
 }
@@ -1217,18 +1212,34 @@ std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const
 /* run_search 实体; 返回空串 = 成功, 否则 = 错误描述 (调用方持 g_agentCs) */
 static std::string ExecuteLuaWrites(AiJob* j, AiToolStep* st);   /* lua 导出登记的写盘执行段 (定义在本函数后) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query,
-                                       const std::wstring& filter, const Jv* req, AiToolStep* st) {
+                                       const std::wstring& filter, const Jv* req, const Jv* dedupArg,
+                                       AiToolStep* st) {
     if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
         return L"lua_exec 脚本缺少顶层 return, 已拒绝执行 (未提交引擎) — 执行模式必须以顶层 return ID 数组结尾, "
                L"return 的数组 = 最终结果集, 结果卡/外部靠它得知脚本选中了哪些文件; 缺了引擎只会静默给 0 条, 与真没搜到无法区分。"
                L"请在脚本结尾补上 return (如 return ids 或 return {...}) 后重新调用; "
                L"统计类任务同样把涉及/选中的文件 ID 数组 return 回来, 数字本身继续走 ai.print。";
+    /* 样本去重范围 (2026-09-27 用户口径, 缺省「回答」): 「回答」= 本次回答内去重 (作业释放
+     * 即清); 「会话」= 跨提问持续 (SendCurrent 从 AiSess::sampleSeen 快照进作业, 泵收尾抄回,
+     * ckpt 同款; 切换/删除会话或关闭面板时 UI 清空, 重开会话从聊天记录恢复); 「关闭」= 不去重。
+     * 旧参数形态 = 布尔 (true→回答, false→关闭), 容忍不报错 */
+    int dedupScope = 0;   /* 0=回答 1=会话 -1=关闭 */
+    if (dedupArg) {
+        if (dedupArg->t == 1)      dedupScope = dedupArg->b ? 0 : -1;
+        else if (dedupArg->t == 2) dedupScope = dedupArg->num != 0 ? 0 : -1;
+        else if (dedupArg->t == 3) {
+            if (dedupArg->str.find(L"会话") != std::wstring::npos) dedupScope = 1;
+            else if (dedupArg->str.find(L"关") != std::wstring::npos) dedupScope = -1;
+        }
+    }
+    std::set<int>* seenIds = dedupScope == 0 ? &j->sampleSeenAns
+                           : dedupScope == 1 ? &j->sampleSeenSess : NULL;
     /* 要求返回 (2026-09-27): 没要求的不返回 — ID/名称/路径恒给 (用户口径)。字段集 AI
      * 自由选择 (参照环境快照的已开启/未开启字段清单): 子树信息 = 1 直接子项 / 2 整棵
      * 子树 (仅文件夹样本附); 文件大小/创建时间/修改时间/访问时间/文件属性/评分/别名 =
      * 布尔。未知键报错不静默; 要求了未开启字段 → 自动省略并在结果「字段未开启」注明。 */
     bool wantSize = false, wantCtime = false, wantMtime = false, wantAtime = false;
-    bool wantAttr = false, wantScore = false, wantAlias = false;
+    bool wantAttr = false, wantScore = false, wantAlias = false, wantStats = false;
     int subtreeReq = 0;
     if (req && req->t == 5) {
         for (auto& kv : req->obj) {
@@ -1246,10 +1257,11 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
             else if (kv.first == L"文件属性") wantAttr = flag;
             else if (kv.first == L"评分") wantScore = flag;
             else if (kv.first == L"别名") wantAlias = flag;
+            else if (kv.first == L"结果统计") wantStats = flag;
             else
                 return L"要求返回不支持的字段: " + kv.first +
                        L" (可用: 子树信息[1=直接子项/2=整棵子树], 文件大小, 创建时间, "
-                       L"修改时间, 访问时间, 文件属性, 评分, 别名)";
+                       L"修改时间, 访问时间, 文件属性, 评分, 别名, 结果统计)";
         }
     }
     xjs_engine* eng = xjs_GetDefaultEngine();
@@ -1410,19 +1422,21 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     int sampleN = g_cfg.searchSample;
     if (sampleN < 3) sampleN = 3;
     if (sampleN > 50) sampleN = 50;
-    int n = st->count < sampleN ? st->count : sampleN;
-    for (int i = 0; i < n; i++) {
-        int fid = xjs_result_GetFileId(g_agentRes, i);
-        if (fid < 0) continue;
-        g_agentTopIds.push_back(fid);
-        const char* p = xjs_db_GetPath(eng, fid);
-        st->top.push_back(p ? W8(p) : L"(路径不可用)");
+    /* 样本去重 (参数「样本去重」: 回答[缺省]/会话/关闭, 2026-09-27 用户口径): 已提交过样本的
+     * ID 不再占名额 — 仅命中数 > 样本上限 (必须丢条目) 时两遍取样: 第一遍按序只取没提交过的
+     * (= 自动翻页, 多次搜索的可见面互相补全), 没提交过的不足 sampleN 再第二遍回填已提交的;
+     * 未溢出时按结果顺序取前 N 条不重排。缓存登记 = 实际提交进样本的 ID (范围集见 seenIds) */
+    int passes = (seenIds && st->count > sampleN) ? 2 : 1;
+    auto appendSample = [&](int fid) {
         /* 条目 = [ID, "路径", 是否文件夹, 附加?]: ID/路径/类型恒给 (2026-09-27 用户口径:
          * 名称冗余不单独给 — 路径末段即文件名; 第三槽恒为布尔 true=文件夹 false=文件)。
          * 附加 = 要求返回的字段聚合对象 (空则整个省略): 子={sz,cat} 子树统计 (仅文件夹)、
          * sz=自身字节、ct/mt/at=创建/修改/访问时间[epoch 秒]、attr=属性字母 (R 只读 H 隐藏
          * S 系统 D 目录, 与 SQL FAttr 同口径)、score=评分、alias=别名。
          * 字段开/关 = 本次搜索实时查 IsFieldEnabled (索引重建随时开/关, 不做进程级缓存) */
+        g_agentTopIds.push_back(fid);
+        const char* p = xjs_db_GetPath(eng, fid);
+        st->top.push_back(p ? W8(p) : L"(路径不可用)");
         bool isDir = xjs_db_IsDir(eng, fid);
         picojson::array pair;
         pair.push_back(JN(fid));
@@ -1446,6 +1460,39 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         }
         if (!extra.empty()) pair.push_back(picojson::value(extra));
         files.push_back(picojson::value(pair));
+    };
+    size_t seenFill = 0;   /* 第二遍回填的条数 (>0 = 没提交过的已耗尽, 翻页到头) */
+    for (int pass = 0; pass < passes && (int)files.size() < sampleN; pass++) {
+        size_t f0 = files.size();
+        for (int i = 0; i < st->count && (int)files.size() < sampleN; i++) {
+            int fid = xjs_result_GetFileId(g_agentRes, i);
+            if (fid < 0) continue;
+            if (passes == 2 && (seenIds->count(fid) != 0) != (pass == 1)) continue;
+            appendSample(fid);
+        }
+        if (pass == 1) seenFill = files.size() - f0;
+    }
+    if (seenIds) seenIds->insert(g_agentTopIds.begin(), g_agentTopIds.end());
+    /* 结果统计 (要求返回.结果统计): 整个结果集按类型拆分, 一次搜索直接拿到 —
+     * 免去"先搜, 再为数个数专门发第二次 lua" (2026-09-27 会话-105 实锤) */
+    picojson::object statsOut;
+    bool hasStats = false;
+    if (wantStats && st->count > 0) {
+        long long nFile = 0, nDir = 0;
+        std::map<std::wstring, long long> cat;
+        for (int i = 0; i < st->count; i++) {
+            int fid = xjs_result_GetFileId(g_agentRes, i);
+            if (fid < 0) continue;
+            if (xjs_db_IsDir(eng, fid)) nDir++; else nFile++;
+            const char* ft = xjs_db_GetFileTypeStr(eng, fid);
+            cat[(ft && *ft) ? W8(ft) : std::wstring(L"全部")]++;
+        }
+        picojson::object catO;
+        for (auto& kv : cat) catO[U8(kv.first)] = JN(kv.second);
+        statsOut["文件"] = JN(nFile);
+        statsOut["文件夹"] = JN(nDir);
+        statsOut["分类"] = picojson::value(catO);
+        hasStats = true;
     }
     /* 脚本登记的文件导出在此执行 (脚本已结束, 确认/对话框不受看门狗约束; abort 经 AgentUiCall 退出) */
     std::string wroteNote8 = mode == L"lua_exec" ? ExecuteLuaWrites(j, st) : std::string();
@@ -1453,6 +1500,9 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     feed["count"] = JN(st->count);
     feed["elapsedMs"] = JN(st->elapsedMs);
     feed["files"] = picojson::value(files);
+    if (seenFill > 0) feed["样本回填"] = JN((long long)seenFill);   /* 未提交过的不足样本上限,
+                                      回填了 N 条已提交过的 — 模型据此知道这个范围已翻到头 */
+    if (hasStats) feed["统计"] = picojson::value(statsOut);
     if (!reqOff.empty()) {   /* 要求了但索引未开启的字段 (自动省略, 不硬给 0/空) */
         picojson::array off;
         for (auto& nm2 : reqOff) off.push_back(JS(nm2));
@@ -2033,7 +2083,8 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
         }
         if (st->query.empty()) return L"query 不能为空";
         if (!AgentCsEnter(j)) return L"已停止";
-        std::wstring err = AgentToolRunSearch(j, st->mode, st->query, st->filter, v.Get(L"要求返回"), st);
+        std::wstring err = AgentToolRunSearch(j, st->mode, st->query, st->filter, v.Get(L"要求返回"),
+                                              v.Get(L"样本去重"), st);
         LeaveCriticalSection(&g_agentCs);
         return err;
     }
@@ -2111,17 +2162,22 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
     if (name8 == "get_lua_spec") {
         /* Lua 规范重读通道 (2026-09-25 起规范全文默认拼进系统提示词附录, 本工具供脚本报错
          * 排查时重读/附录疑似截断时取全文): 引擎内嵌文本工作者线程直读, 无需 UI 编组。
-         * 优先合集 (promptType 2 = 0+1 合并去重版); 旧引擎无合集 = 按 mode 单取一份 (此时 mode 必填)。 */
+         * 优先合集 (promptType 2 = 0+1 合并去重版); 旧引擎无合集 = 按 mode 单取一份 (此时 mode 必填)。
+         * st->res8 = 全文只喂本轮 (AgentToolOutput 原样回喂); 落库/历史回放走描述符 —
+         * WorkerMain 在 output 构建后把 res8 换成 LuaSpecMarker8(st->mode) (静态文本不进会话
+         * 记录, 回放按描述符现取; mode 记实际交付档 — 引擎有合集时 mode 参数会被忽略)。 */
         st->kind = 9;
         const char* p = xjs_Query_GetPrompt(2);
         if (p && *p) {
             st->argz = L"Lua 规范合集";
+            st->mode = L"合集";
         } else {
             std::wstring wm = TrimW(v.S(L"mode"));
             if (wm == L"lua_filter" || wm == L"lua_exec")
                 p = xjs_Query_GetPrompt(wm == L"lua_exec" ? 1 : 0);
             if (!p || !*p) return L"mode 必填 lua_filter | lua_exec (引擎无合集提示词)";
             st->argz = wm + L" 规范";
+            st->mode = wm;
         }
         st->res8 = std::string(p);   /* 规范原文回喂 (纯文本) */
         return L"";
@@ -2523,6 +2579,9 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"AccessTime、FileType（**只认 = / !=，不支持 LIKE**：视频/音频/图片/文档/办公/程序/压缩/系统/其他）、IsDir（1=目录 0=文件）、"
     L"Alias、Score、FAttr（属性串正则匹配：S=系统 H=隐藏 R=只读 D=目录…，**排除系统+隐藏 = FAttr !~ '[SH]'**——"
     L"用户没有特殊说明的统计/清单默认加上）、FileContent（**文件全文内容**，**严禁单独作 WHERE 条件**，见下方内容搜索规则）。\n"
+    L"  其中 Size/CreateTime/ModTime/AccessTime/Alias/Score/FAttr 是**可选字段**（是否开启随索引实时变化，"
+    L"以环境快照「已开启字段/未开启字段」为准）：未开启的字段在 SQL 条件/排序、Lua 取值中均不可用（查询报错或无此数据），"
+    L"**绝不要编造此类数值**；用户问题依赖未开启字段时，如实说明\"索引未开启该字段，需在设置中开启并重建索引后再查\"。\n"
     L"  不支持：窗口函数(OVER)/写操作(UPDATE/DELETE/INSERT)/DDL/多表 FROM/EXISTS/VALUES/SELECT INTO/多语句。\n"
     L"- lua_filter 过滤模式：对每个文件做一次真值判断的 Lua 脚本；**每个文件一条线程并发求值，文件间顺序不定**——"
     L"脚本必须无状态，聚合统计一律换 lua_exec。\n"
@@ -2556,7 +2615,7 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"- 用户没指明类型（如\"这里有多少东西/占多大空间\"）时，把文件与目录分开说明或注明口径，别混作一个数。\n"
     L"- wildcard/regex 不能按类型过滤，其 count 是文件+目录混算，**不能直接当\"文件数/文件清单\"回答**；要文件口径就换 sql 或 lua 重查。\n"
     L"- 统计文件数/总大小/最大文件一律先排除目录（IsDir=0），目录条目不参与\"文件\"的计数与求和；"
-    L"给用户的清单里目录行要标明是目录（如 📁 前缀），不要一律写成\"文件\"。\n"
+    L"回答清单里**不要标注**哪条是目录（📁 前缀、\"（目录）\"字样都不要加）——界面按路径渲染真实文件图标，用户自己看得到；也不要一律写成\"文件\"，按实际口径表述。\n"
     L"\n"
     L"## Lua 脚本速查（全文规范见本提示词文末附录，写脚本前先读附录；此处只列 agent 环境差异与高频要点）\n"
     L"- 文件属性经 f 表 / db 表访问器取：f.ext()=**不带点小写扩展名**（docx，无后缀空串）、f.isdir()、f.size()、f.fpath()（最贵放最后）；"
@@ -2591,7 +2650,7 @@ static const wchar_t* AI_INSTRUCTIONS =
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与样本 (样本条数上限以系统提示词为准)。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[ID,\"完整路径\",是否文件夹,附加?]…] — ID=引擎文件 ID (回答里的文件动作链接 xjs://open|reveal?id= 填它); 路径恒返回 (路径末段即文件名, 不再单独给名称); 第三槽恒为布尔 true=文件夹 false=文件; 附加 = 「要求返回」里要求的字段聚合对象 (没要求任何附加字段时该槽整个省略): 子={sz:子树内文件总大小[字节],cat:{分类:数量,…,全部=条目总数}} (仅文件夹条目有, 文件夹名不含关键词时据此顺藤摸瓜)、sz=自身大小[字节]、ct/mt/at=创建/修改/访问时间[epoch 秒]、attr=属性字母串 (R 只读 H 隐藏 S 系统 D 目录)、score=评分、alias=别名; 要求了索引未开启的字段会自动省略并在结果「字段未开启」里注明; 没要求返回的就不返回。output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。搜索分类 = 按文件分类预过滤, **支持多选** (字符串用「、」连接如「图片、视频」, 或直接传字符串数组), 每次搜索前都会先设置 (卡片徽标显示实际分类): 缺省跟随当前对话窗口的筛选分类 (环境快照「当前对话窗口筛选」); 也可显式指定一个或多个分类 (分类名取环境快照「可用筛选分类」) 或传「全部」查全库。尽量按用户意图多带分类组合以剔除干扰、提高命中率: 找电影/剧集传「文件夹、视频」, 找歌曲传「文件夹、音频」, 找安装包传「压缩包」。按文件夹归类的内容 (影视/专辑/软件) 常用两段式顺藤摸瓜: 文件夹名含关键词而内部文件名未必含 (如文件夹「电影功夫」内的文件名不含「功夫」) — 先用关键词搜出文件夹, 再用 ParentPath/Path 条件或 SQL 搜它内部的文件, 不要只匹配文件名就断言\"没有\"。尽量减少工具调用: 多个关键词合并成一次搜索 — 纯文件名多词用 wildcard 的「|」或语法 (词1|词2|词3, 空格=且), 需要附加字段条件 (大小/时间/属性/目录) 时才用 SQL, 复杂逻辑用 lua; 不要逐词各调一次; 命中过多 (count 远超回传样本条数, 样本有遗漏) 且已有线索不足以回答时, 再细分收窄 (更具体的关键词/筛选器组合/限定目录) 分段搜索, 线索够就直接作答。在输入搜索词之前先按分类把范围收窄, wildcard/regex/sql/lua_filter 四种模式均生效, lua_exec 忽略此参数 (脚本即程序, 不设筛选器)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"},"搜索分类":{"type":"string","description":"按此文件分类(可多个, 用「、」连接)预过滤; 分类名见环境快照「可用筛选分类」; 不传=跟随当前窗口筛选"},"要求返回":{"type":"object","properties":{"子树信息":{"type":"integer","enum":[1,2],"description":"1=统计直接子项 2=统计整棵子树 (文件夹条目的 附加.子 才会有内容; 只附加信息不改变命中)"},"文件大小":{"type":"boolean","description":"附加自身大小 (字节, 键 sz)"},"创建时间":{"type":"boolean","description":"附加创建时间 (epoch 秒, 键 ct)"},"修改时间":{"type":"boolean","description":"附加修改时间 (epoch 秒, 键 mt)"},"访问时间":{"type":"boolean","description":"附加访问时间 (epoch 秒, 键 at)"},"文件属性":{"type":"boolean","description":"附加属性字母串 R/H/S/D (键 attr)"},"评分":{"type":"boolean","description":"附加文件评分 (键 score)"},"别名":{"type":"boolean","description":"附加别名 (键 alias; 无别名的条目省略)"}},"description":"按需附加字段, AI 自由选择 (字段开/关以本次搜索时实际状态为准 — 重建索引会随时开/关字段, 未开启的自动省略并在「字段未开启」注明); 没要求的不返回 (ID/路径/是否文件夹恒返回); 要求了未开启字段会自动省略并在结果「字段未开启」注明"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与样本 (样本条数上限以系统提示词为准; 样本默认去重已提交过的条目, 相当于自动翻页 — 「样本去重」参数选去重范围: 本次回答(缺省)/整个会话/关闭)。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[ID,\"完整路径\",是否文件夹,附加?]…] — ID=引擎文件 ID (回答里的文件动作链接 xjs://open|reveal?id= 填它); 路径恒返回 (路径末段即文件名, 不再单独给名称); 第三槽恒为布尔 true=文件夹 false=文件; 附加 = 「要求返回」里要求的字段聚合对象 (没要求任何附加字段时该槽整个省略): 子={sz:子树内文件总大小[字节],cat:{分类:数量,…,全部=条目总数}} (仅文件夹条目有, 文件夹名不含关键词时据此顺藤摸瓜)、sz=自身大小[字节]、ct/mt/at=创建/修改/访问时间[epoch 秒]、attr=属性字母串 (R 只读 H 隐藏 S 系统 D 目录)、score=评分、alias=别名; 子树信息档位: 1=直接子项 (只看文件夹第一层有什么 — 层级浅、内容一眼可判时用, 省 token); 2=整棵子树 (判断整个文件夹的总量与构成 — 文件都在深层子文件夹里、要回答「这个文件夹是什么/多大/有没有目标类型」、或顺藤摸瓜决定是否深入时用)。 要求了索引未开启的字段会自动省略并在结果「字段未开启」里注明; 没要求返回的就不返回。要求返回.结果统计 = 附带整个结果集的类型拆分「统计」{文件: n, 文件夹: n, 分类: {…}} — 要按类型拆分数量的统计用它, 一次搜索直接拿到, 不必再发第二次搜索或 lua。output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先读系统提示词文末的 Lua 规范附录; lua_exec 脚本必须有顶层 return ID 数组, 缺顶层 return 会被拒绝执行 (不提交引擎)。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。搜索分类 = 按文件分类预过滤, **支持多选** (字符串用「、」连接如「图片、视频」, 或直接传字符串数组), 每次搜索前都会先设置 (卡片徽标显示实际分类): 缺省跟随当前对话窗口的筛选分类 (环境快照「当前对话窗口筛选」); 也可显式指定一个或多个分类 (分类名取环境快照「可用筛选分类」) 或传「全部」查全库。尽量按用户意图多带分类组合以剔除干扰、提高命中率: 找电影/剧集传「文件夹、视频」, 找歌曲传「文件夹、音频」, 找安装包传「压缩包」。按文件夹归类的内容 (影视/专辑/软件) 常用两段式顺藤摸瓜: 文件夹名含关键词而内部文件名未必含 (如文件夹「电影功夫」内的文件名不含「功夫」) — 先用关键词搜出文件夹, 再用 ParentPath/Path 条件或 SQL 搜它内部的文件, 不要只匹配文件名就断言\"没有\"。尽量减少工具调用: 多个关键词合并成一次搜索 — 纯文件名多词用 wildcard 的「|」或语法 (词1|词2|词3, 空格=且), 需要附加字段条件 (大小/时间/属性/目录) 时才用 SQL, 复杂逻辑用 lua; 不要逐词各调一次; 命中过多 (count 远超回传样本条数, 样本有遗漏) 且已有线索不足以回答时, 再细分收窄 (更具体的关键词/筛选器组合/限定目录) 分段搜索, 线索够就直接作答。在输入搜索词之前先按分类把范围收窄, wildcard/regex/sql/lua_filter 四种模式均生效, lua_exec 忽略此参数 (脚本即程序, 不设筛选器)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"},"搜索分类":{"type":"string","description":"按此文件分类(可多个, 用「、」连接)预过滤; 分类名见环境快照「可用筛选分类」; 不传=跟随当前窗口筛选"},"样本去重":{"type":"string","enum":["回答","会话","关闭"],"description":"已提交过样本的 ID 不再占样本名额, 样本优先给没提交过的条目 — 多次搜索的可见面互相补全 (仅命中数超过样本上限时生效; 没提交过的不足时回填已见过的, 未溢出保持原顺序)。「回答」= 只在本次回答内去重, 回答完成清空 (缺省); 「会话」= 整个会话内去重, 跨提问记住已提交过的 ID, 适合分多次提问翻遍同一批结果 (切换/删除会话或关闭 AI 助手时清空, 重开会话自动从聊天记录恢复); 「关闭」= 不去重, 按结果顺序取前 N 条; 结果「样本回填」= 因未提交过的不足而回填的已见过条数 (出现即该范围已翻到头)"},"要求返回":{"type":"object","properties":{"子树信息":{"type":"integer","enum":[1,2],"description":"1=统计直接子项 (只看第一层构成, 层级浅/内容一眼可判时用); 2=统计整棵子树 (判断整个文件夹是什么/总量多大/深层有没有目标类型 — 影视合集等文件在深层子文件夹、或顺藤摸瓜决定是否深入时优先 2) (文件夹条目的 附加.子 才会有内容; 只附加信息不改变命中)"},"文件大小":{"type":"boolean","description":"附加自身大小 (字节, 键 sz)"},"创建时间":{"type":"boolean","description":"附加创建时间 (epoch 秒, 键 ct)"},"修改时间":{"type":"boolean","description":"附加修改时间 (epoch 秒, 键 mt)"},"访问时间":{"type":"boolean","description":"附加访问时间 (epoch 秒, 键 at)"},"文件属性":{"type":"boolean","description":"附加属性字母串 R/H/S/D (键 attr)"},"评分":{"type":"boolean","description":"附加文件评分 (键 score)"},"别名":{"type":"boolean","description":"附加别名 (键 alias; 无别名的条目省略)"},"结果统计":{"type":"boolean","description":"附带整个结果集的类型拆分「统计」{文件,文件夹,分类:{...}} — 按类型数数量的统计一次搜索直接拿到, 无需再发第二次搜索/lua"}},"description":"按需附加字段, AI 自由选择 (字段开/关以本次搜索时实际状态为准 — 重建索引会随时开/关字段, 未开启的自动省略并在「字段未开启」注明); 没要求的不返回 (ID/路径/是否文件夹恒返回); 要求了未开启字段会自动省略并在结果「字段未开启」注明"}},"required":["mode","query"]}},
   {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」或 5 分钟未确认则本次调用以失败返回; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量, 完整输出会存为「外溢文件」并给出路径 (用 read_file 分页读取)。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"重新获取 Lua 脚本规范全文 (纯文本)。规范全文已内置在系统提示词文末附录, 正常无需调用 — 仅在脚本报错需要重读规范、或怀疑附录被截断时调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
@@ -2700,12 +2759,15 @@ static std::string InstrSnapshot() {
 }
 
 /* 运行环境快照 (每次请求实时采集, 由 AgentBuildBody 作为注入型 user 项拼在 input 末尾):
- * 当前时间 / 索引规模与状态 / 可选字段开关 / 搜索设置。引擎 7 个可选字段 (大小/时间×3/评分/别名/属性) 未必全开,
- * 不注入这份清单, 模型就会对未开启字段照常写 SQL/Lua —— 用户问"文件何时创建"而
- * 创建时间字段未开启 = 查询报错或空结果, 模型只能瞎猜。全部为引擎只读查询, 工作线程可调。
+ * 纯状态口径 (2026-09-27 收敛): 只放会话内可变的**状态** — 当前时间 / 索引规模与状态 / 可选字段开关 /
+ * 搜索设置 / 可用筛选分类 / 当前窗选中分类。行为规则一律住 run_search 工具描述与系统提示词骨架
+ * (两者在缓存前缀里; 规则放快照 = 每请求全价重发, 曾与工具描述双写, 已收敛, 禁止再加回来)。
+ * 引擎 7 个可选字段 (大小/时间×3/评分/别名/属性) 未必全开, 不注入这份清单, 模型就会对未开启字段
+ * 照常写 SQL/Lua —— 用户问"文件何时创建"而创建时间字段未开启 = 查询报错或空结果, 模型只能瞎猜
+ * ("不可用/禁编造"规则本体在骨架搜索语法节, 快照只给清单)。全部为引擎只读查询, 工作线程可调。
  * 恒放请求尾部不放 instructions: 快照带秒级时间每请求必变, 混进前缀会灭掉 provider 前缀缓存。
  * filterCur = 发送时当前窗的选中筛选分类 (SendCurrent UI 线程快照进 AiJob; 分类表是引擎
- * DB 级进程共享, worker 直接读引擎)。 */
+ * DB 级进程共享, worker 直接读引擎)。调用方持 g_agentCs (WorkerMain 全程持锁), 读 g_agentRes 安全。 */
 static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
     std::wstring s = L"\n## 运行环境快照 (每次请求实时采集, 时间与字段口径以此为准)\n";
     SYSTEMTIME st;
@@ -2748,17 +2810,14 @@ static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
     }
     s += L"- 已开启字段: " + (on.empty() ? std::wstring(L"(以上必建字段之外一个都没开)") : on) + L"\n";
     s += L"- 未开启字段: " + (off.empty() ? std::wstring(L"(无)") : off) + L"\n";
-    s += L"- 未开启字段在 SQL 条件/排序、Lua 取值中均不可用 (查询报错或无此数据), 绝不要编造此类数值;\n";
-    s += L"  用户问题依赖未开启字段时, 如实说明\"索引未开启该字段, 需在设置中开启并重建索引后再查\"。\n";
-    s += L"- 代办工具的 window 参数留空 = 作用于当前对话所在的窗口。\n";
-    EnterCriticalSection(&g_emitCs);
-    std::wstring setW = g_srchSet8.empty() ? std::wstring() : W8(g_srchSet8.c_str());
-    LeaveCriticalSection(&g_emitCs);
-    if (!setW.empty())
-        s += L"- 搜索设置: " + setW + L" (首拼/全拼/大小写口径以此为准)\n";
+    const char* ss = (g_agentRes && xjs_result_IsEffective(g_agentRes))
+                         ? xjs_result_GetSearchSettings(g_agentRes) : NULL;
+    if (ss && *ss)
+        s += L"- 搜索设置: " + W8(ss) + L" (首拼/全拼/大小写口径以此为准)\n";
     /* 筛选器 (文件分类, 2026-09-27): 分类表 = 引擎 DB 级共享 (GetFilterJSON 的
      * [{名称,类型,后缀}] 只取名称+后缀展示, 后缀截断 — 模型只需传分类名);
-     * 当前窗选中 = SendCurrent 快照。宿主分类表首项恒有「全部」(引擎清单可能不含)。 */
+     * 当前窗选中 = SendCurrent 快照。宿主分类表首项恒有「全部」(引擎清单可能不含)。
+     * 只给状态行 — 用法/经验规则在 run_search 工具描述 (缓存前缀), 快照不再重复。 */
     {
         const char* fj = xjs_filter_GetFilterJSON(eng);
         Jv v = (fj && *fj) ? JsonParseW(W8(fj)) : Jv();
@@ -2778,19 +2837,6 @@ static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
         s += L"- 可用筛选分类 (run_search 的「搜索分类」参数取值): 全部" + cats + L"\n";
         s += L"- 当前对话窗口筛选: " + (filterCur.empty() ? std::wstring(L"全部") : filterCur) +
              L" (用户此刻的查看口径, 多选时以「、」并列)\n";
-        s += L"- run_search 每次搜索前都会先设筛选分类再查: 缺省跟随上面「当前对话窗口筛选」"
-             L"(卡片徽标可见实际分类); 需要其它范围时用「搜索分类」参数显式指定, 可单选也可多选 "
-             L"(多个分类用「、」连接; 传「全部」= 查全库); lua_exec 模式不受筛选影响。\n";
-        s += L"- 筛选器尽量按用户意图多带分类组合, 能剔除大量无关干扰、提高命中率: 如用户找电影/剧集, "
-             L"传「文件夹、视频」; 找歌曲传「文件夹、音频」; 找安装包传「压缩包」。\n";
-        s += L"- 按文件夹归类的内容 (影视/专辑/软件) 常要顺藤摸瓜: 文件夹名含关键词而内部文件名未必含 "
-             L"(如文件夹「电影功夫」内的文件名不含「功夫」) — 先用关键词搜出文件夹, 再用 "
-             L"ParentPath/Path 条件或 SQL 搜它内部的文件 (语法见系统提示词), 不要只匹配文件名就断言\"没有\"。\n";
-        s += L"- 尽量减少工具调用: 多个关键词合并成一次搜索 — 纯文件名多词用 wildcard 的「|」或语法 "
-             L"(如 词1|词2|词3; 空格=且), 一次查完, 不要逐个关键词各调一次 run_search; "
-             L"只有还需要附加条件 (大小/时间/属性/目录等字段) 时才用 SQL, 复杂逻辑用 lua。\n";
-        s += L"- 命中过多 (count 远超回传样本条数, 样本有遗漏) 且已有线索不足以回答时, 再细分收窄 "
-             L"(更具体的关键词/筛选器组合/限定目录) 分段搜索; 线索已够就停止搜索直接作答。\n";
     }
     return s;
 }
@@ -2853,16 +2899,89 @@ static const picojson::value& ToolsPNoWeb() {
     return p;
 }
 
-/* 每轮请求体: input = 对话快照 + 已发生的工具往返 (call→output 交错) + 环境快照 +
-   循环护栏提醒 + 本轮模型产出; withTools=false = 收尾轮 (省略 tools 并明示直接回答)。
-   省两个大头的口径 (见"工具结果省 token"节):
-   - liveFrom 之后的输出 = 本轮刚产出, 原样回喂; 之前的 = 早先轮次已送达过, 中段裁剪;
+/* 历史轮次工具步骤的回喂重建 (2026-09-27 完整回喂口径)。arg/cid 自 2026-09-27 起落库,
+ * 旧会话步骤缺失时按下标合成 cid / 从既有字段近似重建参数 — 只为让模型知道"当时调了什么";
+ * 新会话恒走落库原文, 不经重建分支。 */
+static std::string HistStepCidOf(size_t msgIdx, size_t stepIdx) {
+    return "hist_" + std::to_string(msgIdx) + "_" + std::to_string(stepIdx);
+}
+static std::string HistStepArgsOf(const AiToolStep& t) {
+    if (!t.arg.empty()) return t.arg;
+    picojson::object o;
+    if (t.kind == 0) {                      /* run_search */
+        if (!t.mode.empty()) o["mode"] = JS(t.mode);
+        if (!t.query.empty()) o["query"] = JS(t.query);
+        if (!t.filter.empty()) o["搜索分类"] = JS(t.filter);
+    } else if (t.kind == 11) {              /* run_command */
+        o["shell"] = JS(t.mode.empty() ? std::wstring(L"cmd") : t.mode);
+        o["command"] = JS(t.query);
+    } else if (!t.query.empty()) {
+        o["query"] = JS(t.query);
+    } else if (!t.argz.empty()) {
+        o["参数摘要"] = JS(t.argz);
+    }
+    return picojson::value(o).serialize();
+}
+/* Lua 规范 = 静态工具规范 (2026-09-27 用户口径"内容不进会话记录"): get_lua_spec 落库/回放
+ * 只存获取描述符 {"Lua规范":"合集|lua_filter|lua_exec"}, 全文仅喂执行当轮 (accOuts);
+ * 历史回放按描述符从引擎现取 — 静态文本逐字节稳定, 前缀缓存不受影响, 会话文件不存全文。
+ * 旧会话 (描述符机制前) 存过全文 → HistStepOutOf 原样回喂不重取。 */
+static std::string LuaSpecMarker8(const std::wstring& kind) {
+    picojson::object o;
+    o["Lua规范"] = JS(kind);
+    return picojson::value(o).serialize();
+}
+static std::string AgentLuaSpecFetch(const std::wstring& kind) {
+    if (kind == L"lua_filter" || kind == L"lua_exec") {
+        const char* p = xjs_Query_GetPrompt(kind == L"lua_exec" ? 1 : 0);
+        return (p && *p) ? std::string(p) : std::string();
+    }
+    const char* p = xjs_Query_GetPrompt(2);   /* 合集优先 (与执行分支同序) */
+    if (p && *p) return std::string(p);
+    const char* a = xjs_Query_GetPrompt(0);   /* 旧引擎无合集: 0/1 拼接兜底 (同 BuildInstructions) */
+    const char* b = xjs_Query_GetPrompt(1);
+    std::string s = (a && *a) ? std::string(a) : std::string();
+    if (b && *b) { if (!s.empty()) s += "\n\n"; s += b; }
+    return s;
+}
+static std::string HistStepOutOf(const AiToolStep& t) {
+    if (t.name == L"get_lua_spec" && !t.res8.empty()) {
+        Jv v = JsonParseW(W8(t.res8.c_str()));
+        std::wstring kind = (v.t == 5) ? v.S(L"Lua规范") : std::wstring();
+        if (kind.empty()) return t.res8;   /* 旧会话存过全文 (描述符机制前) — 原样回喂 */
+        std::string spec = AgentLuaSpecFetch(kind);
+        if (!spec.empty()) return spec;
+        return "{\"note\":\"(Lua 规范现取失败, 全文见系统提示词文末附录)\"}";
+    }
+    if (!t.res8.empty()) return t.res8;
+    if (t.state == 3 && !t.err.empty()) {   /* 失败形态与 AgentToolOutput 一致 */
+        picojson::object o;
+        o["error"] = JS(t.err);
+        return picojson::value(o).serialize();
+    }
+    if (t.count >= 0) {                     /* 旧记录只有命中数, 如实注明不编造 */
+        picojson::object o;
+        o["count"] = JN(t.count);
+        o["note"] = picojson::value(std::string("(旧会话记录: 未存完整结果载荷, 仅命中数)"));
+        return picojson::value(o).serialize();
+    }
+    return "{\"ok\":true}";                 /* 与 AgentToolOutput 空载荷形态一致 */
+}
+
+/* 每轮请求体: input = 对话快照 (含历史轮次工具往返) + 本作业已发生的工具往返 (call→output
+   交错) + 环境快照 + 循环护栏提醒 + 本轮模型产出; withTools=false = 收尾轮 (省略 tools 并
+   明示直接回答)。
+   完整回喂口径 (2026-09-27 用户口径"会话上下文不允许任何丢失", 推翻 2026-09-24"工具卡片
+   落库不重发"): 历史轮次的调用参数 (arg) 与结果载荷 (res8) 原样重建为 function_call/
+   function_call_output 对回喂 — 模型始终记得自己做过什么、拿到过什么 (会话-107 实锤: 只发
+   文字历史时模型对"第一轮搜了几次/搜到什么"全靠编造)。ToolOutputPrune 中段裁剪只在
+   400 上下文超限自愈重试时启用 (pruneHist, liveFrom=0)。
    - instructions 恒为静态骨架, 环境快照 (带秒级时间, 每请求必变) 挪到 input 末尾 —
      instructions+tools+历史前缀逐字节稳定, provider 前缀缓存才命得到。
    - inject (重复调用提醒等护栏注入) 恒排快照之后 = 全请求最末位, 对下一轮显著性最高。 */
 static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
                                   const std::vector<std::string>& accOuts, size_t liveFrom,
-                                  const std::wstring& inject, bool withTools) {
+                                  bool pruneHist, const std::wstring& inject, bool withTools) {
     auto userItem = [](const std::wstring& text) {   /* 注入型 user 项 (环境快照/护栏提醒) */
         picojson::object content;
         content["type"] = picojson::value("input_text");
@@ -2875,7 +2994,32 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
         return picojson::value(item);
     };
     picojson::array input;
-    for (auto& m : j->hist) {
+    for (size_t hi = 0; hi < j->hist.size(); hi++) {
+        const AiMsg& m = j->hist[hi];
+        if (m.role == 2) {
+            /* 历史轮次工具往返完整重发 (2026-09-27 用户口径"会话上下文不允许任何丢失"):
+             * 调用参数与结果载荷原样回喂 — 此前轮次做过什么、拿到过什么, 模型始终在场。
+             * 每条 role==2 消息的步骤自包含成对的 call/output, 按消息裁剪不会拆散配对。 */
+            for (size_t k = 0; k < m.steps.size(); k++) {
+                const AiToolStep& t = m.steps[k];
+                if (t.name.empty()) continue;   /* 缺 name 的调用不可回喂 (API 校验成对性) */
+                std::string cid = t.cid.empty() ? HistStepCidOf(hi, k) : t.cid;
+                picojson::object call;
+                call["type"] = picojson::value("function_call");
+                call["call_id"] = picojson::value(cid);
+                call["name"] = JS(t.name);
+                call["arguments"] = picojson::value(HistStepArgsOf(t));
+                input.push_back(picojson::value(call));
+                std::string out8 = HistStepOutOf(t);
+                if (pruneHist) out8 = ToolOutputPrune(out8);
+                picojson::object out;
+                out["type"] = picojson::value("function_call_output");
+                out["call_id"] = picojson::value(cid);
+                out["output"] = picojson::value(out8);
+                input.push_back(picojson::value(out));
+            }
+            continue;
+        }
         /* content 数组 = 文字 + 多模态附件 (图片→input_image; 视频/音频→input_file data URL)。
          * 附件按活动档案能力勾选取舍: 关了就不发对应 part (切档后的旧消息不炸请求);
          * dataUrl 空 = 已被历史存储预算清空的占位, 跳过。 */
@@ -3036,11 +3180,11 @@ static void HttpRetryWait(AiJob* j, int attempt, DWORD forceMs = 0) {
    *transient = 传输级瞬态失败 (流中途断掉), 调用方可整轮重试 */
 static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accCalls,
                          const std::vector<std::string>& accOuts, size_t liveFrom,
-                         const std::wstring& repNote, bool withTools,
+                         bool pruneHist, const std::wstring& repNote, bool withTools,
                          std::vector<AiCall>* turnCalls, bool* aborted, bool* truncated,
                          bool* failed, bool* transient, std::string* errMsg) {
     turnCalls->clear();
-    std::string body = AgentBuildBody(j, accCalls, accOuts, liveFrom, repNote, withTools);
+    std::string body = AgentBuildBody(j, accCalls, accOuts, liveFrom, pruneHist, repNote, withTools);
     /* 临时诊断 (2026-09-25 空答复排查): 每轮请求体/响应原文落 data\调试请求/调试响应 (后者只留
      * 最后一轮), 定位后连同 LuaDumpCleaner 一起拆掉 */
     if (g_host->StorageSet)
@@ -3487,6 +3631,14 @@ static size_t AiTokEst8(const std::string& s8) { return s8.size() / 3; }   /* UT
 static size_t AiTokEstMsg(const AiMsg& m) {
     size_t t = AiTokEstW(m.text);
     for (const auto& a : m.atts) t += a.dataUrl.size() / 4;   /* 附件按 base64 粗估 */
+    /* role==2 工具往返随跨轮完整重发进请求 (2026-09-27): 参数+结果载荷按字节计 —
+     * 漏计 = 压力判定失真, 压缩迟迟不触发直接撞 400 */
+    for (const auto& s : m.steps) {
+        t += AiTokEst8(s.res8) + AiTokEst8(s.arg) + 16;
+        /* get_lua_spec 只落描述符, 回放时从引擎现取规范全文 — 按全文体量给名义估值:
+         * 漏计 = 压缩迟迟不触发直接撞 400 (同上) */
+        if (s.name == L"get_lua_spec") t += 8000;
+    }
     return t;
 }
 static size_t AiTokEstHist(const std::vector<AiMsg>& hist) {
@@ -3674,6 +3826,8 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
         keepEst += e;
         keepN++;
     }
+    /* 近端起点对齐轮边界: 整轮保留 (提问+工具往返+回答), 不从半轮中间开始 */
+    while (keepN > 0 && keepN < orig.size() && orig[orig.size() - keepN].role != 0) keepN++;
     size_t newCovered = orig.size() - keepN;
     if (newCovered < covered) newCovered = covered;
     if (newCovered <= covered) return;   /* 无新素材可摘 (近端本身就超长时交给 400 自愈) */
@@ -3686,8 +3840,19 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     }
     for (size_t i = covered; i < newCovered; i++) {
         const AiMsg& m = orig[i];
-        material8 += m.role ? "[AI] " : "[用户] ";
-        std::string seg = U8(m.text);
+        std::string seg;
+        if (m.role == 2) {
+            /* 工具往返一并进摘要素材 (2026-09-27 完整回喂口径下 role==2 也在 hist 里):
+             * 调用参数+结果载荷, 摘要后模型仍有"当时做过什么"的脉络 */
+            for (const auto& st : m.steps) {
+                seg += "[AI 工具调用] " + U8(st.name) + "\n参数: "
+                     + (st.arg.empty() ? U8(st.query) : st.arg)
+                     + "\n结果: " + (st.res8.empty() ? U8(st.err) : st.res8) + "\n";
+            }
+        } else {
+            material8 += m.role ? "[AI] " : "[用户] ";
+            seg = U8(m.text);
+        }
         if (seg.size() > 30000) {   /* 单条封顶: 头 24K + 尾 4K, 省略量精确 */
             std::string cut = seg.substr(0, 24000);
             cut += "\n…[本条过长省略 " + std::to_string(seg.size() - 28000) + " 字节]…\n";
@@ -3729,7 +3894,10 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     else {
         std::vector<AiCall> accCalls;       /* 已执行的工具往返 (input 回填; 与 accOuts 一一对应) */
         std::vector<std::string> accOuts;
-        size_t liveFrom = 0;                /* 本轮刚产出的输出起点 (这些不裁剪; 更早轮次的中段裁剪) */
+        size_t liveFrom = 0;                /* 此下标之前的 accOuts 进入中段裁剪范围 — 常态推进到
+                                               末尾 = 全量回喂不裁剪; 仅 400 超限自愈回退 0 */
+        bool histPruned = false;            /* 历史轮次工具载荷随 400 超限自愈进入裁剪 (置位后
+                                               本作业内保持 — 回退后继续请求仍会再超限) */
         std::string repKey;                 /* 重复调用链键 + 连击计数 (dsh repeat-tool-reminder 口径;
                                                链随作业存活 = 每条用户消息自然重置) */
         int repCount = 0;
@@ -3749,8 +3917,9 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
             std::vector<AiCall> turnCalls;
             ULONGLONG turnT0 = GetTickCount64();
             bool transient = false;
-            bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, liveFrom, repNote, !lastTurn, &turnCalls,
-                                       &aborted, &truncated, &failed, &transient, &errMsg);
+            bool okTurn = AgentRunTurn(j, hc, accCalls, accOuts, liveFrom, histPruned, repNote,
+                                       !lastTurn, &turnCalls, &aborted, &truncated, &failed,
+                                       &transient, &errMsg);
             JobNote(j, L"");   /* 请求已返回, 状态条清掉 */
             repNote.clear();   /* 已随请求消费 */
             EnterCriticalSection(&j->cs);
@@ -3776,12 +3945,13 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                     turn--;   /* 重跑同一轮 */
                     continue;
                 }
-                /* 上下文超限 (HTTP 400): 全部工具输出进入裁剪范围再试一次 (dsh overflow
-                 * recovery 口径: 先做无模型的剪枝, 重试受 generations 推进闸约束 = 只一次;
-                 * 仍超限 = 真失败, 用户看到原始报错) */
+                /* 上下文超限 (HTTP 400): 全部工具输出 (本作业 accOuts + 历史轮次 res8) 进入
+                 * 中段裁剪范围再试一次 (dsh overflow recovery 口径: 先做无模型的剪枝, 重试受
+                 * generations 推进闸约束 = 只一次; 仍超限 = 真失败, 用户看到原始报错) */
                 if (!transient && !overflowRetried && !accCalls.empty() && CtxOverflowMsg(errMsg)) {
                     overflowRetried = true;
                     liveFrom = 0;
+                    histPruned = true;
                     repNote = L"(系统提示: 上一次请求超出模型上下文上限, 早期工具输出已压缩为头尾摘要; "
                               L"若关键数据缺失请重新调用工具获取, 或直接基于已有信息作答)";
                     JobNote(j, L"上下文超限, 已压缩早期工具输出, 正在重试…");
@@ -3821,7 +3991,6 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
             j->phase = 1;   /* 泵冻结当前文本气泡 (下一轮答复另起新气泡) */
             LeaveCriticalSection(&j->cs);
             if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
-            size_t batchStart = accOuts.size();   /* 本批输出起点 = 下一轮的 liveFrom (见循环尾) */
             std::vector<std::string> batchKeys;   /* 本批已执行的调用键 (完全重复的调用去重) */
             for (auto& c : turnCalls) {
                 if (InterlockedCompareExchange(&j->abort, 0, 0)) break;
@@ -3834,6 +4003,8 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                 AiToolStep local;
                 local.state = 1;
                 local.name = W8(c.name.c_str());
+                local.arg = c.args;     /* 原始参数 JSON (跨轮完整重发的事实源; 落库) */
+                local.cid = c.callId;   /* function_call 配对标识 (跨轮回喂成对) */
                 /* 卡片字段在入队前先填好 — 曾在入队后才解析 run_command 参数, 挂起等裁决期
                  * 镜像里 kind 还是 0, 卡片渲染成"搜索 run_command"+文件询问按钮, 命令全文
                  * 看不见, 用户只能盲批 (2026-09-25 实锤) */
@@ -4065,6 +4236,11 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                 local.err = err;
                 if (local.state == 1) local.state = err.empty() ? 2 : 3;
                 if (output.empty()) output = AgentToolOutput(err, local);
+                if (c.name == "get_lua_spec" && err.empty() && !local.res8.empty())
+                    local.res8 = LuaSpecMarker8(local.mode);   /* 模型本轮已拿到全文 (上方 output);
+                                                                  卡片/落库/历史回放只落描述符
+                                                                  (res8 空守卫: 去重跳过执行路径
+                                                                  没有全文, 不造空档描述符) */
                 EnterCriticalSection(&j->cs);
                 if (sidx >= 0 && sidx < (int)j->steps.size()) {
                     AiToolStep& dst = j->steps[sidx];
@@ -4083,6 +4259,11 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                     dst.filter = local.filter;   /* 筛选分类 (漏拷 = 徽标不渲染, 2026-09-27 实锤:
                                                      卡片先入队后执行, filter 在执行时才填进 local) */
                     dst.req = local.req;   /* 要求返回字段显示形 (卡片右键查看; 漏拷 = 菜单空) */
+                    dst.arg = local.arg;   /* 原始参数 JSON (跨轮完整重发+落库; 漏拷 = 下一轮模型
+                                               看不到自己当时的调用参数, 2026-09-27 实锤会话-107) */
+                    dst.cid = local.cid;   /* function_call 配对标识 (跨轮回喂成对+落库) */
+                    dst.res8 = local.res8;   /* 结果载荷 (漏拷 = 会话文件「结果」恒空, 2026-09-27
+                                                 实锤 — 新增落库字段必须同步进本清单) */
                     j->stepsVersion++;
                 }
                 LeaveCriticalSection(&j->cs);
@@ -4093,10 +4274,22 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                     accOuts.push_back(output);
                 }
                 /* 重复调用护栏 (dsh repeat-tool-reminder 口径): 同键连击 3/6 次各注入一次提醒,
-                 * 只提醒不阻断 (被权限闸拒绝/去重的调用同样计数 — 反复锤正是要打断的循环) */
+                 * 只提醒不阻断 (被权限闸拒绝/去重的调用同样计数 — 反复锤正是要打断的循环)。
+                 * 豁免: run_search 带有效去重范围 (参数缺省即「回答」级) 时, 相同参数的连续
+                 * 调用 = 去重翻页, 每次给没看过的条目, 是正当用法不是空转 — 不提醒
+                 * (翻到头由结果「样本回填」告知, 模型自行收手) */
+                bool dedupPaging = false;
+                if (c.name == "run_search") {
+                    Jv av = JsonParseW(W8(c.args.c_str()));
+                    const Jv* dv = (av.t == 5) ? av.Get(L"样本去重") : NULL;
+                    if (!dv) dedupPaging = true;   /* 缺省 = 「回答」级去重生效 */
+                    else if (dv->t == 1) dedupPaging = dv->b;
+                    else if (dv->t == 2) dedupPaging = dv->num != 0;
+                    else if (dv->t == 3) dedupPaging = dv->str.find(L"关") == std::wstring::npos;
+                }
                 if (k == repKey) repCount++;
                 else { repKey = k; repCount = 1; }
-                if (repCount == 3 || repCount == 6) {
+                if ((repCount == 3 || repCount == 6) && !dedupPaging) {
                     if (repCount == 3) {
                         repNote = L"(系统提醒: 你正用完全相同的参数重复调用同一个工具, 这不会产生新信息 — "
                                   L"先仔细分析上一次结果, 换不同参数/不同口径再试; 若信息已足够就直接作答)";
@@ -4115,10 +4308,11 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                 }
                 if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
             }
-            /* liveFrom = 本批输出起点: 最新一批在下一轮请求里保持原文 (模型此刻才第一次读到它,
-             * 裁掉它 = "刚取回的规范永远看不到全文"→反复重取→连发撑爆上下文, 2026-09-25 实锤);
-             * 更早批次那时起进入中段裁剪范围 */
-            liveFrom = batchStart;
+            /* liveFrom 推进到"全部已见" = 本作业内所有工具输出保持原文 (2026-09-27 完整回喂
+             * 口径, 推翻旧"早先批次中段裁剪"); 旧口径的"最新批次必须保持原文"边界 (2026-09-25
+             * 实锤: 裁掉刚取回的输出 → 反复重取 → 连发撑爆上下文) 在全量回喂下天然满足。
+             * 唯一回退 = 400 超限自愈 (liveFrom=0 + histPruned, 见上方失败分支) */
+            liveFrom = accOuts.size();
             EnterCriticalSection(&j->cs);
             j->phase = 0;       /* 下一轮答复另起新文本气泡 */
             j->out.clear();

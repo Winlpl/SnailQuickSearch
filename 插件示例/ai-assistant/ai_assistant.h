@@ -30,6 +30,7 @@
 #include <winhttp.h>
 #include <string>
 #include <vector>
+#include <set>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -288,7 +289,13 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
     std::wstring argz;          /* 代办类工具的参数摘要 (卡片头展示; 随历史落库) */
-    std::string res8;           /* 回喂模型的 JSON (结果载荷; 随历史落库 — 截断 32KB 保存,
+    std::string arg;            /* 模型原始 arguments JSON (UTF-8 原文; 随历史落库) — 跨轮完整重发的
+                                   唯一事实源 (2026-09-27 用户口径"会话上下文不允许任何丢失"):
+                                   从显示字段重建会丢可选参数, 必须存原文; 旧会话无此字段时
+                                   AgentBuildBody 从 mode/query 等近似重建 */
+    std::string cid;            /* function_call 的 call_id (跨轮回喂时与 output 成对; 随历史落库;
+                                   旧会话缺失时 AgentBuildBody 按消息下标合成) */
+    std::string res8;           /* 回喂模型的 JSON (结果载荷; 随历史落库 — 全量保存不截断,
                                    dsh "model-visible ⟺ logged" 口径: 提交过的数据可追溯,
                                    会话文件不丢信息; 不渲染) — run_search/get_window_selection
                                    在完成时现场拼装 (样本=[FileId,文件名], 路径不回喂), 其余=宿主扩展 API 原样 */
@@ -316,7 +323,8 @@ struct AiAttach {
     std::wstring dataUrl;
 };
 struct AiMsg {
-    int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 不重发给模型) */
+    int role = 0;               /* 0=user 1=assistant 2=工具步骤组 (随历史落库; 跨轮完整重发给模型 —
+                                   function_call/output 对按步骤重建, 2026-09-27 用户口径) */
     std::wstring text;
     std::vector<AiAttach> atts; /* role==0: 附带的图片/视频/音频 (多模态输入, 上限 AI_ATT_MAX 个) */
     std::wstring reason;        /* 推理过程 (只在折叠块显示, 从不发送/入库发送体) */
@@ -452,6 +460,10 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     int phase = 0;                 /* 0=流式中 1=工具执行中 (泵据此冻结/新开文本气泡) */
     std::vector<AiToolStep> steps; /* 工具步骤镜像 (泵同步进 msgs 的 role==2 消息) */
     int stepsVersion = 0;          /* steps 每次内容变化 +1 (泵据版本号决定同步) */
+    std::set<int> sampleSeenAns;   /* 「样本去重:回答」范围缓存 (仅本次回答; 作业释放即清空) */
+    std::set<int> sampleSeenSess;  /* 「样本去重:会话」范围缓存 (SendCurrent 从 AiSess::sampleSeen
+                                      快照进作业, 泵收尾抄回 — ckpt 同款; 会话切换/删除或关面板
+                                      时 UI 清空, 重开会话从聊天记录恢复) */
     std::wstring err;
     bool truncated = false;
     std::string hostA, pathA, keyA;   /* 请求要素 (UTF-8; worker 自取; 请求体每轮在 worker 构建) */
@@ -530,6 +542,10 @@ struct AiSess {
      * 快照进作业, 泵收尾抄回; delturn/new/load 换了对话内容即清 (前缀不再可信) */
     std::wstring ckpt;
     size_t ckptCovered = 0;
+    /* 会话级样本去重缓存 (run_search「样本去重:会话」, 2026-09-27 用户口径): 本次会话内已
+     * 提交过样本的 FileId, 跨提问持续 — 切换/删除会话、清空历史、关闭面板时清空, 打开会话
+     * 从聊天记录重建 (SessRebuildSampleSeen)。绑窗口: 缓存住 AiSess 槽位, 随 tok 走 */
+    std::set<int> sampleSeen;
     /* Web 前端 (实现 ai_web.cpp; 不透明指针 — 共享头不 include WebView2) */
     struct AiWebCtx* web = NULL;      /* 会话 Web 上下文 (SessOpen 建, SessClose 收) */
     long long pushStamp = 0;          /* 结构性变化 +1 (新消息/卡片/收尾等非流式文本变动) → 全量重推 */
@@ -544,6 +560,8 @@ extern AiSess g_sess[8];
 AiSess* SessByTok(XjsWindowToken tok);
 AiSess* SessFree();
 void SessLoadSkinOf(AiSess* s);                /* 皮肤五色 ← GetSkinJsonOf(会话所属窗) */
+void SessRebuildSampleSeen(AiSess* s);         /* 会话级样本去重缓存 ← 聊天记录重建 (打开/切换
+                                                  会话后调; msgs 空 = 清空) */
 void AbortSend(AiSess* s);
 void SessSaveConv(AiSess* s);
 void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, float scale);
