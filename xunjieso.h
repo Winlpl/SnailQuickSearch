@@ -38,6 +38,7 @@
  *      遍历磁盘/加载数据库期间(引擎写锁被全程持有), 所有需要加引擎锁的接口都会立即返回默认值/失败,
  *      不再阻塞等待, 防止调用线程假死; 失败原因: 60=正在遍历磁盘, 35=正在加载数据库(详见 xjs_GetLastError)
  * 需要注意的是，所有返回的数据指针，请第一时间获取或拷贝。
+ *      同一线程内下一次返回缓冲的调用会直接覆盖上一次的返回内容(文本类共用TLS拷贝缓冲, 路径类 GetPath/GetParentDirectory 共用路径缓冲), 不拷贝即失效。
  * 版本：见 xjs_GetVersion()
  * 官网：https://www.xunjieso.com
  * 表结构: (需要注意的是, 部分需要自己添加)
@@ -1140,13 +1141,15 @@ XJS_API BOOL XJS_CALL xjs_result_GetSortway (xjs_result* result);
 XJS_API const char* XJS_CALL xjs_result_GetAllSortFieldArray(xjs_result* result);
 
 
-// 置当前筛选分类 (需要注意的是，不会触发任何事件，也不会改变搜索结果。如果需要结果产生变化，需要重新进行搜索)
+// 置当前筛选分类: 支持同时选中多个分类(多选), 传入JSON数组文本(UTF-8), 元素为分类名, 如 ["图片","视频","压缩包"]; ["全部"] 表示全部.
+// 也兼容传入单个分类名(如 "全部"/"文件夹"), 按单选处理.
+// 需要注意的是，不会触发任何事件，也不会改变搜索结果。如果需要结果产生变化，需要重新进行搜索.
 XJS_API BOOL XJS_CALL xjs_result_SetSelectedFilter(
-    xjs_result* result, 
-    const char* categoryName // 分类名："全部" || "文件夹"...
+    xjs_result* result,
+    const char* categoryName // JSON数组: ["图片","视频"] || 单个分类名: "全部" || "文件夹"...
 );
 
-// 取当前筛选分类 (默认为'全部')
+// 取当前筛选分类, 返回JSON数组文本(UTF-8), 元素为选中的分类名, 如 ["图片","视频"]; 未做筛选(全部)时为 ["全部"] (默认)
 XJS_API const char* XJS_CALL xjs_result_GetSelectedFilter(xjs_result* result);
 
 

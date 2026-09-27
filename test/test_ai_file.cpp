@@ -2,6 +2,8 @@
  * test_ai_file.cpp — read_file/AiTextToUtf8 纯逻辑单元验证
  * 链 ai_core.obj + ai_file.obj (插件示例\ai-assistant\build.bat 产物), 不起引擎不碰 UI;
  * 样本由 test_fixtures.js 造在 %TEMP%\aft。通过=输出 0 失败, 非零=失败数。
+ * 覆盖: 编码识别 / 文本与 docx·pptx·xlsx 读取 / file_op 更改记录 /
+ *       AiWindowLines (offset/limit 行窗口分页) / AiSpillText (外溢落盘)。
  * 构建 (仓库根执行, 先跑过插件 build.bat 让 .obj 在位; /I 解决 include 定位; 库集同插件 build.bat):
  *   cl /nologo /EHsc /std:c++20 /utf-8 /MT /DUNICODE /D_UNICODE /Fotest\ /I插件示例\ai-assistant test\test_ai_file.cpp 插件示例\ai-assistant\ai_core.obj 插件示例\ai-assistant\ai_file.obj ^
  *      /Fe:test\test_ai_file.exe /link winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib xunjieso.lib
@@ -433,6 +435,70 @@ int main() {
             CHECK(err3.empty() && st3.chg.size() == 2 && st3.chg[0].act == 3 &&
                   st3.chg[0].from == a && st3.chg[0].to.empty(), "fileop-delete-change-record");
         }
+    }
+
+    /* ---- AiWindowLines (read_file offset/limit 行窗口分页, 纯函数直调) ---- */
+    {
+        std::string doc;
+        for (int i = 1; i <= 100; i++) doc += "L" + std::to_string(i) + "\n";   /* 100 行, 每行带 \n */
+        std::wstring note;
+        /* 1) 基本窗口: offset=10, limit=3 → L10..L12, 脚注给下一页 */
+        std::string win = AiWindowLines(doc, 10, 3, 1 << 20, &note);
+        CHECK(W8(win.c_str()) == L"L10\nL11\nL12\n", "win-basic-3-lines");
+        CHECK(note.find(L"第 10–12 行") != std::wstring::npos &&
+              note.find(L"offset=13") != std::wstring::npos, "win-basic-note-next");
+        /* 2) 未传 offset (默认 1) + limit 到末尾 → 已到末尾 */
+        win = AiWindowLines(doc, 99, 50, 1 << 20, &note);
+        CHECK(W8(win.c_str()) == L"L99\nL100\n", "win-tail-2-lines");
+        CHECK(note.find(L"已到末尾") != std::wstring::npos, "win-tail-note-end");
+        /* 3) 预算截断: budget=12 → L1..L4 (每行 3 字节含\n, 共 12) 恰好装满, L5 放不下 */
+        win = AiWindowLines(doc, 1, 100, 12, &note);
+        CHECK(win == "L1\nL2\nL3\nL4\n", "win-budget-4-lines");
+        CHECK(note.find(L"offset=5") != std::wstring::npos, "win-budget-note-next");
+        /* 4) offset 超尾 → 空内容 + 提示 */
+        win = AiWindowLines(doc, 101, 10, 1 << 20, &note);
+        CHECK(win.empty() && note.find(L"超出总行数") != std::wstring::npos, "win-offset-beyond");
+        /* 5) CRLF: '\r' 不入窗 */
+        std::string crlf = "a\r\nb\r\n";
+        win = AiWindowLines(crlf, 1, 10, 1 << 20, &note);
+        CHECK(win == "a\nb\n", "win-crlf-strip");
+        /* 6) 单行超预算: 截该行到预算, 只此一行 */
+        std::string monster(5000, 'x');
+        win = AiWindowLines(monster, 1, 10, 1000, &note);
+        CHECK(win.size() == 1000 && win[999] == '\n' && note.find(L"offset=2") != std::wstring::npos,
+              "win-monster-line-cut");
+        /* 7) 末行无换行也算一行 */
+        win = AiWindowLines(std::string("one\ntwo"), 2, 10, 1 << 20, &note);
+        CHECK(win == "two\n" && note.find(L"已到末尾") != std::wstring::npos, "win-no-trailing-nl");
+        /* 8) limit 夹取 (>2000) 与空文档 */
+        win = AiWindowLines(doc, 1, 99999, 1 << 20, &note);
+        CHECK(win.find("L100\n") != std::string::npos, "win-limit-clamp-still-all");
+        win = AiWindowLines(std::string(), 1, 10, 1 << 20, &note);
+        CHECK(win.empty() && note.find(L"超出总行数") != std::wstring::npos, "win-empty-doc");
+    }
+
+    /* ---- AiSpillText (外溢落盘; 用 %TEMP% 真实写读一次) ---- */
+    {
+        std::wstring p1 = AiSpillText("spill-内容-1", "t");
+        CHECK(!p1.empty() && p1.find(L"SnailQuickSearch-AI") != std::wstring::npos, "spill-path-in-temp");
+        std::wstring p2 = AiSpillText("spill-2", "t");
+        CHECK(!p2.empty() && p2 != p1, "spill-second-distinct-path");
+        /* 读回验证: UTF-8 BOM + 原文 (经 ReadFileToolExec 同款编码识别链路) */
+        if (!p1.empty()) {
+            HANDLE f = CreateFileW(p1.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            CHECK(f != INVALID_HANDLE_VALUE, "spill-open-back");
+            if (f != INVALID_HANDLE_VALUE) {
+                char buf[64] = {};
+                DWORD rd = 0;
+                ReadFile(f, buf, sizeof(buf) - 1, &rd, NULL);
+                CloseHandle(f);
+                CHECK(rd > 3 && memcmp(buf, "\xEF\xBB\xBF", 3) == 0 &&
+                      W8(buf + 3).rfind(L"spill-内容-1") == 0, "spill-bom-and-content");
+            }
+            DeleteFileW(p1.c_str());
+            DeleteFileW(p2.c_str());
+        }
+        CHECK(AiSpillText("", "t").empty(), "spill-empty-rejected");
     }
 
     printf("\n%d failed\n", fails);

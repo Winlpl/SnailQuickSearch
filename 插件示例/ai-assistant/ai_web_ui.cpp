@@ -420,6 +420,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .shead{display:flex;align-items:baseline;gap:6px;padding:5px 8px;font-size:11px;cursor:pointer;overflow:hidden}
 .sbadge{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-violet) 16%,transparent);
         color:color-mix(in srgb,var(--accent-violet) 80%,var(--text-primary));font-size:10px;line-height:1.6}
+.sflt{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-cyan) 16%,transparent);
+      color:color-mix(in srgb,var(--accent-cyan) 80%,var(--text-primary));font-size:10px;line-height:1.6}
 .scmd{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
       color:var(--text-secondary);font-family:Consolas,'Cascadia Mono',monospace;font-size:11px}
 .sst{flex:0 0 auto;color:var(--text-tertiary);font-size:10px;font-variant-numeric:tabular-nums}
@@ -881,10 +883,11 @@ textarea,input{user-select:text;-webkit-user-select:text}
             <button class="ai-reason-toggle" id="a-notify" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>后台完成时系统通知</button>
             <button class="ai-reason-toggle" id="a-cardsopen" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>工具卡片默认展开</button>
             <button class="ai-reason-toggle" id="a-web" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>联网搜索</button>
+            <button class="ai-reason-toggle" id="a-acompact" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>自动压缩历史</button>
           </div></div>
 )AIWEBUI"
            LR"AIWEBUI(        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，越大记得越全也越耗 token（默认 30）。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件/网页回传正文上限，超出部分留头 80% 尾 20% 并注明省略量（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效。开关：后台完成提醒、工具卡片默认展开，以及联网搜索 = 允许 AI 联网搜索并读取网页（web_search / fetch_url，查询词会发给搜索引擎；关闭后 AI 不再具备联网能力）。</span></div>
+          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，仅在关闭「自动压缩历史」时生效（默认 30）。自动压缩历史 = 上下文接近模型上限时，自动把早期对话压缩成背景要点再继续（默认开），长对话不再丢开头、但偶尔多一次摘要耗时。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件/网页回传正文上限，超出部分留头 80% 尾 20% 并注明省略量，完整内容会存为外溢文件供 AI 分页读取（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效。开关：后台完成提醒、工具卡片默认展开、自动压缩历史，以及联网搜索 = 允许 AI 联网搜索并读取网页（web_search / fetch_url，查询词会发给搜索引擎，只能访问公网地址；关闭后 AI 不再具备联网能力）。</span></div>
         <div class="ai-config-actions">
           <button class="ai-btn" id="b-agent-cancel" type="button">取消</button>
           <button class="ai-btn ai-btn-primary" id="b-agent-save" type="button">保存</button>
@@ -1315,6 +1318,7 @@ function fillAgentForm(){
   $('a-notify').setAttribute('aria-pressed',S.cfg.notify!==false?'true':'false');
   $('a-cardsopen').setAttribute('aria-pressed',S.cfg.cardsOpen?'true':'false');
   $('a-web').setAttribute('aria-pressed',S.cfg.web!==false?'true':'false');
+  $('a-acompact').setAttribute('aria-pressed',S.cfg.acompact!==false?'true':'false');
 }
 function saveAgent(){
   /* 每项越界即整体不保存 (接口页 token 校验同口径, 不静默改一半) */
@@ -1330,6 +1334,7 @@ function saveAgent(){
         notify:$('a-notify').getAttribute('aria-pressed')==='true',
         cardsOpen:$('a-cardsopen').getAttribute('aria-pressed')==='true',
         web:$('a-web').getAttribute('aria-pressed')==='true',
+        acompact:$('a-acompact').getAttribute('aria-pressed')==='true',
         instr:String($('a-instr').value||'').slice(0,4000)});
   showToast('Agent 设置已保存','ok');
   cfgToggle(false);   /* 保存成功即收起面板 */
@@ -2221,9 +2226,11 @@ function bindThread(){
       e.preventDefault();
       const q=stp.getAttribute('data-q')||'';
       const mode=stp.getAttribute('data-mode')||'';
+      const req=stp.getAttribute('data-req')||'';
       const items=[];
       if(q&&mode)items.push({t:'执行语句',fn:()=>post({c:'execstmt',gi:+stp.getAttribute('data-gi'),si:+stp.getAttribute('data-si')})});
       if(q)items.push({t:'复制查询语句',fn:()=>post({c:'copy',text:q})});
+      if(req)items.push({t:'要求返回的字段',fn:()=>showToast(req,'ok')});
       if(items.length)showCtx(items,e.clientX,e.clientY);
       return;
     }

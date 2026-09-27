@@ -5,7 +5,10 @@
  *   read_file  读本地文件给模型: BOM/UTF-16/UTF-8/ANSI(GBK) 编码识别统一转 UTF-8
  *              (AiTextToUtf8, ai_core.cpp); docx/pptx/xlsx 直接解包抽文字 (内置
  *              RFC1951 inflate + ZIP 只读解包, 免第三方库); 其它二进制 (含 PDF)
- *              明确报错不硬猜。
+ *              明确报错不硬猜。2026-09-27 起带 offset/limit 行窗口分页 (dsh read
+ *              口径, AiWindowLines 纯函数); 被头尾封顶的内容外溢落盘给路径
+ *              (AiSpillText, dsh spill 口径 — 模型用 read_file 分页读回中段)。
+ *              AiSpillText/AiWindowLines 亦供 fetch_url / run_command 复用。
  *   read_image 把本地图片注入本请求 (input_image data URL): ≤4MB 且格式已知 = 原样
  *              注入; 否则 WIC 解码缩放 (最长边 ≤2000) 重编码 JPEG。视觉模型直接看图;
  *              需当前档案开启图片输入 (g_cfg.img)。
@@ -984,6 +987,119 @@ std::string AiCapUtf8HeadTail(const std::string& content8) {
     return cut;
 }
 
+/* ==================== 大输出外溢 (dsh spill 口径, 2026-09-27) ====================
+ * 被头尾封顶的大输出不再"只丢中段": 完整内容落盘 %TEMP%\SnailQuickSearch-AI\,
+ * 路径随工具结果回喂, 模型用 read_file(路径, offset, limit) 行窗口取回中段。
+ * 失败/超 8MB = 空串, 调用方维持原头尾行为 (外溢是增益不是依赖)。 */
+std::wstring AiSpillText(const std::string& content8, const char* tag8) {
+    static const size_t SPILL_CAP = 8u * 1024 * 1024;
+    if (!tag8 || content8.empty() || content8.size() > SPILL_CAP) return L"";
+    wchar_t tmp[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, tmp);
+    if (!n || n >= MAX_PATH) return L"";
+    std::wstring dir = std::wstring(tmp) + L"SnailQuickSearch-AI";
+    CreateDirectoryW(dir.c_str(), NULL);   /* 已存在 = ERROR_ALREADY_EXISTS, 无妨 */
+    static LONG swept = 0;                 /* 首次写入顺手清 7 天前的旧外溢 (进程一次) */
+    if (InterlockedCompareExchange(&swept, 1, 0) == 0) {
+        FILETIME nowFt;
+        GetSystemTimeAsFileTime(&nowFt);
+        ULONGLONG cutoff = ((ULONGLONG)nowFt.dwHighDateTime << 32 | nowFt.dwLowDateTime) -
+                           7ull * 24 * 3600 * 10000000;
+        WIN32_FIND_DATAW fd;
+        HANDLE fh = FindFirstFileW((dir + L"\\*.txt").c_str(), &fd);
+        if (fh != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                ULONGLONG wt = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                               fd.ftLastWriteTime.dwLowDateTime;
+                if (wt < cutoff) DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+            } while (FindNextFileW(fh, &fd));
+            FindClose(fh);
+        }
+    }
+    static LONG seq = 0;   /* 同毫秒同名防覆盖 */
+    wchar_t name[64];
+    swprintf(name, 64, L"溢存-%S-%llu-%ld.txt", tag8,
+             (unsigned long long)GetTickCount64(), InterlockedIncrement(&seq));
+    std::wstring path = dir + L"\\" + name;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return L"";
+    DWORD wr = 0;
+    WriteFile(f, "\xEF\xBB\xBF", 3, &wr, NULL);   /* UTF-8 BOM: read_file/notepad 都认 */
+    WriteFile(f, content8.data(), (DWORD)content8.size(), &wr, NULL);
+    CloseHandle(f);
+    return path;
+}
+
+/* 行窗口切取 (read_file offset/limit 分页, dsh read 口径): offset=1-based 起始行,
+ * limit=行数上限, 窗口按 budget 字节到行为止 (单行超预算 = 截该行, 与 dsh
+ * readMaxLineLength 同粒度; 行内续读不支持, 行级分页已覆盖大文件场景)。
+ * note = 分页脚注 (返回行范围/下一页 offset/超尾提示)。纯函数: 预算经参数传入,
+ * test\test_ai_file.cpp 直测。 */
+std::string AiWindowLines(const std::string& content8, long long offset, long long limit,
+                          size_t budget, std::wstring* note) {
+    if (note) note->clear();
+    if (offset < 1) offset = 1;
+    if (limit < 1) limit = 1;
+    if (limit > 2000) limit = 2000;
+    /* 数总行: '\n' 分隔, 末行无换行也算一行, 末尾换行不产空行 */
+    long long total = 0;
+    {
+        size_t p = 0;
+        for (;;) {
+            total++;
+            size_t nx = content8.find('\n', p);
+            if (nx == std::string::npos) break;
+            p = nx + 1;
+            if (p == content8.size()) break;
+        }
+        if (content8.empty()) total = 0;
+    }
+    if (offset > total) {
+        if (note)
+            *note = L"起始行 " + std::to_wstring(offset) + L" 超出总行数 (共 " +
+                    std::to_wstring(total) + L" 行) — 返回空, 不要再加大 offset";
+        return "";
+    }
+    std::string out;
+    long long line = 1, endLine = 0;
+    bool budgetCut = false;
+    size_t p = 0;
+    for (; line <= total; line++) {
+        size_t nx = content8.find('\n', p);
+        size_t e = (nx == std::string::npos) ? content8.size() : nx;
+        bool last = (nx == std::string::npos);
+        if (line >= offset) {
+            size_t len = e - p;
+            if (len > 0 && content8[e - 1] == '\r') len--;   /* CRLF 的 '\r' 不入窗 */
+            if (out.size() + len + 1 > budget) {
+                if (out.empty()) {   /* 单行就超预算: 截该行 (行内续读不支持, dsh 同粒度) */
+                    out.append(content8, p, budget > 0 ? budget - 1 : 0);
+                    out += '\n';
+                    endLine = line;
+                }
+                budgetCut = true;    /* 否则本行放不下: 留给下一窗 */
+                break;
+            }
+            out.append(content8, p, len);
+            out += '\n';
+            endLine = line;
+            if (endLine - offset + 1 >= limit) break;
+        }
+        if (last) break;
+        p = nx + 1;
+    }
+    if (note) {
+        *note = L"第 " + std::to_wstring(offset) + L"–" + std::to_wstring(endLine) +
+                L" 行 / 共 " + std::to_wstring(total) + L" 行";
+        if (budgetCut || endLine < total)
+            *note += L"; 继续读取用 offset=" + std::to_wstring(endLine + 1);
+        if (!budgetCut && endLine >= total) *note += L" (已到末尾)";
+    }
+    return out;
+}
+
 /* read_file 实体: 文本 (编码识别) / docx·pptx·xlsx (解包抽文字); 其它二进制明确报错 */
 std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
     st->kind = 12;
@@ -1032,7 +1148,31 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
         if (utf16 && content8.find('\0') != std::string::npos)
             return L"内容含二进制数据, read_file 只支持文本文件";
     }
-    /* 内容封顶: 头+尾+精确省略量 (与 fetch_url 共用收口) */
+    /* 行窗口分页 (dsh read offset/limit 口径, 2026-09-27): 显式传 offset/limit 才启用 —
+     * 大文件被头尾封顶截断的中段用行窗口分段读 (docx/pptx/xlsx 抽取文本同样适用);
+     * 未传 = 整篇头尾封顶 + 中段外溢落盘给路径 (原行为 + 外溢增益) */
+    const Jv* ov = v.Get(L"offset");
+    const Jv* lv = v.Get(L"limit");
+    bool paged = (ov && ov->t == 2 && ov->num >= 1) || (lv && lv->t == 2 && lv->num >= 1);
+    size_t rfHead = 0, rfTail = 0;
+    AiOutHeadTail(&rfHead, &rfTail);
+    if (paged) {
+        long long offset = (ov && ov->t == 2 && ov->num >= 1) ? (long long)ov->num : 1;
+        long long limit = (lv && lv->t == 2 && lv->num >= 1) ? (long long)lv->num : 2000;
+        std::wstring note;
+        std::string win8 = AiWindowLines(content8, offset, limit, rfHead + rfTail, &note);
+        picojson::object o;
+        o["path"] = JS(path);
+        o["格式或编码"] = JS(kindName);
+        o["content"] = JS(W8(win8.c_str()));
+        o["行范围"] = JS(note);
+        if (rawSize) o["总字节"] = JN((long long)rawSize);
+        if (truncExtract) o["说明"] = JS(L"文档过长, 文字抽取在中途收卷, 之后内容未包含");
+        st->res8 = picojson::value(o).serialize();
+        return L"";
+    }
+    /* 内容封顶: 头+尾+精确省略量 (与 fetch_url 共用收口); 中段外溢落盘给路径 */
+    std::string full8 = content8;
     content8 = AiCapUtf8HeadTail(content8);
     picojson::object o;
     o["path"] = JS(path);
@@ -1040,6 +1180,14 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
     o["content"] = JS(W8(content8.c_str()));
     if (rawSize) o["总字节"] = JN((long long)rawSize);
     if (truncExtract) o["说明"] = JS(L"文档过长, 文字抽取在中途收卷, 之后内容未包含");
+    if (full8.size() > rfHead + rfTail) {
+        std::wstring spill = AiSpillText(full8, "file");
+        if (!spill.empty()) {
+            o["外溢文件"] = JS(spill);
+            o["续读"] = JS(L"完整内容已存为外溢文件, 用 read_file(该路径, offset, limit) "
+                           L"按行窗口读取头尾之外的中段 (offset=起始行, limit=行数)");
+        }
+    }
     st->res8 = picojson::value(o).serialize();
     return L"";
 }

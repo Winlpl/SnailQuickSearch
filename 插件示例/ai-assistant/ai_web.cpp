@@ -93,6 +93,7 @@ static picojson::value WebCfgValue() {
     o["notify"] = JB(g_cfg.notifyDone);
     o["cardsOpen"] = JB(g_cfg.toolCardsOpen);
     o["web"] = JB(g_cfg.webSearch);
+    o["acompact"] = JB(g_cfg.autoCompact);
     o["instr"] = JS(g_cfg.customInstr);
     /* 多模态能力 (活动档案镜像): 输入区据此显隐附件入口 */
     o["img"] = JB(g_cfg.img);
@@ -549,13 +550,30 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             HtmlEscape(out, st.mode);
             *out += L"\"";
         }
+        /* data-req = 要求返回字段显示形 (仅 run_search 卡非空时): 右键「要求返回的字段」展示 */
+        if (st.kind == 0 && !st.req.empty()) {
+            *out += L" data-req=\"";
+            HtmlEscape(out, st.req);
+            *out += L"\"";
+        }
         /* data-q = 完整查询原文 (头部 .scmd 截 200 只供显示; 右键"复制查询语句"要全文) */
         *out += L" data-q=\"";
         HtmlEscape(out, cmd);
         *out += L"\">";
         *out += L"<div class=\"shead\"><span class=\"sbadge\">";
         HtmlEscape(out, StepBadge(st.kind));
-        *out += L"</span><span class=\"scmd\">";
+        *out += L"</span>";
+        if (st.kind == 0 && !st.filter.empty()) {
+            /* 筛选分类徽标 (2026-09-27, cyan 异色于模式徽标): 用户直接看得出这次搜索
+             * 收窄在哪个分类里; 随历史落库, 重开会话照显。多选清单过长只截显 (落库/
+             * 重放仍用 st.filter 全文) */
+            *out += L"<span class=\"sflt\" title=\"筛选分类\">";
+            std::wstring f = st.filter;
+            if (f.size() > 48) { f.resize(48); f += L"…"; }
+            HtmlEscape(out, f);
+            *out += L"</span>";
+        }
+        *out += L"<span class=\"scmd\">";
         if (cmd.size() > 200) { cmd.resize(200); cmd += L"…"; }
         HtmlEscape(out, cmd);
         *out += L"</span><span class=\"sst";
@@ -2108,6 +2126,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         if ((v = msg.Get(L"notify")) != NULL && v->t == 1) g_cfg.notifyDone = v->b;
         if ((v = msg.Get(L"cardsOpen")) != NULL && v->t == 1) g_cfg.toolCardsOpen = v->b;
         if ((v = msg.Get(L"web")) != NULL && v->t == 1) g_cfg.webSearch = v->b;
+        if ((v = msg.Get(L"acompact")) != NULL && v->t == 1) g_cfg.autoCompact = v->b;
         if ((v = msg.Get(L"instr")) != NULL && v->t == 3) g_cfg.customInstr = v->str;
         /* 夹取收口在 ai_core.cpp (与 CfgLoad 同一函数) */
         CfgClampAgent();
@@ -2162,7 +2181,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
                 si >= 0 && si < (int)s->msgs[mi].steps.size() &&
                 s->msgs[mi].steps[si].kind == 0) {
                 const AiToolStep& st = s->msgs[mi].steps[si];
-                std::wstring err = AgentManualExec(s->tok, st.mode, st.query);
+                std::wstring err = AgentManualExec(s->tok, st.mode, st.query, st.filter);
                 if (!err.empty())
                     WebToast(s, U8(err).c_str(), XJS_PLUGIN_TOAST_WARN);
                 else
@@ -2294,6 +2313,8 @@ void WebCommand(AiSess* s, const Jv& msg) {
         int end = mi + 1;
         while (end < (int)s->msgs.size() && s->msgs[end].role != 0) end++;
         s->msgs.erase(s->msgs.begin() + mi, s->msgs.begin() + end);
+        s->ckpt.clear();   /* 检查点覆盖的前缀已被删, 失效 (重算一次, 不落盘) */
+        s->ckptCovered = 0;
         if (s->stepBase > (int)s->msgs.size()) s->stepBase = (int)s->msgs.size();
         if (s->msgs.empty()) {
             /* 删光 = 会话一并移出历史: SessSaveConv 对空会话跳过, 不删则旧内容残留索引,
@@ -2319,6 +2340,8 @@ void WebCommand(AiSess* s, const Jv& msg) {
         s->uTokPerSec = 0;
         s->stepBase = 0;
         s->curId = 0;
+        s->ckpt.clear();   /* 新会话无历史, 检查点一并清 */
+        s->ckptCovered = 0;
         WebTouch(s);
         WebSyncSession(s);
         WebSyncHist();   /* 保存后的当前对话可能新进历史 */
@@ -2332,6 +2355,8 @@ void WebCommand(AiSess* s, const Jv& msg) {
         SessSaveConv(s);
         s->msgs = std::move(conv.msgs);
         s->stepBase = (int)s->msgs.size();   /* 恢复的历史卡片不参与任何在途作业的步骤同步 */
+        s->ckpt.clear();   /* 换会话: 检查点属旧对话 (不落盘, 新会话按需重算) */
+        s->ckptCovered = 0;
         s->usageHas = false;
         s->uPrompt = s->uCompletion = s->uTotal = s->uCacheHit = s->uCacheWrite = 0;
         s->uLastPrompt = s->uLastCompletion = s->uLastCacheHit = 0;

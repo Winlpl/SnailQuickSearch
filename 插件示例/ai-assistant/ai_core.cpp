@@ -256,6 +256,24 @@ void CfgClampAgent() {
     if (g_cfg.customInstr.size() > 4000) g_cfg.customInstr.resize(4000);
 }
 
+/* 上下文窗口 token (2026-09-27): 档案指定值优先; 缺省按模型名推断 — 与前端用量条
+ * 同表同值 (ai_web_ui.cpp 的 T 表), 压缩压力判定与"剩余"显示共用一份口径 */
+long long AiCtxWindowGuess() {
+    if (g_cfg.ctx > 0) return g_cfg.ctx;
+    static const struct { const wchar_t* k; long long w; } T[] = {
+        { L"deepseek", 1000000 }, { L"gemini", 1000000 }, { L"gpt-4.1", 1047576 },
+        { L"gpt-4o", 128000 },    { L"gpt-4-turbo", 128000 }, { L"gpt-3.5", 16385 },
+        { L"claude", 200000 },    { L"qwen", 131072 },    { L"glm", 131072 },
+        { L"moonshot", 131072 },  { L"kimi", 131072 },    { L"llama", 131072 },
+        { L"mistral", 131072 },
+    };
+    std::wstring m = g_cfg.model;
+    for (auto& c : m) c = (wchar_t)towlower(c);
+    for (const auto& e : T)
+        if (m.find(e.k) != std::wstring::npos) return e.w;
+    return 128000;
+}
+
 void CfgSave() {
     if (!g_host) return;
     std::wstring mk = MachineKeyStr();
@@ -278,6 +296,7 @@ void CfgSave() {
     root["notifyDone"] = JB(g_cfg.notifyDone);
     root["toolCardsOpen"] = JB(g_cfg.toolCardsOpen);
     root["webSearch"] = JB(g_cfg.webSearch);
+    root["autoCompact"] = JB(g_cfg.autoCompact);
     root["customInstr"] = JS(g_cfg.customInstr);
     root["activeId"] = JS(g_cfg.activeId);
     picojson::array profs;
@@ -397,6 +416,8 @@ void CfgLoad() {
             if (tco && tco->t == 1) g_cfg.toolCardsOpen = tco->b;
             const Jv* ws = v.Get(L"webSearch");
             if (ws && ws->t == 1) g_cfg.webSearch = ws->b;
+            const Jv* ac = v.Get(L"autoCompact");
+            if (ac && ac->t == 1) g_cfg.autoCompact = ac->b;
             const Jv* ci = v.Get(L"customInstr");
             if (ci && ci->t == 3) g_cfg.customInstr = ci->str;
             CfgClampAgent();
@@ -488,6 +509,19 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
                 if (!t.argz.empty()) os["argz"] = JS(t.argz);
                 if (!t.mode.empty()) os["mode"] = JS(t.mode);
                 if (!t.query.empty()) os["query"] = JS(t.query.substr(0, 512));
+                if (!t.filter.empty()) os["筛选器"] = JS(t.filter);
+                if (!t.req.empty()) os["要求返回"] = JS(t.req);
+                if (!t.res8.empty()) {
+                    /* 结果载荷随历史落库 (2026-09-27 用户口径"会话文件不丢已提交的数据"):
+                     * 封顶 32KB, 超长截断并带精确省略量 */
+                    std::string r = t.res8;
+                    if (r.size() > 32768) {
+                        size_t orig = r.size();
+                        r.resize(32768);
+                        r += "…[落库截断, 省略 " + std::to_string(orig - 32768) + " 字节]";
+                    }
+                    os["结果"] = picojson::value(r);
+                }
                 if (!t.err.empty()) os["err"] = JS(t.err.substr(0, 512));
                 if (!t.adj.items.empty()) {
                     /* 待应用的调整 (含逐项状态): 落库后重开会话卡片仍可应用/忽略 */
@@ -594,6 +628,9 @@ static bool HistConvFromJson(const Jv& jc, AiConv& c) {
                         t.argz = jst.S(L"argz");
                         t.mode = jst.S(L"mode");
                         t.query = jst.S(L"query");
+                        t.filter = jst.S(L"筛选器");
+                        t.req = jst.S(L"要求返回");
+                        t.res8 = U8(jst.S(L"结果"));   /* 结果载荷 (UTF-8 存取) */
                         t.err = jst.S(L"err");
                         const Jv* jtp = jst.Get(L"top");
                         if (jtp && jtp->t == 4)

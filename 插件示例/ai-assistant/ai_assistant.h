@@ -115,7 +115,8 @@ std::wstring AgentApiErrText(int rc);     /* 扩展 API 错误码 → 短描述 
 xjs_result* AgentWindowResultOf(XjsWindowToken tok);
                                           /* 窗口令牌 → 该窗结果对象 (仅 UI 线程; 旧宿主/无窗 = NULL)。
                                              结果同步的捕获口: 发送/勾选/手动执行三处在 UI 线程调它 */
-std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query);
+std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query,
+                             const std::wstring& filter);
                                           /* 卡片右键"执行语句": 私有对象上异步重放该语句, 布防
                                              结果同步 — 完成事件回调把 ID 全集推进目标窗列表。
                                              仅 UI 线程; 只占串行锁完成提交 (agent 忙 = 拒绝);
@@ -228,6 +229,10 @@ struct AiCfg {
                                  + 提示词工具目录不含联网行 + WorkerMain 干净拒绝 (三处同口径)。
                                  变更后必须 BuildInstructions() 重建 */
     bool toolCardsOpen = false;  /* 工具卡片默认展开 (前端渲染缺省态; 用户手动开合仍按会话自持) */
+    bool autoCompact = true;  /* 自动压缩历史 (Agent 设置, 2026-09-27): 上下文压力过阈值时把
+                                 老对话换成 LLM 摘要检查点 (dsh compaction 口径); 开启时取代
+                                 maxCtxMsgs 的硬裁 (按 token 管理记忆, 老问答不再整段丢失),
+                                 关闭 = 回到 maxCtxMsgs 条数硬裁 */
     std::wstring customInstr;    /* 自定义指令 (≤4000 字符): 拼进系统提示词「自定义指令」节 (骨架之后、
                                  Lua 附录之前); 为空 = 不拼该节, 提示词字节与默认一致 (provider 前缀
                                  缓存不受损)。变更后必须 BuildInstructions() 重建 */
@@ -244,6 +249,8 @@ void CfgApplyActive();                     /* 活动档案 → 派生镜像 (切
 std::wstring CfgDisplayName(const AiProfile* p);   /* name || model || 未命名模型 (前端同款兜底) */
 std::wstring CfgGenProfileId();
 long long CfgClampTok(double v);           /* token 长度夹取 (0=未指定, 上限 1e8) */
+long long AiCtxWindowGuess();              /* 上下文窗口 token (档案 ctx 优先, 缺省按模型名推断 —
+                                              与前端用量条同表; 压缩压力判定与用量显示共用) */
 
 /* ==================== 多对话历史 (按会话拆分存储; 定义 ai_core.cpp) ====================
  * 索引 = 存储键 "历史索引" ([{"会话标题","文件名","id","时间"}], 只有元数据 — 打开面板零消息体载入);
@@ -281,7 +288,9 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
     int state = 0;              /* 0=排队 1=执行中 2=完成 3=失败 4=策略询问 (被权限闸拒绝, 卡上带确认按钮) */
     std::wstring mode, query;   /* run_search 参数 */
     std::wstring argz;          /* 代办类工具的参数摘要 (卡片头展示; 随历史落库) */
-    std::string res8;           /* 回喂模型的 JSON (瞬时; 不渲染不落库) — run_search/get_window_selection
+    std::string res8;           /* 回喂模型的 JSON (结果载荷; 随历史落库 — 截断 32KB 保存,
+                                   dsh "model-visible ⟺ logged" 口径: 提交过的数据可追溯,
+                                   会话文件不丢信息; 不渲染) — run_search/get_window_selection
                                    在完成时现场拼装 (样本=[FileId,文件名], 路径不回喂), 其余=宿主扩展 API 原样 */
     int count = -1;             /* run_search 命中总数 */
     long long elapsedMs = -1;
@@ -291,6 +300,10 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
                                          卡片常显块+随历史落库; 不回喂模型 — 模型经结果 JSON 得知) */
     std::vector<AiFileChange> chg;   /* file_op 逐项更改记录 (成功+失败都记; 卡片常显块+回合聚合块+
                                          随历史落库; 不回喂模型 — 模型经结果 JSON 的 changes/errors 得知) */
+    std::wstring filter;             /* run_search 的筛选器参数 (查询前按分类预过滤; 随历史落库,
+                                         卡片「执行语句」重放用 — 不带会重放出不同结果) */
+    std::wstring req;                /* run_search 的要求返回字段显示形 (如 "子树信息=整棵子树、
+                                         文件大小"; 卡片右键查看; 随历史落库) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
 };
@@ -374,6 +387,16 @@ void AiOutHeadTail(size_t* head, size_t* tail);            /* 内容回传头尾
                                                               = readCapKB; ai_file.cpp 收口) */
 std::string AiCapUtf8HeadTail(const std::string& content8);/* 内容封顶 (UTF-8 边界落刀 + 精确省略量
                                                               标记; read_file 与 fetch_url 共用) */
+std::wstring AiSpillText(const std::string& content8, const char* tag8);
+          /* 大输出外溢落盘 (dsh spill 口径, 2026-09-27): %TEMP%\SnailQuickSearch-AI\
+             溢存-<tag>-<序>.txt (UTF-8 BOM), 返回完整路径; 空/超 8MB/写失败 = 空 (调用方
+             维持头尾封顶行为, 模型可用 read_file 分页读外溢文件取回中段)。
+             首次写入顺手清理 7 天前的旧外溢文件 (进程一次) */
+std::string AiWindowLines(const std::string& content8, long long offset, long long limit,
+                          size_t budget, std::wstring* note);
+          /* 行窗口切取 (read_file offset/limit 分页, dsh read 口径): 1-based 起始行 +
+             行数上限 (≤2000), 窗口按 budget 字节到行为止; note = 给模型的分页脚注
+             (返回行范围/下一页 offset/超尾提示)。纯函数, test\test_ai_file.cpp 直测 */
 
 /* ==================== 联网访问 (实现 ai_net.cpp) ====================
  * web_search / fetch_url 两工具实体 (2.10.0): 搜索引擎结果清单 (Bing 主路,
@@ -395,6 +418,18 @@ void WebHtmlToText(const std::string& html8, std::string* out8);
 std::wstring WebUnwrapResultUrl(const std::wstring& u);
                                                   /* 搜索结果跳转链接 → 真实 URL (bing/ck 的
                                                      u=a1<base64url>、ddg 的 uddg=<百分号编码>) */
+/* ---- SSRF 防护 (fetch_url, 2026-09-27): url 由模型任意给出, 而本进程是管理员权限 —
+ * 内网/环回/链路本地/保留地址一律拦截, 重定向仅跟随同源跳转 (dsh web-fetch-http 口径:
+ * DNS 解析逐地址校验 + 不自动跟随, 逐跳复验)。三个纯函数供 test\test_ai_net.cpp 直测。 */
+bool WebAddrIsPublic(int family, const void* addr);
+                                  /* AF_INET(2)/AF_INET6(23) 地址字节 → 是否公网单播
+                                     (环回/私网/链路本地/CGNAT/组播/保留 全 false) */
+bool WebUrlSameOrigin(const std::wstring& a, const std::wstring& b);
+                                  /* http(s) URL 同源判定 (scheme+host+port, 大小写归一,
+                                     缺省端口归一; v6 主机括号剥离) */
+std::wstring WebResolveRedirect(const std::wstring& base, const std::wstring& loc);
+                                  /* Location → 绝对 URL (绝对/协议相对/根相对/路径相对,
+                                     "./""../" 逐段上卷); 解析不了 = 空串 */
 std::wstring WebSearchExec(AiJob* j, const Jv& v, AiToolStep* st);   /* web_search 实体 */
 std::wstring FetchUrlExec(AiJob* j, const Jv& v, AiToolStep* st);   /* fetch_url 实体 */
 
@@ -430,6 +465,8 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
                                       在跑的作业, 下一次 run_search 起按新值同步) */
     xjs_result* syncWin = NULL;    /* 同步目标窗的结果对象 (发送时在 UI 线程经 window.result 捕获;
                                       完成事件回调里用前自查 IsEffective, 窗口已关即弃) */
+    std::wstring filterCur;        /* 发送时当前窗的选中筛选分类 (UI 线程快照, worker 不碰窗口结果
+                                      对象; 只进环境快照展示"用户此刻的查看口径") */
     std::vector<std::string> injImgs;    /* read_image 注入的本请求图片 (UTF-8 data URL; worker 读写,
                                       AgentBuildBody 直接作 image_url, 上限 AI_ATT_MAX 张; 不落历史) */
     /* run_command 询问档的裁决通道 (dsh approval 口径: 审批**挂起**工具调用等用户裁决,
@@ -444,7 +481,16 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     } turnUsage;
     bool turnUsageTaken = false;   /* 泵已把 turnUsage 累计进会话 (每轮取一次) */
     ULONGLONG turnOutMs = 0;       /* 本轮输出耗时 (速度 = completion/秒, 不跨轮平均) */
-    std::vector<AiMsg> hist;       /* 发送时对话快照 (只含 role 0/1; worker 构造每轮 body 用) */
+    std::vector<AiMsg> hist;       /* 发送时对话快照 (只含 role 0/1; worker 构造每轮 body 用;
+                                      压缩时 worker 可整体重写 = 检查点+近端, UI 不碰它) */
+    /* ---- 上下文自动压缩 (dsh compaction 口径, 2026-09-27; 实现在 AgentCompactHistory) ----
+     * 检查点 = 老对话的 LLM 摘要。SendCurrent 从会话份快照进来 (发送时定格), worker
+     * 消费/更新, 泵收尾态时抄回会话份 (ckptTaken 防重复抄) — 下一针发送据此复用不重摘。 */
+    std::wstring ckpt;             /* 检查点摘要文本 (空 = 无) */
+    size_t ckptCovered = 0;        /* 检查点已覆盖的 hist 条数; hist 比它短 = 已被删除问答,
+                                      检查点失效清零 (delturn 时会话份同步清) */
+    bool autoCompact = true;       /* 发送时快照 (g_cfg.autoCompact): 开 = 压力过阈值时新建检查点 */
+    bool ckptTaken = false;        /* 泵已把最终检查点抄回会话份 (每作业一次) */
     volatile LONG abort = 0;
     HANDLE hReq = NULL;            /* UI 线程"停止"用它打断阻塞读 (并发关句柄=中断语义) */
     std::thread* th = NULL;
@@ -480,6 +526,10 @@ struct AiSess {
     long long uLastPrompt = 0, uLastCompletion = 0, uLastCacheHit = 0;
     double uTokPerSec = 0;
     bool usageHas = false;
+    /* 上下文压缩检查点 (会话内存份; 不落历史文件 — 重开面板按需重算一次): SendCurrent
+     * 快照进作业, 泵收尾抄回; delturn/new/load 换了对话内容即清 (前缀不再可信) */
+    std::wstring ckpt;
+    size_t ckptCovered = 0;
     /* Web 前端 (实现 ai_web.cpp; 不透明指针 — 共享头不 include WebView2) */
     struct AiWebCtx* web = NULL;      /* 会话 Web 上下文 (SessOpen 建, SessClose 收) */
     long long pushStamp = 0;          /* 结构性变化 +1 (新消息/卡片/收尾等非流式文本变动) → 全量重推 */

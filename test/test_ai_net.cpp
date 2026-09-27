@@ -4,10 +4,11 @@
  * 不发网络请求不起引擎不碰 UI (HttpGet/两工具实体不参与)。
  * 覆盖: bing RSS 解析 / bing 结果页 b_algo 解析 (含 ck/a 跳转还原与 href 实体) /
  *       DuckDuckGo Lite 解析 (含 uddg 还原) / WebUnwrapResultUrl / WebHtmlToText /
- *       AiCapUtf8HeadTail (头尾保留 + 精确省略量 + UTF-8 边界落刀)。
+ *       AiCapUtf8HeadTail (头尾保留 + 精确省略量 + UTF-8 边界落刀) /
+ *       WebAddrIsPublic (SSRF 公网单播校验) / WebUrlSameOrigin / WebResolveRedirect。
  * 构建 (仓库根执行, 先跑过插件 build.bat 让 .obj 在位; /I 解决 include 定位; 库集同插件 build.bat):
  *   cl /nologo /EHsc /std:c++20 /utf-8 /MT /DUNICODE /D_UNICODE /Fotest\ /I插件示例\ai-assistant test\test_ai_net.cpp 插件示例\ai-assistant\ai_core.obj 插件示例\ai-assistant\ai_file.obj 插件示例\ai-assistant\ai_net.obj ^
- *      /Fe:test\test_ai_net.exe /link winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib xunjieso.lib
+ *      /Fe:test\test_ai_net.exe /link winhttp.lib ws2_32.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib xunjieso.lib
  *   (注意 /Fotest\ 不带引号 — /Fo"test\" 的 \" 会被解析成转义引号吞掉后续源文件, 报 D8003)
  */
 #include "ai_assistant.h"
@@ -166,6 +167,75 @@ static void TestCap() {
     CHECK(w2.size() >= 24570, "cap 头部可无损转宽 (无 U+FFFD 断字)");
 }
 
+/* ---------- SSRF 地址校验 / 同源判定 / 重定向解析 (2026-09-27, fetch_url 闸门) ---------- */
+static void TestSsrf() {
+    /* WebAddrIsPublic: 地址字节直判 (family 2=AF_INET 4字节, 23=AF_INET6 16字节) */
+    struct V4 { unsigned char b[4]; bool pub; const char* name; };
+    static const V4 T4[] = {
+        { {127,0,0,1}, false, "v4 环回" },
+        { {10,1,2,3}, false, "v4 私网 10/8" },
+        { {172,16,0,1}, false, "v4 私网 172.16" },
+        { {172,32,0,1}, true, "v4 172.32 属公网 (172.16/12 只到 172.31)" },
+        { {192,168,1,1}, false, "v4 私网 192.168" },
+        { {169,254,169,254}, false, "v4 链路本地 (云元数据)" },
+        { {100,64,7,1}, false, "v4 CGNAT 100.64/10" },
+        { {100,128,0,1}, true, "v4 100.128 出 CGNAT 段" },
+        { {224,0,0,1}, false, "v4 组播" },
+        { {255,255,255,255}, false, "v4 广播" },
+        { {0,0,0,0}, false, "v4 未指定" },
+        { {192,0,2,9}, false, "v4 TEST-NET-1" },
+        { {198,51,100,7}, false, "v4 TEST-NET-2" },
+        { {203,0,113,7}, false, "v4 TEST-NET-3" },
+        { {198,18,0,1}, false, "v4 基准测试 198.18/15" },
+        { {8,8,8,8}, true, "v4 公网 8.8.8.8" },
+        { {1,1,1,1}, true, "v4 公网 1.1.1.1" },
+    };
+    for (const auto& t : T4)
+        CHECK(WebAddrIsPublic(2, t.b) == t.pub, t.name);
+    struct V6 { const unsigned char b[16]; bool pub; const char* name; };
+    static const V6 T6[] = {
+        { {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}, false, "v6 :: 未指定" },
+        { {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}, false, "v6 ::1 环回" },
+        { {0,0,0,0,0,0,0,0,0,0,0xFF,0xFF,127,0,0,1}, false, "v6 映射 v4 环回 ::ffff:127.0.0.1" },
+        { {0,0,0,0,0,0,0,0,0,0,0xFF,0xFF,8,8,8,8}, true, "v6 映射公网 ::ffff:8.8.8.8" },
+        { {0x00,0x64,0xFF,0x9B,0,0,0,0,0,0,0,0,127,0,0,1}, false, "v6 NAT64 64:ff9b::7f00:1" },
+        { {0xFE,0x80,0,0,0,0,0,0,0,0,0,0,0,0,0,1}, false, "v6 链路本地 fe80::/10" },
+        { {0xFD,0x00,0xDE,0xAD,0,0,0,0,0,0,0,0,0,0,0,1}, false, "v6 唯一本地 fd00::/8" },
+        { {0xFF,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}, false, "v6 组播 ff02::1" },
+        { {0x20,0x01,0x0D,0xB8,0,0,0,0,0,0,0,0,0,0,0,1}, false, "v6 文档段 2001:db8::/32" },
+        { {0x26,0x06,0x47,0x00,0,0,0,0,0,0,0,0,0,0,0x11,0x11}, true, "v6 公网 2606:4700::1111" },
+    };
+    for (const auto& t : T6)
+        CHECK(WebAddrIsPublic(23, t.b) == t.pub, t.name);
+    CHECK(!WebAddrIsPublic(0, T4[0].b), "未知 family 恒拒");
+
+    /* WebUrlSameOrigin: scheme+host+port, 大小写/缺省端口归一 */
+    CHECK(WebUrlSameOrigin(L"https://a.com/x", L"https://A.com/y"), "同源 host 大小写归一");
+    CHECK(WebUrlSameOrigin(L"https://a.com", L"https://a.com:443/x"), "同源 https 缺省 443");
+    CHECK(WebUrlSameOrigin(L"http://a.com:80/", L"http://a.com"), "同源 http 缺省 80");
+    CHECK(!WebUrlSameOrigin(L"http://a.com/", L"https://a.com/"), "跨 scheme = 不同源");
+    CHECK(!WebUrlSameOrigin(L"https://a.com/", L"https://b.com/"), "跨 host = 不同源");
+    CHECK(!WebUrlSameOrigin(L"https://a.com/", L"https://a.com:8443/"), "跨端口 = 不同源");
+    CHECK(WebUrlSameOrigin(L"https://[2606:4700::1111]/", L"https://[2606:4700::1111]/x"), "v6 括号剥离同源");
+    CHECK(!WebUrlSameOrigin(L"https://[2606:4700::1111]/", L"https://8.8.8.8/"), "v6 vs v4 = 不同源");
+
+    /* WebResolveRedirect: 绝对/协议相对/根相对/路径相对/../ 上卷 */
+    CHECK(WebResolveRedirect(L"https://a.com/d/x?q=1", L"https://b.com/y") == L"https://b.com/y",
+          "重定向绝对地址原样");
+    CHECK(WebResolveRedirect(L"https://a.com/d/x", L"//cdn.a.com/y") == L"https://cdn.a.com/y",
+          "重定向协议相对补 scheme");
+    CHECK(WebResolveRedirect(L"https://a.com/d/x", L"/top") == L"https://a.com/top",
+          "重定向根相对");
+    CHECK(WebResolveRedirect(L"https://a.com/d/e/f", L"g/h") == L"https://a.com/d/e/g/h",
+          "重定向路径相对落目录");
+    CHECK(WebResolveRedirect(L"https://a.com/d/e", L"../up") == L"https://a.com/up",
+          "重定向 ../ 上卷");
+    CHECK(WebResolveRedirect(L"http://a.com:8080/x", L"y") == L"http://a.com:8080/y",
+          "重定向保留非缺省端口");
+    CHECK(WebResolveRedirect(L"https://a.com/", L"").empty(), "空 Location = 空");
+    CHECK(WebResolveRedirect(L"not-a-url", L"/x").empty(), "基址非法 = 空");
+}
+
 int main() {
     TestBingRss();
     TestBingHtml();
@@ -173,6 +243,7 @@ int main() {
     TestUnwrap();
     TestHtmlToText();
     TestCap();
+    TestSsrf();
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails;
 }

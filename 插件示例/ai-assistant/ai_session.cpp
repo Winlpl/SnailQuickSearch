@@ -157,14 +157,36 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     InterlockedExchange(&j->syncRes, g_cfg.syncResults ? 1 : 0);   /* 结果同步勾选快照 */
     /* 同步目标窗结果对象 (UI 线程捕获; 完成事件回调用前自查 IsEffective) */
     j->syncWin = g_cfg.syncResults ? AgentWindowResultOf(s->tok) : NULL;
+    /* 当前窗选中筛选分类 (UI 线程快照进作业; 环境快照向模型展示"用户此刻的查看口径",
+     * worker 不碰窗口结果对象 — 窗口令牌本就只在 UI 线程解析)。
+     * 引擎 JSON 多选口径 (2026-09-27): GetSelectedFilter 返回 ["图片","视频"] (全部=["全部"])
+     * → 显示形 "图片、视频"; 非数组旧格式原样兜底。 */
+    j->filterCur.clear();
+    if (xjs_result* wr = AgentWindowResultOf(s->tok)) {
+        const char* f = xjs_result_GetSelectedFilter(wr);
+        if (f && *f) {
+            Jv v = JsonParseW(W8(f));
+            if (v.t == 4) {
+                for (auto& e : v.arr)
+                    if (e.t == 3 && !e.str.empty()) {
+                        if (!j->filterCur.empty()) j->filterCur += L"、";
+                        j->filterCur += e.str;
+                    }
+            }
+            if (j->filterCur.empty()) j->filterCur = W8(f);
+        }
+    }
     InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
     InterlockedExchange(&j->execDeny, 0);
     /* 对话快照 (只含 role 0/1; 有附件的 role 0 即使无文字也要进上下文; 工具往返由 worker 在循环中累计) */
     for (auto& m : s->msgs)
         if (m.role != 2 && (!m.text.empty() || !m.atts.empty())) j->hist.push_back(m);
-    /* 历史消息上限 (Agent 设置 maxCtxMsgs, 4..200, 缺省 30): 长对话记忆窗口 —
-       调大记得更早的问答, token 消耗也更大 */
-    {
+    j->autoCompact = g_cfg.autoCompact;   /* 压缩开关发送时定格 */
+    j->ckpt = s->ckpt;                    /* 检查点快照进作业 (worker 消费, 泵收尾抄回) */
+    j->ckptCovered = s->ckptCovered;
+    /* 记忆窗口: autoCompact 开 = 交给压缩按 token 管理 (不硬裁); 关 = maxCtxMsgs 条数硬裁
+       (Agent 设置 4..200, 缺省 30 — 调大记得更早的问答, token 消耗也更大) */
+    if (!j->autoCompact) {
         size_t ctxN = g_cfg.maxCtxMsgs > 0 ? (size_t)g_cfg.maxCtxMsgs : 30;
         if (j->hist.size() > ctxN) j->hist.erase(j->hist.begin(), j->hist.end() - ctxN);
     }
@@ -241,6 +263,15 @@ static void PumpStreams() {
                     ? (double)tu.completion / ((double)outMs / 1000.0) : 0.0;
                 s.usageHas = s.usageHas || tu.prompt > 0 || tu.completion > 0;
             }
+            /* 压缩检查点回写: worker 只在作业起点产出 (之后恒定), 收尾态 (state!=0) 抄回
+               会话份供下一次发送复用 (不重摘); 每作业只抄一次 */
+            if (state != 0 && !j->ckptTaken) {
+                EnterCriticalSection(&j->cs);
+                s.ckpt = j->ckpt;
+                s.ckptCovered = j->ckptCovered;
+                j->ckptTaken = true;
+                LeaveCriticalSection(&j->cs);
+            }
             /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
              * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
              * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。 */
@@ -276,7 +307,8 @@ static void PumpStreams() {
                                    m.steps[0].chg != steps[seen].chg ||
                                    m.steps[0].name != steps[seen].name ||
                                    m.steps[0].mode != steps[seen].mode ||
-                                   m.steps[0].query != steps[seen].query;
+                                   m.steps[0].query != steps[seen].query ||
+                                   m.steps[0].filter != steps[seen].filter;
                     if (changed && !uiResolved) {
                         m.steps.assign(1, steps[seen]);
                         WebTouch(&s);

@@ -47,7 +47,7 @@ cl /nologo /EHsc /std:c++20 /O2 /MP /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICOD
    ai_core.cpp ai_agent.cpp ai_session.cpp ai_web.cpp ai_web_ui.cpp ai_plugin.cpp ai_file.cpp ai_net.cpp ^
    ..\..\md4c\md4c.c ^
    ..\..\WinToast\wintoastlib.cpp ^
-   /link /OUT:ai-assistant.dll winhttp.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib ^
+   /link /OUT:ai-assistant.dll winhttp.lib ws2_32.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib ^
    ..\..\xunjieso.lib
 if errorlevel 1 (
     echo Build failed!
