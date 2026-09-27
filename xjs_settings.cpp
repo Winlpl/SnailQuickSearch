@@ -1123,12 +1123,16 @@ static bool XjsSetBuildRows() {
                                                       : XjsT(L"设置.插件.作者分隔") + b.author)
                                   + XjsT(L"设置.插件.状态分隔") + XjsSetPluginStatusText(b);
                 addRow(ACT_PLUGINS_TOGGLE + i, CT_SWITCH, b.name.c_str(), meta.c_str(), L"", b.enabled, false);
-                /* 行 2 = 审计: 能力 + 权限徽章 / 简介 */
-                std::wstring audit = XjsT(L"设置.插件.审计.能力前缀") + XjsSetPluginCapsText(b.caps)
-                                   + XjsT(L"设置.插件.审计.分隔")
-                                   + XjsT(L"设置.插件.审计.权限前缀") + XjsSetPluginPermsText(b.perms);
-                addRow(ACT_NONE, CT_INFO, audit.c_str(),
-                       b.description.empty() ? XjsT(L"设置.插件.无简介") : b.description.c_str(), L"", false, false);
+                /* 行 2 = 审计块: 能力+权限 与 简介 合并成一个自动换行文本块 (block 行, 名称留空 = 说明占整块)。
+                   曾拆 名称=审计/说明=简介 两段: 非块行"上下两半垂直居中"排布会把多行简介挤出行框 ——
+                   简介尾部叠画到下一个插件行上、审计行悬在大半空行中间 (开关下方一片空白), 2026-09-27 实锤 */
+                std::wstring body = XjsT(L"设置.插件.审计.能力前缀") + XjsSetPluginCapsText(b.caps)
+                                  + XjsT(L"设置.插件.审计.分隔")
+                                  + XjsT(L"设置.插件.审计.权限前缀") + XjsSetPluginPermsText(b.perms)
+                                  + L"\n"
+                                  + (b.description.empty() ? std::wstring(XjsT(L"设置.插件.无简介")) : b.description);
+                addRow(ACT_NONE, CT_INFO, L"", body.c_str(), L"", false, false);
+                s_set.cards.back().rows.back().block = true;
                 /* 行 3 = 仅异常时: 清单错误 / 加载失败原因 / 需重启说明 */
                 if (!b.declared)
                     addRow(ACT_NONE, CT_INFO, (XjsT(L"设置.插件.清单错误前缀") + b.manifestErr).c_str(), L"", L"", false, false);
@@ -1997,13 +2001,15 @@ static void XjsSetPaint(HWND hwnd) {
                 s_set.rt->DrawText(r.name.c_str(), (UINT32)r.name.length(),
                     r.centerText ? s_set.tfNameC : s_set.tfName, nr, nameBr);
             } else if (r.block) {
-                /* 长文本块行: 名称固定行顶, 说明占其余整块 — 上下两半居中排布会把多行文本挤出行框 */
-                s_set.rt->DrawText(r.name.c_str(), (UINT32)r.name.length(),
-                    r.centerText ? s_set.tfNameC : s_set.tfName,
-                    XjsRectF(textL, ry0 + SS(6), textR, ry0 + SS(26)), nameBr);
+                /* 长文本块行: 名称固定行顶, 说明占其余整块 — 上下两半居中排布会把多行文本挤出行框;
+                   名称空 (插件审计块 = 纯文本无标签) 时不留空名称槽, 说明直接占整块 */
+                if (!r.name.empty())
+                    s_set.rt->DrawText(r.name.c_str(), (UINT32)r.name.length(),
+                        r.centerText ? s_set.tfNameC : s_set.tfName,
+                        XjsRectF(textL, ry0 + SS(6), textR, ry0 + SS(26)), nameBr);
                 s_set.rt->DrawText(r.desc.c_str(), (UINT32)r.desc.length(),
                     r.centerText ? s_set.tfDescC : s_set.tfDesc,
-                    XjsRectF(textL, ry0 + SS(26), textR, ry1 - SS(6)),
+                    XjsRectF(textL, r.name.empty() ? ry0 + SS(6) : ry0 + SS(26), textR, ry1 - SS(6)),
                     r.warnText ? (XjsBrush*)s_set.brWarn : (XjsBrush*)s_set.brFaint);
             } else {
                 float mid = ry0 + (ry1 - ry0) / 2 - SS(2);
