@@ -2080,6 +2080,13 @@ void XjsLoadConfig() {
         "doubleCtrl", "columns", "window", "rebuild", "searchMode", "viewMode", "skin",
         "preview", "previewWidth", "zoomTenths", "doubleCtrlTarget" };
     for (auto* k : LEGACY) g_cfg.Root().erase(k);
+    /* 每窗化迁移后遗留的顶层死键 (中文主键, 不在 LEGACY 英文清扫表内): Load 读入的值
+       随即被槽 0 档案块无条件覆盖 = 读入路径本身是死代码, 键还永久滞留配置文件 —
+       迁移种子读取完成后一并清除 ("列布局" 留: 槽 0 列集为空的极端兜底路径仍读它) */
+    g_cfg.Root().erase(K_VIEW);
+    g_cfg.Root().erase(K_PREVIEW);
+    g_cfg.Root().erase(K_PREVW);
+    g_cfg.Root().erase(K_SKIN);
 
     g_cfg.WriteBack();   /* 建档/规范化 (json 缺失时落盘默认骨架) */
 }
@@ -2305,6 +2312,12 @@ void XjsEngineShutdown(bool warnOnSaveFail) {
 
 /* ==================== 托盘 / 热键 ==================== */
 
+static UINT s_taskbarCreatedMsg = 0;
+UINT XjsTrayTaskbarCreatedMsg() {
+    if (!s_taskbarCreatedMsg) s_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+    return s_taskbarCreatedMsg;
+}
+
 void XjsTrayAdd(HWND hwnd) {
     /* 托盘图标 = exe 内嵌资源 32512 (私有句柄, 重入时 DestroyIcon 只销毁本处加载的) */
     HICON hIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(32512), IMAGE_ICON,
@@ -2324,8 +2337,26 @@ void XjsTrayAdd(HWND hwnd) {
     g_nid.uCallbackMessage = WM_TRAY_NOTIFY;
     g_nid.hIcon = hIcon;
     wcscpy_s(g_nid.szTip, XjsT(L"应用.名称"));   /* 源样式 App.TrayTip: 托盘提示就是应用名 */
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    /* TaskbarCreated 广播放行 (Explorer 以中完整性发送, 本进程管理员窗 — 不过滤器会被 UIPI
+     * 静默拦截): Explorer 重启销毁图标后据此广播补挂 */
+    UINT tcm = XjsTrayTaskbarCreatedMsg();
+    if (tcm) ChangeWindowMessageFilterEx(hwnd, tcm, MSGFLT_ALLOW, NULL);
+    /* NIM_ADD 失败 (登录期任务栏未就绪的启动竞态) 不得置位: 置位后此后每次都走 NIM_MODIFY
+     * 对不存在的图标做修改, 永远不再补加 = 托盘图标永久消失 */
+    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        if (hIcon) DestroyIcon(hIcon);   /* 失败不占位 (共享兜底图标 DestroyIcon 只是无效返回, 无害) */
+        g_nid.hIcon = NULL;
+        return;
+    }
     g_inTray = true;
+}
+
+void XjsTrayReaddAfterExplorer(HWND hwnd) {
+    /* TaskbarCreated = 任务栏(重)创建, 托盘图标必然已被系统整体销毁 — 无条件重挂。
+       不判 g_inTray: 启动竞态下 NIM_ADD 失败 (g_inTray=false) 时任务栏稍后才创建,
+       这条广播正是补挂的唯一时机 (曾判 g_inTray 提前返回 = 该场景永不补挂) */
+    g_inTray = false;        /* 强制 XjsTrayAdd 走 NIM_ADD (MODIFY 对不存在的图标无效) */
+    XjsTrayAdd(hwnd);
 }
 
 void XjsTrayRemove() {

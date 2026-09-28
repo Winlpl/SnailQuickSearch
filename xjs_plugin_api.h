@@ -65,6 +65,10 @@ int XjsPluginApiKeyModeIndexFromUtf8(const std::wstring& s);
 static const int XJS_PLUGIN_RT_MODE_BASE = 10000;
 int  XjsPluginApiRtModeCount(int pluginIdx);                              /* 该插件运行时模式数 */
 const XjsPluginModeDef* XjsPluginApiRtModeDefAt(int pluginIdx, int srcIdx); /* 越界/失效 = NULL */
+int  XjsPluginApiRtModeSrcIdxAt(int pluginIdx, int position);   /* 段内第 position 个的真实 srcIdx
+                                                   (枚举侧据此出 modeIdx — 曾伪造 BASE+位置与全局
+                                                   自增 srcIdx 恒错位, 首个模式不可见/删除后全消失);
+                                                   越界 = 0 (调用方保证 position < Count) */
 void XjsPluginApiPruneOwners();   /* 重扫后调用: owner 已消失的运行时模式整条剪掉 */
 
 #endif /* XJS_PLUGIN_API_H */

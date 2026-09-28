@@ -488,8 +488,8 @@ void XjsOnPopupResult(int id) {
                 if (sel.size() > 10 &&
                     XjsShowAskDialog(g_hWnd, XjsT(L"通用词.打开"),
                                      XjsFmt(XjsT(L"对话框.打开确认"), XjsNumText((long long)sel.size())).c_str(),
-                                     ("[{\"text\":\"" + XjsTUtf8(L"打开") + "\",\"style\":\"primary\"},{\"text\":\"" +
-                                      XjsTUtf8(L"取消") + "\"}]").c_str()) != 0) break;
+                                     ("[{\"text\":\"" + XjsTUtf8(L"通用词.打开") + "\",\"style\":\"primary\"},{\"text\":\"" +
+                                      XjsTUtf8(L"通用词.取消") + "\"}]").c_str()) != 0) break;
                 for (int idx : sel) XjsOpenFile(XjsItemPath(idx));
                 break;
             }
@@ -497,8 +497,8 @@ void XjsOnPopupResult(int id) {
                 if (sel.size() > 20 &&
                     XjsShowAskDialog(g_hWnd, XjsT(L"通用词.打开所在文件夹"),
                                      XjsFmt(XjsT(L"对话框.定位确认"), XjsNumText((long long)sel.size())).c_str(),
-                                     ("[{\"text\":\"" + XjsTUtf8(L"定位") + "\",\"style\":\"primary\"},{\"text\":\"" +
-                                      XjsTUtf8(L"取消") + "\"}]").c_str()) != 0) break;
+                                     ("[{\"text\":\"" + XjsTUtf8(L"通用词.定位") + "\",\"style\":\"primary\"},{\"text\":\"" +
+                                      XjsTUtf8(L"通用词.取消") + "\"}]").c_str()) != 0) break;
                 for (int idx : sel) XjsOpenFolderAndSelect(XjsItemPath(idx));
                 break;
             }
@@ -608,6 +608,12 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     XjsSearchWindow::Enter(hwnd);
     if (!XjsSearchWindow::Cur()) return DefWindowProcW(hwnd, msg, wParam, lParam);
         XjsSearchWindow* w = XjsSearchWindow::Cur();
+        if (msg == XjsTrayTaskbarCreatedMsg()) {   /* Explorer 重启广播 (RegisterWindowMessage 动态号,
+               必须在 switch 之前接; 广播达全部顶层窗 — 只有主窗处理, 子窗重挂会把托盘
+               回调绑到子窗 hwnd, 子窗关闭 = 图标死亡) */
+            if (w->isMain) XjsTrayReaddAfterExplorer(hwnd);
+            return 0;
+        }
         /* ===== 模态层总闸 (根治): 模态层打开时, 一切输入类消息在入口统一拦截 =====
          * 只放行 绘制/定时器/激活; IME 上下文走 DefWindowProc 但锚点钉到模态层字段。
          * 右键菜单/悬停/滚轮/打字泄漏的根因 = 零散拦截漏消息; 此后新增模态层不再逐消息打补丁 */
@@ -1110,8 +1116,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 static bool s_blurClosing = false;   /* 藏托盘的 SW_HIDE 会同步再发一次 WA_INACTIVE, 防重入 */
                 if (!s_blurClosing) {
                     s_blurClosing = true;
-                    XjsDismissWindow(hwnd);
+                    XjsDismissWindow(hwnd);   /* 子窗在此同步销毁 (DestroyAndFree delete w) —
+                                                 之后不得再解引用 w (曾仅靠 active=false 短路
+                                                 求值护住落点策略行, 顺序一改即实 UAF) */
                     s_blurClosing = false;
+                    return 0;   /* 本消息处理终止: 失活路径下落点策略本就不可达, 提前返回等价 */
                 }
             }
             /* 每窗"激活或创建时位置": 贴光标 或 主屏/鼠标所在屏 五落点 (之前的位置=不动),

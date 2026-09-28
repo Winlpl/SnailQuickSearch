@@ -58,6 +58,18 @@ const XjsPluginModeDef* XjsPluginApiRtModeDefAt(int pluginIdx, int srcIdx) {
     return NULL;
 }
 
+/* 段内第 position 个的真实 srcIdx (与 Count 同一遍迭代序): 枚举侧 (XjsPluginModeAt) 出
+ * modeIdx 必须用它 — 曾伪造 BASE+位置, 与全局自增的 s_rtSeq 恒错位 (首个模式查 BASE 落空
+ * 不可见, 位置 i 命中的是更早添加的其它模式, 任何一次 remove 后剩余全部消失)。 */
+int XjsPluginApiRtModeSrcIdxAt(int pluginIdx, int position) {
+    std::wstring id = XjsRtOwnerId(pluginIdx);
+    if (id.empty() || position < 0) return 0;
+    int n = 0;
+    for (auto& r : s_rtModes)
+        if (r.owner == id && n++ == position) return r.srcIdx;
+    return 0;
+}
+
 void XjsPluginApiPruneOwners() {
     if (s_rtModes.empty()) return;
     std::vector<std::wstring> live;
@@ -643,8 +655,11 @@ static int ApiWindowSelection(XjsPluginCtx* ctx, XjsWindowToken window, int maxI
     XjsWindowScope scope(w);
     std::vector<int> ids;
     int total = g_result ? xjs_result_GetSelectedCount(g_result) : 0;
-    if (g_result && (maxIds <= 0 || maxIds > total)) {
-        if (maxIds <= 0) maxIds = total;
+    if (g_result && total > 0) {
+        /* maxIds ≤0 = 不限量 (全量); 正数 = 只取前 maxIds 个 — 曾把 0<maxIds≤选中数 的
+         * 区间整体跳过 (返回空集, 违反 SDK 契约); 正数同时夹到 total: maxIds 是插件可控
+         * 入参, reserve(INT_MAX) 可击穿宿主 (SDK 红线: 插件输入一律按不可信校验) */
+        if (maxIds <= 0 || maxIds > total) maxIds = total;
         ids.reserve((size_t)maxIds);
         int n = xjs_result_GetCount(g_result);
         for (int i = 0; i < n && (int)ids.size() < maxIds; i++) {

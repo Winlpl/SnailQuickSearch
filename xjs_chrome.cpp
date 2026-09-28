@@ -1229,8 +1229,12 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
             int fid = xjs_result_GetFileId(g_result, idx);
             if (fid >= 0) pids.push_back(fid);
         }
-        bool isDirRow = isDrive || (idx >= 0 && g_engine && g_result
-            && (xjs_db_GetFileAttributes(g_engine, xjs_result_GetFileId(g_result, idx)) & FILE_ATTRIBUTE_DIRECTORY));
+        /* fid<0 不下传引擎 (结果过渡态可返回负值); 引擎对无效 id 返回 INVALID(-1) 时按位
+         * 测试会误判为目录 — 与上方两处取 fid 的 >=0 拦截同口径 */
+        int dirFid = (idx >= 0 && g_result) ? xjs_result_GetFileId(g_result, idx) : -1;
+        DWORD dirAttr = (dirFid >= 0 && g_engine) ? xjs_db_GetFileAttributes(g_engine, dirFid) : 0;
+        bool isDirRow = isDrive || (dirAttr != INVALID_FILE_ATTRIBUTES &&
+                                    (dirAttr & FILE_ATTRIBUTE_DIRECTORY));
         XjsPluginAppendFileMenuItems(items, pids, isDirRow, isDrive);
     }
     XjsShowPopupMenu(g_hWnd, screenPt, items, XSF(230));

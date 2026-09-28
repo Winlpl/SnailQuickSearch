@@ -430,11 +430,6 @@ static bool PluginLoadOne(XjsPluginEntry& e, std::wstring* err) {
         e.fnShutdown = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*))GetProcAddress(e.mod, "XjsPlugin_Shutdown");
         if (!e.fnGetInfo || !e.fnInit || !e.fnShutdown) { *err = L"缺少固定导出 (GetInfo/Init/Shutdown)"; return false; }
         e.info = e.fnGetInfo();
-        /* ABI 精确匹配 (v2 起事件回调签名与宿主表布局强耦合, 旧版插件混载 = 调用约定错位必崩) */
-        if (!e.info || e.info->abiVersion != XJS_PLUGIN_ABI_VERSION || !e.info->id ||
-            Utf8ToUtf16(e.info->id) != e.mf.id) {
-            *err = L"GetInfo 缺失或 ABI/标识不符"; return false;
-        }
         e.fnOnCommand = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, const char*, XjsWindowToken, const int*, int, int))GetProcAddress(e.mod, "XjsPlugin_OnCommand");
         e.fnBuildMenu = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, const char*, XjsWindowToken, const int*, int, const char*, char*, int))GetProcAddress(e.mod, "XjsPlugin_BuildMenu");
         e.fnOnSearchMode = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, const char*, XjsWindowToken, const char*))GetProcAddress(e.mod, "XjsPlugin_OnSearchMode");
@@ -444,6 +439,13 @@ static bool PluginLoadOne(XjsPluginEntry& e, std::wstring* err) {
         e.fnOnPanelEvent = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*, XjsWindowToken, const XjsPanelEvent*))GetProcAddress(e.mod, "XjsPlugin_OnPanelEvent");
         e.fnOnPluginMessage = (int (XJS_PLUGIN_CALL*)(XjsPluginCtx*, const char*, const char*, char*, int))GetProcAddress(e.mod, "XjsPlugin_OnPluginMessage");
         e.fnOnHostGone = (void (XJS_PLUGIN_CALL*)(XjsPluginCtx*))GetProcAddress(e.mod, "XjsPlugin_OnHostGone");
+    }
+    /* ABI 精确匹配 (v2 起事件回调签名与宿主表布局强耦合, 旧版插件混载 = 调用约定错位必崩)。
+     * 恒在 fnInit 之前校验 — 首载 ABI 不符的条目 fnGetInfo 已留存, 重试路径 (Rescan/重新
+     * 启用) 曾据此整段跳过校验直落 Init (2026-09-28 修复)。 */
+    if (!e.info || e.info->abiVersion != XJS_PLUGIN_ABI_VERSION || !e.info->id ||
+        Utf8ToUtf16(e.info->id) != e.mf.id) {
+        *err = L"GetInfo 缺失或 ABI/标识不符"; return false;
     }
     if (!e.ctx) { *err = L"内部状态错误 (ctx 未初始化)"; return false; }   /* 扫描后置已保证分配 */
     if (e.fnInit(e.ctx, PluginHostTable()) != XJS_PLUGIN_OK) { *err = L"Init 返回失败"; return false; }
@@ -1427,7 +1429,7 @@ bool XjsPluginModeAt(int i, XjsPluginModeRef* out) {
         if (i < (int)e.mf.modes.size()) { *out = { pi, i }; return true; }
         i -= (int)e.mf.modes.size();
         int rt = XjsPluginApiRtModeCount(pi);
-        if (i < rt) { *out = { pi, XJS_PLUGIN_RT_MODE_BASE + i }; return true; }
+        if (i < rt) { *out = { pi, XjsPluginApiRtModeSrcIdxAt(pi, i) }; return true; }
         i -= rt;
     }
     return false;

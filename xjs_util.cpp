@@ -322,7 +322,7 @@ void XjsOpenFile(const std::wstring& path) {
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         XjsShowAskDialog(g_hWnd, XjsT(L"对话框.无法打开"),
                          XjsFmt(XjsT(L"对话框.文件不存在"), path).c_str(),
-                         ("[{\"text\":\"" + XjsTUtf8(L"确定") + "\",\"style\":\"primary\"}]").c_str());
+                         ("[{\"text\":\"" + XjsTUtf8(L"通用词.确定") + "\",\"style\":\"primary\"}]").c_str());
         return;
     }
     /* 打开行为 = 每窗配置 (设置-打开): 异步线程防关联程序响应卡住主线程;
@@ -372,8 +372,8 @@ void XjsDeleteSelected() {
     if (XjsShowAskDialog(g_hWnd, XjsT(L"通用词.删除"),
                          XjsFmt(XjsT(L"对话框.删除确认"),
                                 XjsNumText((long long)idxs.size())).c_str(),
-                         ("[{\"text\":\"" + XjsTUtf8(L"删除") + "\",\"style\":\"danger\"},{\"text\":\"" +
-                           XjsTUtf8(L"取消") + "\"}]").c_str()) != 0) return;
+                         ("[{\"text\":\"" + XjsTUtf8(L"通用词.删除") + "\",\"style\":\"danger\"},{\"text\":\"" +
+                           XjsTUtf8(L"通用词.取消") + "\"}]").c_str()) != 0) return;
     std::wstring list;
     for (int idx : idxs) {
         std::wstring p = XjsItemPath(idx);
@@ -537,8 +537,11 @@ void XjsDragOutSelected() {
         STGMEDIUM smFx = {};
         HGLOBAL hFx = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
         if (hFx) {
-            *(DWORD*)GlobalLock(hFx) = DROPEFFECT_COPY;
-            GlobalUnlock(hFx);
+            /* GlobalLock 极端内存压力下可为 NULL, 直写 NULL = 崩溃 (同 XjsCopyClipboard 口径) */
+            if (LPVOID pFx = GlobalLock(hFx)) {
+                *(DWORD*)pFx = DROPEFFECT_COPY;
+                GlobalUnlock(hFx);
+            }
             smFx.tymed = TYMED_HGLOBAL;
             smFx.hGlobal = hFx;
             /* fRelease=TRUE 仅在成功时移交所有权: 失败须自释 (否则每次拖出漏一个 HGLOBAL) */
@@ -601,7 +604,7 @@ static bool XjsRenameValid(const std::wstring& n, std::wstring* why) {
     if (n == L"." || n == L"..") { *why = XjsT(L"错误.文件名点"); return false; }
     static const wchar_t* bad = L"<>:\"/\\|?*";
     for (wchar_t c : n) {
-        if (wcschr(bad, c)) { *why = XjsT(L"文件名不能包含字符  <> : \" / \\ | ? *"); return false; }
+        if (wcschr(bad, c)) { *why = XjsT(L"错误.文件名含非法字符"); return false; }
         if ((unsigned short)c < 0x20) { *why = XjsT(L"错误.文件名非法字符"); return false; }
     }
     if (n.back() == L'.' || n.back() == L' ') { *why = XjsT(L"错误.文件名结尾"); return false; }

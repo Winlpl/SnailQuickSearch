@@ -6,7 +6,8 @@
 
 static std::unordered_map<XjsFormat*, IDWriteInlineObject*> g_ellSignCache;   // 省略号签名按格式缓存
 static ID2D1Factory* g_d2d = NULL;   /* D2D 后端私有工厂 (建 HwndRT/描边样式/几何; 不进公共头) */
-static ID2D1StrokeStyle* s_roundStroke = NULL;   /* 圆头描边单例原生 (引用计数随包装平衡) */
+static ID2D1StrokeStyle* s_roundStroke = NULL;   /* 圆头描边单例原生 (引用计数随包装平衡, 见 ApiFreeStroke) */
+static int s_roundStrokeRefs = 0;                /* 在外包装数 (UI 线程专用, 无需原子) */
 static const XjsGfxApi& D2dApi();  /* D2D 后端函数表 (实现在文件尾) */
 
 /* ============ D2D 后端内部: 包装 ↔ 原生 互转 ============ */
@@ -670,7 +671,18 @@ static void ApiFreeBitmap(void* n) { if (n) ((ID2D1Bitmap*)n)->Release(); }
 static void ApiFreeBrush(void* n)  { if (n) ((ID2D1Brush*)n)->Release(); }
 static void ApiFreeStroke(void* n) {
     if (!n) return;
-    if (n == (void*)s_roundStroke) s_roundStroke = NULL;   /* 末份释放后单例指针失效 */
+    if (n == (void*)s_roundStroke) {
+        /* 末份包装释放 = 一并归还单例持有的那份引用并失效指针; 曾只置空不 Release,
+           原生对象那 1 份引用永不清 → 每轮弹窗资源周期 (菜单开合/换肤) 泄一个
+           ID2D1StrokeStyle。包装计数护多包装并存 (每包装 AddRef 一次, 末份才双 Release)。 */
+        if (--s_roundStrokeRefs <= 0) {
+            s_roundStrokeRefs = 0;
+            ((ID2D1StrokeStyle*)n)->Release();   /* 包装份 */
+            ((ID2D1StrokeStyle*)n)->Release();   /* 单例份 */
+            s_roundStroke = NULL;
+            return;
+        }
+    }
     ((ID2D1StrokeStyle*)n)->Release();
 }
 static void ApiFreeGeo(void* n)    { if (n) ((ID2D1Geometry*)n)->Release(); }
@@ -715,6 +727,7 @@ static void ApiRoundStroke(XjsStroke** out) {
         if (FAILED(g_d2d->CreateStrokeStyle(sp, NULL, 0, &st)) || !st) return;
     }
     st->AddRef();
+    s_roundStrokeRefs++;   /* 在外包装计数 (ApiFreeStroke 按它判定"末份") */
     *out = new XjsStroke(st);
 }
 static void ApiRoundRectGeo(const XjsRoundedRect& r, XjsGeo** out) {

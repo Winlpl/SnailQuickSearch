@@ -1120,6 +1120,16 @@ public:
     int previewTextFileId = -1;
     double previewTextScroll = 0;
 
+    /* 插件预览接管 (preview 能力, P2; 实现收口 xjs_preview.cpp "插件预览接管"节)。
+       会话状态必须住窗口类 (可维护性红线 — 曾为文件级 static: 双窗口各自预览互相
+       踢掉对方的接管世代, 且"第二个窗口随时会有") */
+    int previewPlugReq = 0;               /* 世代号 (每次预览目标刷新递增) */
+    int previewPlugFileId = -1;           /* 接管中的目标文件 (无 = 未接管) */
+    std::vector<uint8_t> previewPlugBmp;  /* 交付字节暂存 (BGRA; 交付 = UI 线程闸, 无需锁) */
+    int previewPlugW = 0, previewPlugH = 0, previewPlugStride = 0;
+    XjsBitmap* previewPlugCache = NULL;   /* 交付字节 → 本域位图缓存 (懒建; 绑建它那一刻的 RT) */
+    XjsRt* previewPlugCacheRt = NULL;
+
     /* 插件面板接管 (preview-panel 能力, AI 助手等; 实现收口 xjs_preview.cpp "面板接管"节。
        会话状态必须住窗口类 (可维护性红线: 禁按 hwnd 平行散表); 位图暂存经 s_panelCs 保护 —
        插件工作线程可随时交付, 渲染帧快照拷贝) */
@@ -1635,6 +1645,8 @@ void XjsSearchJumpToList(bool commit);            /* 回车/↓: 选中列表首
 void XjsShowToolboxMenu();
 void XjsTrayAdd(HWND hwnd);
 void XjsTrayRemove();
+UINT XjsTrayTaskbarCreatedMsg();           /* RegisterWindowMessage(L"TaskbarCreated") (惰性注册) */
+void XjsTrayReaddAfterExplorer(HWND hwnd); /* Explorer 重启广播处理: 托盘图标被系统销毁后强制重挂 */
 BOOL XjsHotkeysRegisterAll();     /* 注册全部档案槽的全局快捷键 (返回=主窗槽"未设置或注册成功", 供启动警告判定) */
 void XjsHotkeysUnregisterAll();   /* 卸载全部档案槽的全局快捷键 */
 std::wstring XjsHotkeyText(UINT mod, UINT vk);    /* 热键组合 → "Ctrl + Alt + A" 文本 (设置胶囊/主窗提醒共用) */

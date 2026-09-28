@@ -10,6 +10,16 @@
 #define s_textLines     (XjsSearchWindow::Cur()->previewTextLines)
 #define s_textFileId    (XjsSearchWindow::Cur()->previewTextFileId)
 #define s_textScroll    (XjsSearchWindow::Cur()->previewTextScroll)
+/* 插件预览接管会话状态: 同为每窗 (2026-09-28 迁入 — 曾为文件级 static, 双窗口互相
+   踢掉对方的接管世代, 违反"窗口级状态一律是类字段"红线) */
+#define s_pvPlugReq     (XjsSearchWindow::Cur()->previewPlugReq)
+#define s_pvPlugFileId  (XjsSearchWindow::Cur()->previewPlugFileId)
+#define s_pvPlugBmp     (XjsSearchWindow::Cur()->previewPlugBmp)
+#define s_pvPlugW       (XjsSearchWindow::Cur()->previewPlugW)
+#define s_pvPlugH       (XjsSearchWindow::Cur()->previewPlugH)
+#define s_pvPlugStride  (XjsSearchWindow::Cur()->previewPlugStride)
+#define s_pvPlugCache   (XjsSearchWindow::Cur()->previewPlugCache)
+#define s_pvPlugCacheRt (XjsSearchWindow::Cur()->previewPlugCacheRt)
 
 static bool XjsIsImageExt(const std::wstring& name) {
     size_t dot = name.rfind(L'.');
@@ -114,23 +124,21 @@ static XjsBitmap* XjsPreviewIcon(int fileId) {
  * 位图 = 32bpp BGRA (预乘 alpha) 原始字节暂存, 渲染时懒转本 RT 域位图 (跨渲染域铁律:
  * 外部像素一律 CPU 拷贝进本域, 绝不直接持外部句柄); 文本交付直接喂 s_textLines 走既有文本管线。
  * 面板隐藏时不发起询问 ("不可见就不干活" — UpdateSelection 的 g_previewVisible 闸已保证)。 */
-static int s_pvPlugReq = 0;             /* 世代号 (每次预览目标刷新递增) */
-static int s_pvPlugFileId = -1;         /* 接管中的目标文件 (无 = 未接管) */
-static std::vector<uint8_t> s_pvPlugBmp;
-static int s_pvPlugW = 0, s_pvPlugH = 0, s_pvPlugStride = 0;
-static XjsBitmap* s_pvPlugCache = NULL; /* 交付字节 → 本域位图缓存 (懒建) */
-static XjsRt* s_pvPlugCacheRt = NULL;   /* 缓存位图所属 RT 包装 (换窗/设备重建都换域, 位图必须随域重建) */
+static void XjsPreviewPlugDropCacheOf(XjsSearchWindow* w) {
+    if (w->previewPlugCache) { w->previewPlugCache->Release(); w->previewPlugCache = NULL; }
+    w->previewPlugCacheRt = NULL;
+}
 
 void XjsPreviewPlugCacheInvalidate() {
-    if (s_pvPlugCache) { s_pvPlugCache->Release(); s_pvPlugCache = NULL; }
-    s_pvPlugCacheRt = NULL;
+    XjsSearchWindow::ForEach(&XjsPreviewPlugDropCacheOf);   /* 设备重建 = 全部窗的 RT 域都换 */
 }
 
 static void XjsPreviewPluginDrop() {
     s_pvPlugFileId = -1;
     s_pvPlugBmp.clear();
     s_pvPlugW = s_pvPlugH = s_pvPlugStride = 0;
-    XjsPreviewPlugCacheInvalidate();
+    if (s_pvPlugCache) { s_pvPlugCache->Release(); s_pvPlugCache = NULL; }   /* 只丢本窗缓存 */
+    s_pvPlugCacheRt = NULL;
 }
 
 /* 选中变化时询问接管 (内置图片/文本分类之前调); 真 = 已接管, 本次预览由插件交付。
@@ -150,7 +158,7 @@ static bool XjsPreviewPluginTryTake(int fileId, const std::wstring& path, const 
 static XjsBitmap* XjsPreviewPluginBitmap(int fileId) {
     if (s_pvPlugFileId != fileId || s_pvPlugBmp.empty()) return NULL;
     if (!s_pvPlugCache || s_pvPlugCacheRt != g_rt) {
-        XjsPreviewPlugCacheInvalidate();
+        XjsPreviewPlugDropCacheOf(XjsSearchWindow::Cur());   /* 只丢本窗缓存 (曾作废全部窗) */
         s_pvPlugCache = XjsBitmapFromBgra(s_pvPlugBmp.data(), s_pvPlugW, s_pvPlugH, s_pvPlugStride);
         s_pvPlugCacheRt = g_rt;
     }
