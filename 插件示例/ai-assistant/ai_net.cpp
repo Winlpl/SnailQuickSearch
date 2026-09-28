@@ -376,8 +376,13 @@ bool WebAddrIsPublic(int family, const void* addr) {
         if (i == 12) return WebAddrIsPublic(2, a + 12);   /* :: 未指定 / ::1 环回 /
                                                              ::/96 v4 兼容 — 末 4 字节按 v4 判 */
         if (a[0] == 0x00 && a[1] == 0x64 && a[2] == 0xFF && a[3] == 0x9B) {
-            for (i = 4; i < 12 && a[i] == 0; i++) {}
-            if (i == 12) return WebAddrIsPublic(2, a + 12);   /* NAT64 公知前缀 64:ff9b::/96 */
+            /* 64:ff9b::/96 按内嵌 v4 判; 其余 (含 64:ff9b:1::/48 本地使用前缀, RFC 8215 —
+             * 语义等同私网, 曾落穿后续检查被当公网放行) 一律按内网拒绝 */
+            if (a[4] == 0) {
+                for (i = 4; i < 12 && a[i] == 0; i++) {}
+                if (i == 12) return WebAddrIsPublic(2, a + 12);   /* NAT64 公知前缀 64:ff9b::/96 */
+            }
+            return false;
         }
         if (a[0] == 0xFE && (a[1] & 0xC0) == 0x80) return false;  /* fe80::/10 链路本地 */
         if ((a[0] & 0xFE) == 0xFC) return false;                  /* fc00::/7 唯一本地 (ULA) */
@@ -633,10 +638,12 @@ static bool HttpGetInner(AiJob* j, const std::wstring& url, bool noRedirect, std
     *status = 0;
     out8->clear();
     URL_COMPONENTSW uc = { sizeof(uc) };
-    wchar_t host[256] = {}, path[1792] = {}, extra[512] = {};
+    /* 缓冲按 URL 编码后长度给足: web_search 查询经 UrlEncodeU8 逐字节展开 (每 UTF-8 字节
+     * 3 字符), extra 只有 512 时约 55 个汉字的搜索词即 ERROR_INSUFFICIENT_BUFFER 全端点失败 */
+    wchar_t host[256] = {}, path[3072] = {}, extra[2560] = {};
     uc.lpszHostName = host;      uc.dwHostNameLength = 255;
-    uc.lpszUrlPath = path;       uc.dwUrlPathLength = 1791;
-    uc.lpszExtraInfo = extra;    uc.dwExtraInfoLength = 511;
+    uc.lpszUrlPath = path;       uc.dwUrlPathLength = 3071;
+    uc.lpszExtraInfo = extra;    uc.dwExtraInfoLength = 2559;
     if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) {
         *err = L"URL 无法解析 (只支持标准的 http/https 地址)";
         return false;
@@ -700,12 +707,16 @@ static bool HttpGetInner(AiJob* j, const std::wstring& url, bool noRedirect, std
             } else {
                 stopped = j && InterlockedCompareExchange(&j->abort, 0, 0) != 0;
             }
+            /* 句柄恰关一次: j->hReq 已不是 hr (「停止」并发关过并置空) = 本句柄已关,
+             * 再关是双重关闭 (句柄值复用时最坏错关他人句柄) */
+            bool owned = true;
             if (j) {
                 EnterCriticalSection(&j->cs);
-                if (j->hReq == hr) j->hReq = NULL;
+                owned = (j->hReq == hr);
+                if (owned) j->hReq = NULL;
                 LeaveCriticalSection(&j->cs);
             }
-            WinHttpCloseHandle(hr);
+            if (owned) WinHttpCloseHandle(hr);
         }
         if (hc) WinHttpCloseHandle(hc);
         WinHttpCloseHandle(hs);

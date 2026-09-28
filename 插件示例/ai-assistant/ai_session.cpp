@@ -203,6 +203,20 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     }
     InterlockedExchange(&j->execGrant, 0);   /* 新作业不带上一条消息的裁决标志 */
     InterlockedExchange(&j->execDeny, 0);
+    /* Agent 行为/能力快照 (g_cfg 全库无锁, worker 严禁裸读 — 与 keyA/hostA/pathA 同口径;
+     * 作业中改设置不影响在跑的作业) */
+    j->cfgModel = g_cfg.model;
+    j->cfgMaxOut = g_cfg.maxOut;
+    j->cfgImg = g_cfg.img;
+    j->cfgVideo = g_cfg.video;
+    j->cfgAudio = g_cfg.audio;
+    j->cfgReasoning = g_cfg.reasoning;
+    j->cfgWebSearch = g_cfg.webSearch;
+    j->cfgNotifyDone = g_cfg.notifyDone;
+    j->cfgSearchSample = g_cfg.searchSample;
+    j->cfgMaxTurns = g_cfg.maxTurns;
+    j->cfgCmdTimeoutSec = g_cfg.cmdTimeoutSec;
+    j->cfgHttpTimeoutSec = g_cfg.httpTimeoutSec;
     /* 对话快照 (2026-09-27 用户口径"会话上下文不允许任何丢失"): role==2 工具卡片一并进
      * hist — AgentBuildBody 把步骤重建为 function_call/output 对跨轮完整重发, 模型始终
      * 记得此前做过什么、拿到过什么 (只发文字历史时模型对"第一轮搜了几次"全靠编造,
@@ -305,22 +319,6 @@ static void PumpStreams() {
                     ? (double)tu.completion / ((double)outMs / 1000.0) : 0.0;
                 s.usageHas = s.usageHas || tu.prompt > 0 || tu.completion > 0;
             }
-            /* 压缩检查点回写: worker 只在作业起点产出 (之后恒定), 收尾态 (state!=0) 抄回
-               会话份供下一次发送复用 (不重摘); 每作业只抄一次 */
-            if (state != 0 && !j->ckptTaken) {
-                EnterCriticalSection(&j->cs);
-                s.ckpt = j->ckpt;
-                s.ckptCovered = j->ckptCovered;
-                j->ckptTaken = true;
-                LeaveCriticalSection(&j->cs);
-            }
-            /* 会话级样本去重缓存抄回 (回答完成**不**清空 — 会话关闭/切换才清, 2026-09-27
-               用户口径; worker 收尾后不再改, 与 ckpt 同款收尾抄回) */
-            if (state != 0) {
-                EnterCriticalSection(&j->cs);
-                s.sampleSeen = std::move(j->sampleSeenSess);
-                LeaveCriticalSection(&j->cs);
-            }
             /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
              * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
              * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。 */
@@ -394,6 +392,20 @@ static void PumpStreams() {
         } else {
             /* 收尾: 状态落消息 + 中止的执行中/询问中卡片落败 (state 4 = 挂起等裁决的
                run_command 卡, 作业没了就再无人裁决) + 落库 + join + 清作业 */
+            /* 压缩检查点 / 会话级样本去重缓存收尾抄回 — 曾嵌在上面的 state==0 分支内而
+               条件写 state!=0, 恒假为死代码 (2026-09-28 修复): 检查点抄回会话份供下一次
+               发送复用 (不重摘); 会话级样本去重回答完成不清空 (会话关闭/切换才清,
+               2026-09-27 用户口径); worker 收尾后不再改, 各抄一次 */
+            if (!j->ckptTaken) {
+                EnterCriticalSection(&j->cs);
+                s.ckpt = j->ckpt;
+                s.ckptCovered = j->ckptCovered;
+                j->ckptTaken = true;
+                LeaveCriticalSection(&j->cs);
+            }
+            EnterCriticalSection(&j->cs);
+            s.sampleSeen = std::move(j->sampleSeenSess);
+            LeaveCriticalSection(&j->cs);
             for (auto& m : s.msgs)
                 for (auto& st : m.steps)
                     if (st.state == 0 || st.state == 1 || st.state == 4) { st.state = 3; st.err = L"已中止"; }
@@ -419,14 +431,6 @@ static void PumpStreams() {
                 if (truncated) back.text += L"\n\n*(回答已截断)*";
             }
             s.sending = false;
-            /* 临时诊断 (空答复排查): 泵收尾时快照到的 out 长度与开头 */
-            if (g_host && g_host->StorageSet) {
-                std::wstring dbg = L"state=" + std::to_wstring(state) +
-                                   L" outLen=" + std::to_wstring(out.size()) +
-                                   L" msgs=" + std::to_wstring(s.msgs.size()) +
-                                   L"\noutHead=" + out.substr(0, 200);
-                g_host->StorageSet(g_ctx, "调试收尾", U8(dbg).c_str(), (int)U8(dbg).size());
-            }
             WebTouch(&s);
             s.curId = HistUpsert(s.curId, s.msgs);
             histChanged = true;
@@ -469,6 +473,9 @@ static LRESULT CALLBACK AiMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         case XJS_AI_UIJOB:
             AgentUiDispatch((AiUiJob*)lParam);   /* 工具编组: agent 工作线程投递的宿主扩展 API 调用 */
             return 0;
+        case XJS_AI_MANUALWRITE:
+            AgentManualWriteDrain((long long)(intptr_t)lParam, (long)wParam);
+            return 0;   /* 手动重放 lua_exec 的写盘收口 (完成事件回调转投; UI 线程执行确认框/Toast) */
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

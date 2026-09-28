@@ -102,7 +102,10 @@ std::wstring FileResolveTargets(const Jv& v, std::vector<std::wstring>* out, int
         xjs_engine* eng = xjs_GetDefaultEngine();
         if (!eng) return L"引擎不可用, 无法按 FileId 解析路径";
         for (auto& e : ids->arr) {
-            if (e.t != 2 || e.num < 1) return L"ids 必须是正整数 FileId 数组";
+            /* double→int 转换的 UB 防线: NaN/越界/非整数全部拒绝 (曾只挡 <1, 1e18 直转 int) */
+            if (e.t != 2 || !(e.num >= 1.0) || e.num > 2147483647.0 ||
+                e.num != (double)(long long)e.num)
+                return L"ids 必须是 1..2147483647 的整数 FileId 数组";
             const char* p = xjs_db_GetPath(eng, (int)e.num);
             if (!p || !*p) return L"FileId 不在索引中: " + std::to_wstring((long long)e.num);
             out->push_back(NormSlash(W8(p)));
@@ -412,6 +415,9 @@ static bool AiZipRead(const std::string& d, const AiZipEnt& e, std::string* out,
     if (data + e.csize > d.size()) { *err = L"ZIP 条目数据越界"; return false; }
     if (e.usize > maxOut) { *err = L"条目解压后超过大小上限 (条目 " + W8(e.name.c_str()) + L")"; return false; }
     if (e.method == 0) {
+        /* stored 不经 inflate 的逐字面封顶: 畸形包可让 usize 撒谎而 csize 高达读取上限,
+         * append 按实际 csize 展开会绕过 maxOut — 与 deflate 路径同一封顶口径 */
+        if (e.csize > maxOut) { *err = L"条目解压后超过大小上限 (条目 " + W8(e.name.c_str()) + L")"; return false; }
         out->append(d, data, (size_t)e.csize);
         return true;
     }
@@ -801,11 +807,20 @@ std::wstring FileOpPrepare(const Jv& v, AiFileOp* op) {
     }
 
     /* delete */
+    bool unc = false;   /* 网络共享路径没有回收站: FOF_ALLOWUNDO 对 UNC 无效 = 实为永久删除,
+                           确认卡必须如实说 (曾一律承诺"移入回收站") */
+    for (auto& ip : op->items)
+        if (ip.size() >= 2 && ip[0] == L'\\' && ip[1] == L'\\') { unc = true; break; }
     op->summary = (op->permanent ? L"彻底删除 " : L"删除 ") + std::to_wstring(op->items.size()) +
-                  L" 项" + (op->permanent ? L" ⚠" : L" (移入回收站)");
-    op->risk = op->permanent ? L"⚠ 彻底删除: 不经过回收站, 无法还原" : L"";
-    op->confirm = L"AI 请求" + (op->permanent ? std::wstring(L"彻底删除 (不可还原)") : std::wstring(L"删除到回收站")) +
-                  L" " + std::to_wstring(op->items.size()) + L" 项:";
+                  L" 项" + (op->permanent ? L" ⚠"
+                                          : (unc ? L" ⚠ (网络路径无法进回收站, 将直接删除)" : L" (移入回收站)"));
+    op->risk = op->permanent ? L"⚠ 彻底删除: 不经过回收站, 无法还原"
+                             : (unc ? L"⚠ 网络共享路径没有回收站, 本次删除实际为永久删除, 无法还原" : L"");
+    op->confirm = L"AI 请求";
+    if (op->permanent) op->confirm += L"彻底删除 (不可还原)";
+    else if (unc) op->confirm += L"删除 (网络路径将直接删除, 不经回收站)";
+    else op->confirm += L"删除到回收站";
+    op->confirm += L" " + std::to_wstring(op->items.size()) + L" 项:";
     size_t show = op->items.size() < 5 ? op->items.size() : 5;
     for (size_t i = 0; i < show; i++) op->confirm += L"\n· " + op->items[i];
     if (op->items.size() > 5) op->confirm += L"\n… 等共 " + std::to_wstring(op->items.size()) + L" 项";
@@ -1027,9 +1042,16 @@ std::wstring AiSpillText(const std::string& content8, const char* tag8) {
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return L"";
     DWORD wr = 0;
-    WriteFile(f, "\xEF\xBB\xBF", 3, &wr, NULL);   /* UTF-8 BOM: read_file/notepad 都认 */
-    WriteFile(f, content8.data(), (DWORD)content8.size(), &wr, NULL);
+    /* 半截写 (磁盘满/配额/杀软拦截) = 没写: 删掉残件维持"写失败=空串"口径,
+     * 调用方回退原头尾封顶行为 — 否则模型按"外溢文件"续读到的是静默截断的内容 */
+    BOOL okW = WriteFile(f, "\xEF\xBB\xBF", 3, &wr, NULL) && wr == 3;   /* UTF-8 BOM: read_file/notepad 都认 */
+    okW = okW && WriteFile(f, content8.data(), (DWORD)content8.size(), &wr, NULL) &&
+          wr == (DWORD)content8.size();
     CloseHandle(f);
+    if (!okW) {
+        DeleteFileW(path.c_str());
+        return L"";
+    }
     return path;
 }
 
@@ -1075,8 +1097,11 @@ std::string AiWindowLines(const std::string& content8, long long offset, long lo
             size_t len = e - p;
             if (len > 0 && content8[e - 1] == '\r') len--;   /* CRLF 的 '\r' 不入窗 */
             if (out.size() + len + 1 > budget) {
-                if (out.empty()) {   /* 单行就超预算: 截该行 (行内续读不支持, dsh 同粒度) */
-                    out.append(content8, p, budget > 0 ? budget - 1 : 0);
+                if (out.empty()) {   /* 单行就超预算: 截该行 (行内续读不支持, dsh 同粒度; 落刀回退 UTF-8 边界,
+                                        与 AiCapUtf8HeadTail 同口径) */
+                    size_t take = budget > 0 ? budget - 1 : 0;
+                    take = Utf8Floor(content8, take);
+                    out.append(content8, p, take);
                     out += '\n';
                     endLine = line;
                 }

@@ -1268,8 +1268,10 @@ void WebSessionCreate(AiSess* s) {
     void* parent = NULL;
     int x, y, cw, ch;
     if (g_host->PanelGetRect(g_ctx, s->tok, &parent, &x, &y, &cw, &ch) != XJS_PLUGIN_OK || !parent) return;
-    if (!g_noRuntime && !WebEnsureEnv() && !g_envPending) {
-        /* 宿主 Toast 唯一保留点: 面板没起来 = 没有页面, 页内 toast 无处可画 */
+    if (!WebEnsureEnv() && !g_envPending) {
+        /* 宿主 Toast 唯一保留点: 面板没起来 = 没有页面, 页内 toast 无处可画。
+         * 曾带 `!g_noRuntime &&` 前置短路: 运行时缺失确认过 (g_noRuntime) 后再开面板
+         * 恒假直落建窗路径 = 永久空白子窗盖住面板且无任何说明 */
         g_host->Toast(g_ctx, s->tok, "本机缺少 WebView2 运行时 (系统组件), AI 助手无法打开", XJS_PLUGIN_TOAST_ERROR);
         return;
     }
@@ -1968,6 +1970,11 @@ static bool IcoDataUrlOf(int fid, const std::wstring& path, int* fresh, std::wst
                 } else {
                     key = e;
                 }
+            } else {
+                /* >8 字符的扩展名不做扩展名键: 与真无扩展名文件共享 <noext> 槽 = 图标
+                 * 交叉污染 (同 "第一个 exe 污染全部 exe" 坑的入口), 退回随文件路径键 */
+                key = L"p:";
+                for (wchar_t c : path) key += (wchar_t)towlower(c);
             }
         }
     }
@@ -2258,8 +2265,11 @@ void WebCommand(AiSess* s, const Jv& msg) {
         std::wstring act = msg.S(L"act");
         if (!mv || mv->t != 2 || !sv || sv->t != 2 || !iv || iv->t != 2) return;
         int mi = (int)mv->num, si = (int)sv->num, ii = (int)iv->num;
-        bool all = (act == L"applyAll" || act == L"ignoreAll");
-        bool doApply = (act == L"apply" || act == L"applyAll");
+        /* 前端发送前对动作名做了 toLowerCase (bindThread 的 .abtn 分发): applyAll→applyall,
+         * 单项 apply/ignore 恰好本就小写 — 两套拼法都收, 大小写敏感比较曾把「全部应用」错成忽略 */
+        bool all = (act == L"applyAll" || act == L"ignoreAll" ||
+                    act == L"applyall" || act == L"ignoreall");
+        bool doApply = (act == L"apply" || act == L"applyAll" || act == L"applyall");
         if (mi < 0 || mi >= (int)s->msgs.size()) return;
         AiMsg& cm = s->msgs[mi];
         if (cm.role != 2 || si < 0 || si >= (int)cm.steps.size()) return;

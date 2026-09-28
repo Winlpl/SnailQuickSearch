@@ -1492,12 +1492,12 @@ function turnGroupHtml(start){
     const isLive=S.sending&&end===S.msgs.length;
     const key=S.cur+':'+start;
     const open=S.turnLog[key]!==undefined?S.turnLog[key]:isLive;
-    const sum=!isLive?'':(S.note||(S.phase===1?'执行中…':'生成中…'));
+    const sum=!isLive?'':(S.note||(S.phase===1?'执行中…':'生成中…'));   /* S.note=宿主固定文案, 仍走 esc 保持转义口径统一 */
     main='<div class="ai-turn-log'+(open?' open':'')+'">'
         +'<button class="ai-turn-log-head" type="button" data-act="turnlog" aria-expanded="'+(open?'true':'false')+'">'
         +'<span class="ai-turn-log-ic glyph" aria-hidden="true">&#xE9D9;</span>'
         +'<span class="ai-turn-log-label">思考与工具调用</span>'
-        +(sum?'<span class="ai-turn-log-sum">'+sum+'</span>':'')
+        +(sum?'<span class="ai-turn-log-sum">'+esc(sum)+'</span>':'')
         +'<span class="ai-turn-log-arr glyph" aria-hidden="true">&#xE70D;</span>'
         +'</button><div class="ai-turn-log-body">'+log+'</div></div>';
   }
@@ -1603,6 +1603,7 @@ function updatePendAsk(){
   const key=hit.mi+':'+hit.si;
   if(!bar.hidden&&bar.getAttribute('data-k')===key)return;
   bar.hidden=false;bar.setAttribute('data-k',key);
+  bar.setAttribute('data-mi',hit.mi);bar.setAttribute('data-si',hit.si);   /* 裁决与步骤同 mi/si (宿主现只读裸标志, 属性照口径带上) */
   bar.innerHTML='<div class="pendbar-row"><span class="pendbar-t">⏸ '+esc(hit.argz||'AI 等待确认')+'</span>'
     +'<button class="pendbar-b primary" type="button" data-act="execallow">允许一次</button>'
     +'<button class="pendbar-b" type="button" data-act="execdeny">拒绝</button></div>'
@@ -2608,6 +2609,8 @@ function handle(m){
     case 'convs':S.convs=m.convs||[];renderSide();break;
     case 'pathcheck':applyPathCheck(m.r);break;
     case 'msgs':
+      if(m.cur!==undefined&&S.cur!==m.cur)S.reasonOpen={};   /* 会话切换: 裸消息下标键整体平移失效 */
+      else if(S.msgs.length>(m.msgs||[]).length)S.reasonOpen={};   /* 消息被删 (delturn/重试截断) 同理 */
       if(m.cur!==undefined)S.cur=m.cur;
       S.msgs=m.msgs||[];
       if(m.st){S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;S.note=m.st.note||'';}
@@ -2634,6 +2637,7 @@ function handle(m){
       if(S.policyOpen)policySetOpen(false);
       if(S.usageOpen)usageSetOpen(false);
       if(S.modelOpen)modelSetOpen(false);
+      if(S.epolicyOpen)epolicySetOpen(false);   /* 命令执行权限下拉与文件权限同构, blur 同收 */
       if(S.sideOpen&&sideFloating())sideToggle(false);
       break;
   }
@@ -2660,7 +2664,7 @@ function bind(){
   $('cfgTabAgent').addEventListener('click',()=>setCfgTab('agent'));
   $('b-agent-cancel').addEventListener('click',()=>cfgToggle(false));
   $('b-agent-save').addEventListener('click',saveAgent);
-  ['a-notify','a-cardsopen','a-web'].forEach(id=>{
+  ['a-notify','a-cardsopen','a-web','a-acompact'].forEach(id=>{
     $(id).addEventListener('click',()=>{
       const b=$(id);
       const on=b.getAttribute('aria-pressed')==='true';

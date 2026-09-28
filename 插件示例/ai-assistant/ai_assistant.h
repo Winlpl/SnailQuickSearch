@@ -60,6 +60,8 @@ static bool HostHas(unsigned need) {   /* 宿主表按"只追加"扩字段: 取�
 static const UINT XJS_AI_STREAM = WM_APP + 40;  /* 流式增量到达 (wParam=0, lParam=Job*) */
 static const UINT XJS_AI_SWEEP  = WM_APP + 41;  /* 孤儿作业清扫 */
 static const UINT XJS_AI_UIJOB  = WM_APP + 42;  /* 工具编组: worker → UI 线程执行宿主扩展 API (lParam=AiUiJob*) */
+static const UINT XJS_AI_MANUALWRITE = WM_APP + 43;  /* 手动重放 lua_exec 的写盘收口: 完成事件回调转投
+                                                        UI 线程执行 (wParam=发起序号, lParam=窗口令牌) */
 
 /* ==================== 宿主扩展 API (QueryApi 按名解析; 全部仅 UI 线程) ====================
  * Init 时解析一次 (ApiResolveAll; host->size 先验), 存函数指针 — 未知名/旧宿主 = NULL,
@@ -107,6 +109,8 @@ struct AiUiJob {
 };
 struct AiJob;   /* 会话层作业 (下文定义; AgentUiCall 挂起等待期间要读它的 abort) */
 void AgentUiDispatch(AiUiJob* jb);        /* UI 线程执行 (g_msgwnd wndproc 调; 内部 delete jb) */
+void AgentManualWriteDrain(long long tok, long runSeq);   /* 手动重放的 lua_exec 写盘收口 (UI 线程,
+                                            XJS_AI_MANUALWRITE 调; 发起序号不符 = 陈旧投递直接丢弃) */
 std::wstring AgentUiCall(AiJob* j, AiUiJob* jb, std::string* out8);
                                           /* worker 侧: 投递+等完成; 返回错误描述 (空=成功, *out8=结果) */
 long long AgentUiWindowToken(const std::wstring& name, long long defTok, std::wstring* err);
@@ -490,6 +494,15 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     std::wstring err;
     bool truncated = false;
     std::string hostA, pathA, keyA;   /* 请求要素 (UTF-8; worker 自取; 请求体每轮在 worker 构建) */
+    /* Agent 行为/能力快照 (SendCurrent 在 UI 线程取 g_cfg — g_cfg 全库无锁, worker 严禁
+     * 裸读 std::wstring 否则与设置保存撕裂/UAF; keyA/hostA/pathA 同款口径)。
+     * 作业中改设置不影响在跑的作业, 下一次发送起生效。 */
+    std::wstring cfgModel;
+    long long cfgMaxOut = 0;
+    bool cfgImg = false, cfgVideo = false, cfgAudio = false;
+    bool cfgReasoning = false, cfgWebSearch = true, cfgNotifyDone = true;
+    int cfgSearchSample = 20, cfgMaxTurns = AI_AGENT_TURNS_DEF;
+    int cfgCmdTimeoutSec = 120, cfgHttpTimeoutSec = 120;
     INTERNET_PORT port = 443;
     bool secure = true;
     XjsWindowToken tok = 0;        /* 发起窗口 (open_file 走宿主 OpenFile 用) */

@@ -33,6 +33,8 @@ static CRITICAL_SECTION g_srchErrCs;
 static std::wstring g_srchErr;            /* 错误 JSON 原文 */
 static int g_srchErrFp = -1;              /* 所属搜索指纹 */
 
+static void AgentManualWritePost();   /* 前置: FAILED/COMPLETE 两个回调都要投递 (定义在同步节) */
+
 static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
                                int searchFingerprint, const char* errorJson) {
     (void)userData; (void)eng; (void)res;
@@ -40,6 +42,7 @@ static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
     g_srchErr = W8(errorJson ? errorJson : "");
     g_srchErrFp = searchFingerprint;
     LeaveCriticalSection(&g_srchErrCs);
+    AgentManualWritePost();   /* 手动重放以 FAILED 收场时登记同样收口 (否则滞留到下一次 lua 发起) */
     return 0;
 }
 
@@ -52,11 +55,26 @@ static int AgentOnSearchFailed(void* userData, xjs_engine* eng, xjs_result* res,
  * 的行缓存/重绘链自理 (ResetFileId 触发其变化事件, 宿主照常刷新)。 */
 static xjs_result* volatile g_syncWin = NULL;   /* 同步目标窗结果对象 (UI 线程写, 回调线程读) */
 static volatile LONG g_syncArm = 0;             /* 布防标志: 1 = 下一次有效完成执行同步 (一次性) */
+/* 手动重放 (卡片「执行语句」) 的 lua_exec 写盘登记收口: worker 路径由 AgentToolRunSearch
+ * 收尾执行, 手动重放没有作业线程 — 完成事件回调 (引擎线程) 只投递到 g_msgwnd (UI 线程)
+ * 执行, 确认框/Toast 都是界面类。g_luaRunSeq 每次lua发起 +1, 防陈旧投递执行新登记。 */
+static volatile LONG g_manualWriteArm = 0;      /* 非 0 = 有待执行登记 (值 = 发起时的 g_luaRunSeq) */
+static volatile LONG g_luaRunSeq = 0;           /* lua 发起序号 (手动/worker 每次发起前 +1) */
+static volatile long long g_manualWriteTok = 0; /* 手动重放发起窗令牌 (写盘回告 Toast 用) */
+
+static void AgentManualWritePost() {            /* 引擎回调线程: 投递 UI 收口 (一次性消费布防) */
+    LONG mw = InterlockedCompareExchange(&g_manualWriteArm, 0, 0);
+    if (!mw) return;
+    InterlockedExchange(&g_manualWriteArm, 0);
+    if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_MANUALWRITE, (WPARAM)(ULONG_PTR)mw,
+                               (LPARAM)(intptr_t)InterlockedCompareExchange64(&g_manualWriteTok, 0, 0));
+}
 
 static int AgentOnSearchComplete(void* userData, xjs_engine* eng, xjs_result* res,
                                  int searchFingerprint, const char* keyword, BOOL discarded) {
     (void)userData; (void)eng; (void)searchFingerprint; (void)keyword;
     if (discarded) return 0;                       /* 被更新的搜索覆盖: 同步交给最新一次 */
+    AgentManualWritePost();                        /* 手动重放的写盘登记在此转投 UI 收口 */
     if (!InterlockedCompareExchange(&g_syncArm, 0, 0)) return 0;
     InterlockedExchange(&g_syncArm, 0);            /* 一次性: 消费布防 */
     xjs_result* win = (xjs_result*)g_syncWin;
@@ -1189,12 +1207,18 @@ std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const
             g_rowBuf.clear(); g_rowCut = false; g_rowDrop = 0;
             g_writeBuf.clear(); g_writeNote.clear();
             for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
+            InterlockedExchange(&g_manualWriteArm, 0);   /* 上一轮手动重放的待写登记作废 */
+            InterlockedExchange(&g_luaRunSeq, InterlockedCompareExchange(&g_luaRunSeq, 0, 0) + 1);
             LeaveCriticalSection(&g_emitCs);
             InterlockedExchange(&g_luaIoMode, type == XJS_KEYWORD_LUA_EXEC ? 1 : 0);
             InterlockedExchange(&g_luaIoPolicy, g_cfg.filePolicy);
         }
         InterlockedExchangePointer((volatile PVOID*)&g_syncWin, win);
         InterlockedExchange(&g_syncArm, 1);   /* 布防: 完成事件回调执行推送 */
+        if (type == XJS_KEYWORD_LUA_EXEC) {   /* 写盘登记在完成事件转投 UI 收口 (本线程不阻塞等待) */
+            InterlockedExchange64(&g_manualWriteTok, (long long)tok);
+            InterlockedExchange(&g_manualWriteArm, InterlockedCompareExchange(&g_luaRunSeq, 0, 0));
+        }
         if (type != XJS_KEYWORD_LUA_EXEC) {   /* 筛选器预过滤 (lua_exec 无效, 同 run_search 口径) */
             err = AgentApplyFilter(g_agentRes, filter);
         }
@@ -1203,6 +1227,10 @@ std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const
             InterlockedExchange(&g_syncArm, 0);   /* 撤防 (发起失败无完成事件) */
             std::wstring e = W8(xjs_GetLastErrorMsg(xjs_GetDefaultEngine()));
             err = L"搜索发起失败: " + (e.empty() ? std::wstring(L"引擎拒绝") : e);
+        }
+        if (!err.empty()) {   /* 未发起 = 永无完成事件, 全部布防撤干净 (残留会推错下一次结果) */
+            InterlockedExchange(&g_syncArm, 0);
+            InterlockedExchange(&g_manualWriteArm, 0);
         }
     }
     LeaveCriticalSection(&g_agentCs);
@@ -1302,6 +1330,8 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         g_writeBuf.clear();   /* 文件导出登记一并清 (上一作业残留不得执行) */
         g_writeNote.clear();
         for (int f = 0; f < ROWF_COUNT; f++) g_rowMiss[f] = false;
+        InterlockedExchange(&g_manualWriteArm, 0);   /* 手动重放的待写登记一并作废 (worker 接管) */
+        InterlockedExchange(&g_luaRunSeq, InterlockedCompareExchange(&g_luaRunSeq, 0, 0) + 1);
         LeaveCriticalSection(&g_emitCs);
         /* 文件回调环境快照: 仅 lua_exec 放行 + 文件权限闸 (回调层拦截, 引擎线程不碰 g_cfg) */
         InterlockedExchange(&g_luaIoMode, mode == L"lua_exec" ? 1 : 0);
@@ -1319,21 +1349,19 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         InterlockedExchange(&g_syncArm, 0);
     }
     if (mode != L"wildcard" && mode != L"regex" && mode != L"sql" &&
-        mode != L"lua_filter" && mode != L"lua_exec")
+        mode != L"lua_filter" && mode != L"lua_exec") {
+        InterlockedExchange(&g_syncArm, 0);        /* 未知模式不会发起搜索, 布防撤干净 */
+        InterlockedExchange(&g_manualWriteArm, 0);
         return L"未知搜索模式: " + mode;
-    /* 结果同步布防 (2026-09-26 用户口径: 完成事件里推送, 不经 UI 编组/不另起线程):
-     * 勾选开启且目标窗结果可得 → 置 g_syncArm, AgentOnSearchComplete (引擎搜索线程)
-     * 在本次完成未被覆盖 (discarded=FALSE) 时把 ID 全集 ResetFileId 进目标窗。 */
-    if (InterlockedCompareExchange(&j->syncRes, 0, 0) && j->syncWin) {
-        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, j->syncWin);
-        InterlockedExchange(&g_syncArm, 1);
-    } else {
-        InterlockedExchange(&g_syncArm, 0);
     }
     /* 筛选器预过滤 (2026-09-27): 见 AgentApplyFilter — lua_exec 不适用 */
     if (mode != L"lua_exec") {
         std::wstring ferr = AgentApplyFilter(g_agentRes, filter);
-        if (!ferr.empty()) return ferr;
+        if (!ferr.empty()) {
+            InterlockedExchange(&g_syncArm, 0);    /* 未发起 = 无完成事件, 布防撤干净 */
+            InterlockedExchange(&g_manualWriteArm, 0);
+            return ferr;
+        }
     }
     int fp = -1;
     if (mode == L"wildcard")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 0, FALSE);
@@ -1422,7 +1450,7 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     g_agentTopIds.clear();
     st->top.clear();
     picojson::array files;
-    int sampleN = g_cfg.searchSample;
+    int sampleN = j->cfgSearchSample;   /* Agent 设置快照 (g_cfg 无锁, worker 只读作业快照) */
     if (sampleN < 3) sampleN = 3;
     if (sampleN > 50) sampleN = 50;
     /* 样本去重 (参数「样本去重」: 回答[缺省]/会话/关闭, 2026-09-27 用户口径): 已提交过样本的
@@ -1605,6 +1633,45 @@ static std::string ExecuteLuaWrites(AiJob* j, AiToolStep* st) {
         }
     }
     return U8(note);
+}
+
+/* 手动重放 (卡片「执行语句」) 的 lua_exec 写盘收口 (UI 线程, XJS_AI_MANUALWRITE 调):
+ * 完成/失败事件回调在引擎线程只投递, 确认框/Toast 回本线程执行。runSeq 与当前发起序号
+ * 不符 = 陈旧投递 (登记已被后续发起清掉/接管), 直接丢弃 — 否则会把新脚本的半程登记提前写出。 */
+void AgentManualWriteDrain(long long tok, long runSeq) {
+    if (runSeq != InterlockedCompareExchange(&g_luaRunSeq, 0, 0)) return;
+    std::vector<AiWriteItem> items;
+    std::string preNote;
+    EnterCriticalSection(&g_emitCs);
+    items.swap(g_writeBuf);
+    preNote.swap(g_writeNote);
+    LeaveCriticalSection(&g_emitCs);
+    if (items.empty() && preNote.empty()) return;
+    std::wstring note = W8(preNote.c_str());
+    int pol = InterlockedCompareExchange(&g_luaIoPolicy, 0, 0);
+    for (auto& it : items) {
+        if (it.saveDlg) {   /* 另存为对话框走 worker 编组作业形态, 手动重放不支持 (登记时已受理为异步) */
+            note += L"另存为需要保存对话框, 手动重放不支持, 已跳过: " + it.path + L"\n";
+            continue;
+        }
+        bool exists = GetFileAttributesW(it.path.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (exists || pol == 2) {   /* 与 worker 同口径: 覆盖恒确认; 询问档写新文件也确认 */
+            std::wstring what = exists ? (L"AI 想要覆盖已存在的文件:\n\n" + it.path +
+                                         L"\n\n覆盖后原内容无法恢复。覆盖它吗?\n(选「否」= 跳过这个文件, 其它文件继续)")
+                                       : (L"AI 请求写出新文件:\n\n" + it.path +
+                                         L"\n\n允许吗?\n(选「否」= 跳过这个文件)");
+            if (MessageBoxW(NULL, what.c_str(), L"AI 助手 - 文件写出确认",
+                            MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND) != IDYES) {
+                note += L"用户未确认, 已跳过: " + it.path + L"\n";
+                continue;
+            }
+        }
+        std::wstring werr = LuaWriteFileSync(it.path, it.data);
+        note += werr.empty() ? (L"已写出 (" + std::to_wstring(it.data.size()) + L" 字节): " + it.path + L"\n")
+                             : (L"写出失败: " + it.path + L" (" + werr + L")\n");
+    }
+    /* 手动重放没有工具卡片, 写出结果经 Toast 回告 (窗口已关 = Toast 失败, 静默即可) */
+    if (g_host && tok) g_host->Toast(g_ctx, (XjsWindowToken)tok, U8(note).c_str(), XJS_PLUGIN_TOAST_INFO);
 }
 
 /* open_file 实体: 打开/定位最近一次 run_search 样本中的文件 (走宿主打开行为)。
@@ -2493,7 +2560,7 @@ static const wchar_t* AI_INSTR_WEB =
 static const wchar_t* AI_INSTRUCTIONS =
     L"## 角色与目标\n"
     L"你是“蜗牛快搜”内置的 AI 助手(agent 模式)。蜗牛快搜是 Windows 本地文件极速搜索工具：全盘秒级索引，"
-    L"支持文件名/大小/时间/类型/别名/内容等搜索。全程用简体中文回答，简洁、准确、直接。\n"
+    L"支持文件名/大小/时间/类型/别名/内容等搜索。用户用什么语言提问就用什么语言回答（跟随提问语言，而非这份提示词的中文），简洁、准确、直接。\n"
     L"\n"
     L"## 工作流程\n"
     L"- 找文件/查文件/统计类任务：**先调用 run_search 实际执行搜索**，根据返回的条数/样本/ai.print 输出判断结果，"
@@ -3013,12 +3080,12 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
                 if (a.dataUrl.empty()) continue;
                 picojson::object part;
                 if (a.kind == 0) {
-                    if (!g_cfg.img) continue;
+                    if (!j->cfgImg) continue;
                     part["type"] = picojson::value("input_image");
                     part["image_url"] = JS(a.dataUrl);
                     part["detail"] = picojson::value("auto");
                 } else {
-                    if (a.kind == 1 ? !g_cfg.video : !g_cfg.audio) continue;
+                    if (a.kind == 1 ? !j->cfgVideo : !j->cfgAudio) continue;
                     part["type"] = picojson::value("input_file");
                     part["filename"] = JS(a.name.empty() ? (a.kind == 1 ? std::wstring(L"video.bin")
                                                                         : std::wstring(L"audio.bin"))
@@ -3079,17 +3146,17 @@ static std::string AgentBuildBody(AiJob* j, const std::vector<AiCall>& accCalls,
     if (!withTools)
         input.push_back(userItem(L"(工具调用次数已达上限，请直接根据已获得的信息回答)"));
     picojson::object body;
-    body["model"] = JS(g_cfg.model);
-    if (g_cfg.maxOut > 0)   /* 档案指定了最大输出才发送 (0 = 服务端默认); 与 model 同处请求
+    body["model"] = JS(j->cfgModel);   /* Agent 设置快照 (g_cfg 无锁, worker 只读作业快照) */
+    if (j->cfgMaxOut > 0)   /* 档案指定了最大输出才发送 (0 = 服务端默认); 与 model 同处请求
                                头部稳定段, 只在切档案时一起变, 前缀缓存不受损 */
-        body["max_output_tokens"] = JN(g_cfg.maxOut);
+        body["max_output_tokens"] = JN(j->cfgMaxOut);
     body["input"] = picojson::value(input);
     body["stream"] = JB(true);
     std::string instrA = InstrSnapshot();   /* 与设置保存的重建互斥 (2026-09-26 起可重建) */
     body["instructions"] = JS(W8(instrA.c_str()));   /* 恒定字节 = 跨请求前缀缓存的事实源 */
-    if (withTools) body["tools"] = g_cfg.webSearch ? ToolsP() : ToolsPNoWeb();
+    if (withTools) body["tools"] = j->cfgWebSearch ? ToolsP() : ToolsPNoWeb();
     picojson::object reasoning;
-    reasoning["effort"] = picojson::value(g_cfg.reasoning ? "high" : "none");
+    reasoning["effort"] = picojson::value(j->cfgReasoning ? "high" : "none");
     body["reasoning"] = picojson::value(reasoning);
     return picojson::value(body).serialize();
 }
@@ -3162,11 +3229,9 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                          std::vector<AiCall>* turnCalls, bool* aborted, bool* truncated,
                          bool* failed, bool* transient, std::string* errMsg) {
     turnCalls->clear();
+    *truncated = false;   /* 每轮独立判定: 上一轮残留的 incomplete 标志不得把重试成功的轮误判截断 */
     std::string body = AgentBuildBody(j, accCalls, accOuts, liveFrom, pruneHist, repNote, withTools);
-    /* 临时诊断 (2026-09-25 空答复排查): 每轮请求体/响应原文落 data\调试请求/调试响应 (后者只留
-     * 最后一轮), 定位后连同 LuaDumpCleaner 一起拆掉 */
-    if (g_host->StorageSet)
-        g_host->StorageSet(g_ctx, "调试请求", body.c_str(), (int)body.size());
+    /* 临时诊断 (2026-09-25 空答复排查) 已拆除: 调试请求/调试响应/调试解析不再落盘 */
     wchar_t wpath[1024] = {};
     MultiByteToWideChar(CP_UTF8, 0, j->pathA.c_str(), -1, wpath, 1024);
     bool ok = true;
@@ -3271,10 +3336,7 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
     if (ok) {
         /* SSE 流式: 文本增量照旧; function_call 按 output_index 分组攒参 */
         std::string buf;
-        std::string sseLog;   /* 临时诊断: 原始 data 行 (封顶 256KB, 轮末落 data\调试响应) */
         ULONGLONG lastPost = 0;
-        int dbgAppend = 0, dbgFail = 0;   /* 临时诊断: delta 追加数 / 解析失败数 */
-        std::string dbgFailHead;          /* 临时诊断: 首个解析失败载荷前 200 字节 */
         for (;;) {
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; break; }
             DWORD avail = 0;
@@ -3297,6 +3359,12 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
             if (InterlockedCompareExchange(&j->abort, 0, 0)) { *aborted = true; break; }
             chunk.resize(rd);
             buf += chunk;
+            if (buf.size() > (size_t)64 * 1024 * 1024) {   /* 行缓冲封顶: 单条 SSE 行 64MB = 畸形流
+                                            (服务端长时间不发换行防无界灌内存), 按失败收场 */
+                *failed = true;
+                *errMsg = "sse line buffer overflow";
+                break;
+            }
             size_t nl;
             while ((nl = buf.find('\n')) != std::string::npos) {
                 std::string line = buf.substr(0, nl);
@@ -3306,18 +3374,13 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                 std::string payload = line.substr(5);
                 while (!payload.empty() && (payload[0] == ' ')) payload.erase(0, 1);
                 if (payload == "[DONE]") continue;
-                if (sseLog.size() < 262144) { sseLog += payload; sseLog += '\n'; }
                 Jv ev = JsonParseW(W8(payload.c_str()));
-                if (ev.t != 5) {
-                    dbgFail++;
-                    if (dbgFail == 1) dbgFailHead = payload.substr(0, 200);
-                    continue;
-                }
+                if (ev.t != 5) continue;   /* 非 JSON 行 (心跳/杂质) 忽略 */
                 std::wstring type = ev.S(L"type");
                 EnterCriticalSection(&j->cs);
                 if (type == L"response.output_text.delta") {
                     const Jv* d = ev.Get(L"delta");
-                    if (d) { j->out += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L"")); dbgAppend++; }
+                    if (d) { j->out += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L"")); }
                 } else if (type == L"response.reasoning_text.delta") {
                     const Jv* d = ev.Get(L"delta");
                     if (d) j->reason += (d->t == 3 ? d->str : (d->t == 5 ? d->S(L"text") : L""));
@@ -3394,25 +3457,12 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                 PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
             }
         }
-        /* 临时诊断: 本轮追加/解析失败统计 + 流结束时 out 长度 */
-        if (g_host->StorageSet) {
-            EnterCriticalSection(&j->cs);
-            size_t outNow = j->out.size();
-            LeaveCriticalSection(&j->cs);
-            std::string dbg = "appends=" + std::to_string(dbgAppend) +
-                              " parseFail=" + std::to_string(dbgFail) +
-                              " outLenAtStreamEnd=" + std::to_string(outNow) +
-                              " turnCalls=" + std::to_string(turnCalls->size()) +
-                              "\nfailHead=" + dbgFailHead;
-            g_host->StorageSet(g_ctx, "调试解析", dbg.c_str(), (int)dbg.size());
-        }
-        if (g_host->StorageSet)
-            g_host->StorageSet(g_ctx, "调试响应", sseLog.c_str(), (int)sseLog.size());
     }
+    /* 句柄恰关一次: j->hReq 仍是本请求 (==hr) = 归本函数关; 已被改写 (「停止」并发关过并
+     * 置空, 或 send 失败路径已清) = 本句柄已关, 再关同一句柄是 API 契约上的双重关闭 */
     EnterCriticalSection(&j->cs);
-    if (j->hReq) { WinHttpCloseHandle(j->hReq); j->hReq = NULL; }
+    if (hr && j->hReq == hr) { WinHttpCloseHandle(hr); j->hReq = NULL; }
     LeaveCriticalSection(&j->cs);
-    if (hr) WinHttpCloseHandle(hr);
     return ok;
 }
 
@@ -3656,7 +3706,7 @@ static bool AgentCompactCall(AiJob* j, HINTERNET hc, const std::string& material
     picojson::array input;
     input.push_back(picojson::value(item));
     picojson::object body;
-    body["model"] = JS(g_cfg.model);
+    body["model"] = JS(j->cfgModel);   /* Agent 设置快照 (压缩调用同主请求口径) */
     body["input"] = picojson::value(input);
     body["max_output_tokens"] = JN(2048);
     body["stream"] = JB(true);
@@ -3729,6 +3779,7 @@ static bool AgentCompactCall(AiJob* j, HINTERNET hc, const std::string& material
             if (!WinHttpReadData(hr, &chunk[0], avail, &rd)) { okStream = false; break; }
             chunk.resize(rd);
             buf += chunk;
+            if (buf.size() > (size_t)64 * 1024 * 1024) { okStream = false; break; }   /* 行缓冲封顶 (同主请求) */
             size_t nl;
             while ((nl = buf.find('\n')) != std::string::npos) {
                 std::string ln = buf.substr(0, nl);
@@ -3792,7 +3843,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     if (win <= 0) win = 128000;
     size_t est = AiTokEstHist(j->hist);
     est += AiTokEst8(InstrSnapshot());
-    est += AiTokEst8((g_cfg.webSearch ? ToolsP() : ToolsPNoWeb()).serialize());
+    est += AiTokEst8((j->cfgWebSearch ? ToolsP() : ToolsPNoWeb()).serialize());
     est += 2048;   /* 摘要/答复输出余量 */
     if (est < (size_t)(win / 5 * 4)) return;
     /* 近端保留: 从最新往回最多 6 条或窗口 1/8 token */
@@ -3831,10 +3882,13 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
             material8 += m.role ? "[AI] " : "[用户] ";
             seg = U8(m.text);
         }
-        if (seg.size() > 30000) {   /* 单条封顶: 头 24K + 尾 4K, 省略量精确 */
-            std::string cut = seg.substr(0, 24000);
-            cut += "\n…[本条过长省略 " + std::to_string(seg.size() - 28000) + " 字节]…\n";
-            cut += seg.substr(seg.size() - 4000);
+        if (seg.size() > 30000) {   /* 单条封顶: 头 24K + 尾 4K, 省略量精确 (落刀回退 UTF-8 字符边界,
+                                       与 ToolOutputPrune 同款 — 中文拦腰截断会把残字节发成 U+FFFD) */
+            size_t headEnd = PruneUtf8Floor(seg, 24000);
+            size_t tailBegin = PruneUtf8Floor(seg, seg.size() - 4000);
+            std::string cut = seg.substr(0, headEnd);
+            cut += "\n…[本条过长省略 " + std::to_string(tailBegin - headEnd) + " 字节]…\n";
+            cut += seg.substr(tailBegin);
             seg.swap(cut);
         }
         if (!m.atts.empty()) seg += "\n[该条消息附有图片/视频/音频附件]";
@@ -3861,7 +3915,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     if (!hs) hs = WinHttpOpen(L"snail-quicksearch-ai-assistant", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     HINTERNET hc = NULL;
     if (hs) {
-        int recvTo = g_cfg.httpTimeoutSec * 1000;   /* 单轮请求超时 (Agent 设置, 30..600s);
+        int recvTo = j->cfgHttpTimeoutSec * 1000;   /* 单轮请求超时 (Agent 设置快照, 30..600s);
                                                        多轮总时长由轮数×超时构成 */
         WinHttpSetTimeouts(hs, 15000, 30000, 30000, recvTo);
         hc = WinHttpConnect(hs, whost, j->port, 0);
@@ -3883,8 +3937,8 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
         int emptyRetry = 0;                 /* 空响应 (无工具调用也无文本) 原样重发次数 */
         int txRetry = 0;                    /* 传输中断整轮重试计数 (成功轮归零) */
         bool overflowRetried = false;       /* 上下文超限自愈每作业只做一次 (dsh maxOverflowRetries=1) */
-        const int maxTurns = g_cfg.maxTurns > 0 ? g_cfg.maxTurns : AI_AGENT_TURNS_DEF;
-                                            /* 工具调用上限 (Agent 设置, 发送时点取一次;
+        const int maxTurns = j->cfgMaxTurns > 0 ? j->cfgMaxTurns : AI_AGENT_TURNS_DEF;
+                                            /* 工具调用上限 (Agent 设置快照, 发送时点取一次;
                                                末轮省略 tools 强制收尾口径不变) */
         /* 上下文自动压缩 (dsh compaction 口径): 作业起点执行一次 — 已有检查点恒应用,
          * 压力过阈才新建/合并摘要; 被停止 = aborted 置位, 首轮循环顶部自然走中止收尾 */
@@ -3991,7 +4045,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                 bool fileTool = (c.name == "open_file" || c.name == "copy_paths");
                 bool execTool = (c.name == "run_command");
                 std::wstring exShell, exCmd, exDir, exDesc;
-                long long exTimeout = (long long)g_cfg.cmdTimeoutSec * 1000;   /* 缺省超时 (Agent 设置) */
+                long long exTimeout = (long long)j->cfgCmdTimeoutSec * 1000;   /* 缺省超时 (Agent 设置快照) */
                 if (execTool) {
                     Jv cv = JsonParseW(W8(c.args.c_str()));
                     exCmd = TrimW(cv.S(L"command"));
@@ -4202,7 +4256,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                         err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
                 } else if (execTool) {   /* 允许档: 直接执行 */
                     err = AgentToolRunCommand(j, exShell, exCmd, exDir, exTimeout, &local);
-                } else if (webTool && !g_cfg.webSearch) {
+                } else if (webTool && !j->cfgWebSearch) {
                     /* 关闭态的三重防线之一 (tools 数组已剔除+提示词无目录行, 此处兜底模型
                        拿旧上下文仍调用): 拒绝回执写成可恢复指引 (dsh 口径) */
                     err = L"已拒绝: 联网搜索当前已在 Agent 设置中关闭。请告知用户到 接口设置 → "
@@ -4314,7 +4368,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     if (g_msgwnd) PostMessageW(g_msgwnd, XJS_AI_STREAM, 0, (LPARAM)j);
     /* 窗口不在前台 → Win10 通知 (任务完成/失败; 用户自己"停止"的 = 人在场, 不打扰;
      * notifyDone = Agent 设置里的开关, 关了就不打扰 — 权限询问提醒不受它约束恒发) */
-    if (!aborted && g_cfg.notifyDone && AiToastWanted()) {
+    if (!aborted && j->cfgNotifyDone && AiToastWanted()) {
         std::wstring body = (failed ? L"任务失败: " : L"任务完成: ") + ask;
         if (body.size() > 100) {
             body.resize(100);
