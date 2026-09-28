@@ -254,8 +254,9 @@ void CfgApplyActive();                     /* 活动档案 → 派生镜像 (切
 std::wstring CfgDisplayName(const AiProfile* p);   /* name || model || 未命名模型 (前端同款兜底) */
 std::wstring CfgGenProfileId();
 long long CfgClampTok(double v);           /* token 长度夹取 (0=未指定, 上限 1e8) */
-long long AiCtxWindowGuess();              /* 上下文窗口 token (档案 ctx 优先, 缺省按模型名推断 —
-                                              与前端用量条同表; 压缩压力判定与用量显示共用) */
+long long AiCtxWindowGuess(const std::wstring& modelW, long long ctx);   /* 上下文窗口 token (档案 ctx 优先,
+                                              缺省按模型名推断 — 与前端用量条同表; 纯函数: 调用方传
+                                              作业快照, worker 严禁裸读 g_cfg) */
 
 /* ==================== 多对话历史 (按会话拆分存储; 定义 ai_core.cpp) ====================
  * 索引 = 存储键 "历史索引" ([{"会话标题","文件名","id","时间"}], 只有元数据 — 打开面板零消息体载入);
@@ -498,6 +499,7 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
      * 裸读 std::wstring 否则与设置保存撕裂/UAF; keyA/hostA/pathA 同款口径)。
      * 作业中改设置不影响在跑的作业, 下一次发送起生效。 */
     std::wstring cfgModel;
+    long long cfgCtx = 0;      /* 档案上下文窗口 (压缩压力估算用; AiCtxWindowGuess 作业快照入参) */
     long long cfgMaxOut = 0;
     bool cfgImg = false, cfgVideo = false, cfgAudio = false;
     bool cfgReasoning = false, cfgWebSearch = true, cfgNotifyDone = true;
@@ -599,6 +601,8 @@ void SessLoadSkinOf(AiSess* s);                /* 皮肤五色 ← GetSkinJsonOf
 void SessRebuildSampleSeen(AiSess* s);         /* 会话级样本去重缓存 ← 聊天记录重建 (打开/切换
                                                   会话后调; msgs 空 = 清空) */
 void AbortSend(AiSess* s);
+void SessDetachJob(AiSess* s);   /* 发送中换会话 (new/load/del当前/clearHist) 的作业摘除: 移交孤儿表,
+                                    泵收尾不再把旧作业残段/检查点/样本缓存抄回目标会话 */
 void SessSaveConv(AiSess* s);
 void SessOpen(AiSess* s, XjsWindowToken tok, long long serial, int w, int h, float scale);
 void SessClose(AiSess* s);

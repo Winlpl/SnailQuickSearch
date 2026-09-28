@@ -143,7 +143,13 @@ std::wstring XjsWanText(long long n) {
 }
 
 void XjsCopyClipboard(const std::wstring& text) {
-    if (!g_hWnd || !OpenClipboard(g_hWnd)) return;
+    if (!g_hWnd) return;
+    /* 剪贴板是单互斥资源: 云剪贴板/剪贴板管理器/输入法可能正持有打开 — 单发 OpenClipboard
+       失败 = 静默没复制 ("点了没反应"), 失败路径小间隔重试一小段再放弃 */
+    HWND hw = g_hWnd;
+    BOOL opened = FALSE;
+    for (int i = 0; i < 10 && !(opened = OpenClipboard(hw)); i++) Sleep(20);
+    if (!opened) return;
     EmptyClipboard();
     size_t sz = (text.length() + 1) * sizeof(wchar_t);
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sz);
@@ -376,6 +382,7 @@ void XjsDeleteSelected() {
                            XjsTUtf8(L"通用词.取消") + "\"}]").c_str()) != 0) return;
     std::wstring list;
     for (int idx : idxs) {
+        if (XjsIsDriveRow(idx)) continue;   /* 驱动器行不可删 (与剪切/复制的剔除口径一致; 混入会让 SHFileOperation 整批静默失败) */
         std::wstring p = XjsItemPath(idx);
         if (!p.empty()) list += p + L'\0';
     }
@@ -843,11 +850,18 @@ std::vector<std::wstring> XjsSplitLines(const std::wstring& text) {
 #define XJS_AUTOSTART_TASK L"蜗牛快搜_autostart"
 
 static int XjsRunSchtasks(const std::wstring& args) {
+    /* exe 钉死 System32 绝对路径: lpApplicationName=NULL 时 CreateProcess 搜索序把
+       应用目录/当前目录排在 System32 之前, 同名 exe 可被劫持 (本程序恒管理员运行)。
+       命令行仍带裸名, 供 schtasks 自身回显/子进程语义照旧 */
+    wchar_t sysDir[MAX_PATH];
+    UINT sysLen = GetWindowsDirectoryW(sysDir, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH - 16) return -1;
+    lstrcatW(sysDir, L"\\System32\\schtasks.exe");
     /* 注意: 字面量先转 std::wstring 再拼接, 避免 const wchar_t* + const wchar_t* 双指针相加 */
     std::wstring cmd = std::wstring(L"schtasks.exe ") + args;
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(sysDir, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
         return -1;
     WaitForSingleObject(pi.hProcess, 15000);   /* 创建任务一般秒回, 15 秒兜底 */
     DWORD code = 1;

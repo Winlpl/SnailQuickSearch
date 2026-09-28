@@ -51,6 +51,12 @@ static int s_winCount = 0;
 static XjsSearchWindow* s_curWin = NULL;
 static XjsSearchWindow* s_pendingWin = NULL;   /* CreateWindowExW 期间待绑定的上下文 */
 static HWND s_hWndMain = NULL;
+/* 主窗指针 (isMain 持有者的镜像): Main() 唯一被引擎回调线程调用 (UI 线程也用),
+   禁止像旧实现那样在引擎线程遍历 s_wins — 与 UI 线程 DestroyAndFree 的
+   尾槽清 NULL/对象 delete 直接竞态 (NULL 槽解引用 / UAF)。UI 线程在 isMain
+   全部两个赋值点 (RegisterPending / MigrateMainRole) 同步维护, 引擎线程只读;
+   x64 对齐指针读写原子。 */
+static XjsSearchWindow* volatile s_mainWin = NULL;
 
 XjsSearchWindow::XjsSearchWindow() {
     colsDetails.Init(s_colsDetailsDef, 8);
@@ -74,9 +80,7 @@ void XjsSearchWindow::SetCur(XjsSearchWindow* w) { s_curWin = w; }
 HWND XjsSearchWindow::MainHwnd() { return s_hWndMain; }
 
 XjsSearchWindow* XjsSearchWindow::Main() {
-    for (int i = 0; i < s_winCount; i++)
-        if (s_wins[i]->isMain) return s_wins[i];
-    return NULL;
+    return s_mainWin;   /* 引擎回调线程安全: 单指针读, 不遍历 s_wins (见 s_mainWin 注释) */
 }
 
 /* 窗口名称唯一性校验 (重命名用): 除 except 外不得有同名窗口; 主窗保留名也视为占用 */
@@ -112,6 +116,7 @@ void XjsSearchWindow::RegisterPending(bool main, int profileSlot) {
     if (s_winCount >= (int)(sizeof(s_wins) / sizeof(s_wins[0]))) return;   // 表满: 拒绝再开 (调用方 g_hWnd 为空即静默放弃)
     XjsSearchWindow* w = new XjsSearchWindow();
     w->isMain = main;
+    if (main) s_mainWin = w;
     w->uiIndex = main ? 0 : profileSlot;   /* 档案槽持久绑定: 关窗档案保留, ☰菜单可按槽位重建窗口。
                                               (曾用只增计数器/存活序两版, 都有编号漂移问题, 2026-09-17 定案) */
     w->name = main ? XJS_MAIN_WIN_NAME : XjsGenerateWindowName();   /* 主窗固定名, 其余默认 GUID */
@@ -287,6 +292,7 @@ void XjsSearchWindow::MigrateMainRole() {
     if (!succ) return;   // 没有别的窗口 → 保持主窗身份 (走藏托盘)
     isMain = false;
     succ->isMain = true;
+    s_mainWin = succ;   /* 镜像同步 (引擎回调线程可能正持旧指针发消息) */
     s_hWndMain = succ->hWnd;
     XjsTrayRemove();
     XjsTrayAdd(succ->hWnd);
@@ -355,7 +361,12 @@ void XjsSearchWindow::DestroyAndFree() {
                作废旧令牌 (否则旧令牌命中压缩后占住该槽的别的窗口 = 串窗) */
             XjsPluginOnWindowsCompacted(i);
             if (s_curWin == this) SetCur(NULL);
-            delete this;
+            {   /* 持面板锁跨越拆毁: 位图型面板的插件工作线程可能在锁内做归属校验/交付拷贝
+                   (任意线程 API), 锁内看到的必是活对象 (CS 同线程可重入, 析构链无自锁死) */
+                XjsPreviewPanelLockEnter();
+                delete this;
+                XjsPreviewPanelLockLeave();
+            }
             return;
         }
     }

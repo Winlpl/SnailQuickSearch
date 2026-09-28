@@ -68,6 +68,16 @@ int main() {
         }
         out = AiTextToUtf8(u16, &enc);
         CHECK(W8(out.c_str()) == L"宽A" && enc == L"UTF-16LE", "utf16le-detect");
+        std::string u16be = "\xFE\xFF";   /* BE = 高字节在前 (曾按 LE 拼法解 → 全文乱码) */
+        {
+            std::wstring src = L"宽A";   /* 宽=0x5BBD → BE 字节序 5B BD; A=0x0041 → 00 41 */
+            for (wchar_t c : src) {
+                u16be.push_back((char)(((unsigned)c >> 8) & 0xFF));
+                u16be.push_back((char)((unsigned)c & 0xFF));
+            }
+        }
+        out = AiTextToUtf8(u16be, &enc);
+        CHECK(W8(out.c_str()) == L"宽A" && enc == L"UTF-16BE", "utf16be-detect");
         out = AiTextToUtf8(std::string("plain ascii"), &enc);
         CHECK(W8(out.c_str()) == L"plain ascii" && enc == L"UTF-8", "ascii-as-utf8");
         CHECK(AiB64Enc((const unsigned char*)"foo", 3) == "Zm9v", "b64-basic");

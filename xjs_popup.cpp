@@ -576,7 +576,13 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     drawRow(ch[j], rootW + pad, rootW + p->subW - pad, rootW + p->subW,
                             p->ySub[j], p->ySub[j + 1], j == p->hoverSub, false);
             }
-            p->rt->EndDraw();
+            HRESULT hr = p->rt->EndDraw();
+            if (hr == (HRESULT)D2DERR_RECREATE_TARGET) {
+                /* 设备丢失: RT+画刷全部释放下帧重建 (同输入对话框/询问框口径, 漏了 = 菜单
+                   在坏目标上每帧绘制失败, 停留在空白/残影直到点外关闭) */
+                XjsPopupFreeResources(p);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1643,6 +1649,22 @@ bool XjsLineEdit::Wheel(int delta, bool horizontal, const XjsRect& area, XjsForm
     return true;
 }
 
+/* 系统光标 (CreateCaret: 线程级单实例, 实际挂在最后一次 CreateCaret 的窗口上) 的归属记账。
+   曾用每窗字段 g_sysCaretMade 承载 — 该宏按 Cur() 解析, 输入对话框/设置窗路径下 Cur 与
+   实际挂光标的窗口无关: 建了光标却记到别的窗的标记上 (销毁判定落空/写错窗) */
+static HWND s_sysCaretWnd = NULL;
+
+bool XjsSysCaretEnsure(HWND hwnd) {
+    if (s_sysCaretWnd == hwnd) return true;
+    s_sysCaretWnd = CreateCaret(hwnd, (HBITMAP)NULL, 1, 1) ? hwnd : NULL;   /* 换窗挂靠: 旧光标被 CreateCaret 隐式销毁 */
+    return s_sysCaretWnd != NULL;
+}
+
+void XjsSysCaretDestroy(HWND hwnd) {
+    if (s_sysCaretWnd == hwnd) { DestroyCaret(); s_sysCaretWnd = NULL; }
+    else if (s_sysCaretWnd && !IsWindow(s_sysCaretWnd)) { DestroyCaret(); s_sysCaretWnd = NULL; }   /* 挂靠窗口已亡: 兜底清理 */
+}
+
 void XjsLineEdit::UpdateImeAnchor(HWND hwnd, const XjsRect& area, XjsFormat* fmt) {
     if (!hwnd) return;
     POINT p;
@@ -1661,8 +1683,7 @@ void XjsLineEdit::UpdateImeAnchor(HWND hwnd, const XjsRect& area, XjsFormat* fmt
         p = { (LONG)(area.left + cx - scroll), (LONG)(area.top + li * XjsEdLineH(fmt) - scrollY) };
     }
     /* 隐藏系统光标作位置源 (1px 永不 Show; TSF 兼容层据此定位组字/候选窗) */
-    if (!g_sysCaretMade && CreateCaret(hwnd, (HBITMAP)NULL, 1, 1)) g_sysCaretMade = true;
-    if (g_sysCaretMade) SetCaretPos(p.x, p.y);
+    if (XjsSysCaretEnsure(hwnd)) SetCaretPos(p.x, p.y);
     HIMC himc = ImmGetContext(hwnd);
     if (!himc) return;
     COMPOSITIONFORM cf = {};
@@ -2028,7 +2049,7 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         case WM_DESTROY: {
             XjsCaretBlink::DetachWindow(hwnd);   /* 退登记 + 停表, 之后窗口不再收 WM_TIMER */
-            if (g_sysCaretMade) { DestroyCaret(); g_sysCaretMade = false; }   /* 光标挂在本窗口上, 随窗清理 */
+            XjsSysCaretDestroy(hwnd);   /* 光标挂在本窗口上, 随窗清理 (归属按 hwnd 记账) */
             if (s.rt) { s.rt->Release(); s.rt = NULL; }
             XjsInputFreeBrushes();
             if (s.tfDesc) { s.tfDesc->Release(); s.tfDesc = NULL; }
@@ -2412,7 +2433,15 @@ int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, cons
        同下标路径打开文件)。作用域钉住入口窗, 泵毕恢复 */
     XjsWindowScope scope(XjsSearchWindow::Cur());
     MSG m;
-    while (s.open && GetMessageW(&m, NULL, 0, 0) > 0) {
+    while (s.open) {
+        /* 标准模态泵口径: WM_QUIT 必须回投给外层循环 (泵里吞掉 = 主循环永远收不到退出,
+           进程成僵尸; 触发链 = owner=设置窗的询问框开着时走托盘退出, 泵内分发退出 →
+           主窗 WM_DESTROY PostQuitMessage)。GetMessageW 返回 0 即 WM_QUIT */
+        BOOL gm = GetMessageW(&m, NULL, 0, 0);
+        if (gm <= 0) {
+            if (gm == 0) PostQuitMessage((int)m.wParam);
+            break;
+        }
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }

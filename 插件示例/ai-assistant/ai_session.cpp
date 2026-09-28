@@ -39,6 +39,16 @@ void SessLoadSkinOf(AiSess* s) {
 
 std::vector<AiJob*> s_orphans;   /* 会话已关而流未完的作业 (泵里清扫 join) */
 
+/* 会话份 msgs 条数上限 (与落库 AI_MSG_MAX 同口径, 从头部整轮裁): 内存不裁 = 长会话无界增长,
+   且落库裁 200 后重开面板视图与关面板前不一致 */
+void SessTrimMsgs(std::vector<AiMsg>& msgs) {
+    if (msgs.size() <= AI_MSG_MAX) return;
+    size_t cut = msgs.size() - AI_MSG_MAX;
+    while (cut < msgs.size() && msgs[cut].role != 0) cut++;   /* 对齐轮边界 (整轮保留/整轮裁掉) */
+    if (cut >= msgs.size()) { msgs.clear(); return; }
+    msgs.erase(msgs.begin(), msgs.begin() + cut);
+}
+
 void AbortSend(AiSess* s) {
     if (!s->job) return;
     AiJob* j = s->job;
@@ -46,6 +56,17 @@ void AbortSend(AiSess* s) {
     EnterCriticalSection(&j->cs);
     if (j->hReq) { WinHttpCloseHandle(j->hReq); j->hReq = NULL; }   /* 并发关句柄 = 打断阻塞读 */
     LeaveCriticalSection(&j->cs);
+}
+
+/* 发送中换会话 (new/load/del 当前/clearHist) 的作业摘除: 移交孤儿表 (泵清扫 join+delete,
+ * 不触碰会话)。让在跑作业照常走到泵收尾分支 = 把旧作业残段/检查点/样本缓存抄进目标会话
+ * 并落盘 (收尾分支不知道会话已换; SessClose 同款口径) */
+void SessDetachJob(AiSess* s) {
+    if (!s->job) return;
+    AbortSend(s);
+    s_orphans.push_back(s->job);
+    s->job = NULL;
+    s->sending = false;   /* 作业已移交, 会话不停留发送态 (复位点口径同 SessClose) */
 }
 
 void SessSaveConv(AiSess* s) {
@@ -86,6 +107,8 @@ void SessClose(AiSess* s) {
                              重开面板后停止钮指向空作业永远无效、输入也被 sending 闸封死 */
     s->msgs.clear();
     s->sampleSeen.clear();   /* 关闭 AI 助手 = 清空会话级样本去重缓存 (2026-09-27 用户口径) */
+    s->ckpt.clear();         /* 检查点同款: 旧会话摘要不得灌进重开后的新对话 (new/load/delturn 已清, 唯独漏了关面板) */
+    s->ckptCovered = 0;
     s->curId = 0;
     WebSessionDestroy(s);
 }
@@ -150,6 +173,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     um.text = text;
     um.atts = std::move(atts);
     s->msgs.push_back(um);
+    SessTrimMsgs(s->msgs);
     WebTouch(s);
     /* 请求要素快照 (线程只读这些; 请求体每轮在 worker 构建 — input 随工具往返增长) */
     AiJob* j = new AiJob();
@@ -206,6 +230,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     /* Agent 行为/能力快照 (g_cfg 全库无锁, worker 严禁裸读 — 与 keyA/hostA/pathA 同口径;
      * 作业中改设置不影响在跑的作业) */
     j->cfgModel = g_cfg.model;
+    j->cfgCtx = g_cfg.ctx;
     j->cfgMaxOut = g_cfg.maxOut;
     j->cfgImg = g_cfg.img;
     j->cfgVideo = g_cfg.video;
@@ -432,6 +457,7 @@ static void PumpStreams() {
             }
             s.sending = false;
             WebTouch(&s);
+            SessTrimMsgs(s.msgs);
             s.curId = HistUpsert(s.curId, s.msgs);
             histChanged = true;
             s.job = NULL;

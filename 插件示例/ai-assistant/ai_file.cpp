@@ -38,8 +38,12 @@ bool FilePathOk(const std::wstring& p) {
     return true;
 }
 
-static std::wstring NormSlash(std::wstring p) {   /* 正斜杠归一 (UNC 的 \\ 不受影响) */
+static std::wstring NormSlash(std::wstring p) {   /* 正斜杠归一 (UNC 的 \\ 不受影响) + 去尾分隔符 */
     for (auto& c : p) if (c == L'/') c = L'\\';
+    /* 尾随 '\' 剥掉 (盘根 "C:\" 与 UNC 根除外): 带尾分隔符时 FileNameOf 返回空串 =
+       copy/move 的"目标已存在"误报 + SHFileOperation 按"作用于目录内容"语义平铺,
+       rename 的 from 同失真 (三路共用此归一, 一处收口) */
+    while (p.size() > 3 && p.back() == L'\\') p.pop_back();
     return p;
 }
 
@@ -860,6 +864,14 @@ static std::wstring ShOpOne(UINT func, const std::wstring& from, const std::wstr
 }
 
 static std::wstring MkdirDeep(const std::wstring& path) {
+    /* UNC (\\server\share\...) 不能逐级建: "\\server\" 不是可创建目录, CreateDirectoryW
+       报 ERROR_INVALID_NAME — 服务器/共享必须已存在, 直接对完整路径建一次 */
+    if (path.rfind(L"\\\\", 0) == 0) {
+        if (!CreateDirectoryW(path.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+            return L"无法创建 " + path + L" (错误码 " + std::to_wstring(GetLastError()) +
+                   L"; 网络路径要求 服务器/共享 已存在)";
+        return L"";
+    }
     std::wstring cur;
     for (size_t i = 0; i < path.size(); i++) {
         wchar_t c = path[i];

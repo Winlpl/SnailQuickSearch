@@ -885,6 +885,10 @@ void XjsListRender() {
     /* scrollTop 越界 (缩放下调/跨屏 DPI 降低改行高后未钳制的偏移) 时 XjsRowAtY 返回 -1:
        不钳则循环从 -1 跑到 count-1, 负下标先传进引擎, 且视口外每行照常取数 = 大结果集整帧卡死 */
     if (first < 0) first = 0;
+    /* 正向越界同理: first/last 双 -1 兜底后 first=0/last=count-1 = 全量循环, 450 万行逐行
+       取数每帧秒级 (XjsSyncViewport 的 DPI 自愈分支不经过 WM_SIZE 的钳制路径)。钳到末行 =
+       行矩形按巨大 scrollTop 平移到视口外, 裁剪框内整帧空白, 不再逐行取数 */
+    if (first >= XjsPaintCount()) { first = XjsPaintCount() - 1; last = first; }
     /* 可见区间回写: ICON_ASK 闸门据此放行"正在显示的表项" (图标线程只读) */
     g_visFirst = first;
     g_visLast = last;
@@ -1171,26 +1175,10 @@ static void XjsTrackGestureEnd() {
    双击的第二下按下以 WM_LBUTTONDBLCLK 到达 (不走 WM_LBUTTONDOWN), 主窗双击分支也调这里,
    否则滚动条上双击落进"双击打开文件" (2026-09-22 实锤) */
 bool XjsListScrollMouseDown(POINT pt) {
-    /* 纵向 */
-    if (XjsPtIn(g_layout.vtrack, pt)) {
-        float thumbY = 0, thumbH = 0;
-        double maxScroll = 0;
-        if (XjsVThumbGeom(&thumbY, &thumbH, &maxScroll)) {
-            if (pt.y >= thumbY && pt.y <= thumbY + thumbH) {
-                g_scrollGrab = (float)pt.y - thumbY;
-            } else {
-                /* 轨道空白: 翻一页起步, 按住连发 (步长 = 一屏, 不是滚动范围); 不设抓取点 = 移动不拖拽 */
-                s_trackDir = pt.y < thumbY ? -1 : 1;
-                XjsScrollTo(g_scrollTop + s_trackDir * (double)XjsListViewHeight());
-                s_trackPt = pt;
-                SetTimer(g_hWnd, ID_TIMER_SBTRACK, 400, NULL);
-            }
-            g_dragScroll = true;
-            SetCapture(g_hWnd);
-            return true;
-        }
-    }
-    /* 横向滚动条 (同渲染口径: 仅列表视图; 详情视图 ClampHScroll 恒归零, 命中了也是死拖) */
+    /* 横向滚动条先判 (同渲染口径: 仅列表视图; 详情视图 ClampHScroll 恒归零, 命中了也是死拖):
+       纵向轨道 (底 = list.bottom-6) 与横向轨道带 (顶 ≈ list.bottom-13, 含 ±2 容差) 在右端
+       重叠 ~5px — 先判纵向会把横条右端上半误吞成"纵向翻页连发", 横滚到最右后拖不动 thumb。
+       XjsHThumbGeom 对无横向溢出返回 false, 自然落回纵向 */
     if (g_viewMode == VM_LIST) {
         float thumbX = 0;
         double thumbW = 0, smax = 0;
@@ -1209,6 +1197,25 @@ bool XjsListScrollMouseDown(POINT pt) {
                 XjsSearchWindow::Cur()->Invalidate();
             }
             g_dragHScroll = true;
+            SetCapture(g_hWnd);
+            return true;
+        }
+    }
+    /* 纵向 */
+    if (XjsPtIn(g_layout.vtrack, pt)) {
+        float thumbY = 0, thumbH = 0;
+        double maxScroll = 0;
+        if (XjsVThumbGeom(&thumbY, &thumbH, &maxScroll)) {
+            if (pt.y >= thumbY && pt.y <= thumbY + thumbH) {
+                g_scrollGrab = (float)pt.y - thumbY;
+            } else {
+                /* 轨道空白: 翻一页起步, 按住连发 (步长 = 一屏, 不是滚动范围); 不设抓取点 = 移动不拖拽 */
+                s_trackDir = pt.y < thumbY ? -1 : 1;
+                XjsScrollTo(g_scrollTop + s_trackDir * (double)XjsListViewHeight());
+                s_trackPt = pt;
+                SetTimer(g_hWnd, ID_TIMER_SBTRACK, 400, NULL);
+            }
+            g_dragScroll = true;
             SetCapture(g_hWnd);
             return true;
         }

@@ -139,6 +139,12 @@ static void TestHtmlToText() {
     /* 纯脚本页 → 空正文 */
     WebHtmlToText("<html><head><script>var x=1;</script></head><body></body></html>", &out);
     CHECK(out.empty(), "html_text 无正文空输出");
+    /* 前缀命中但标签名不同的未知变体 (`<scriptx`): 只剥标签本身, 不吞整页剩余内容
+     * (曾按前缀短路找 </scriptx 落空 → i=to 静默吞掉其后全部正文) */
+    WebHtmlToText("<div>前文</div><scriptx attr=\"1\">not a script</scriptx><div>后文</div>", &out);
+    std::wstring wx = W8(out.c_str());
+    CHECK(Contains(wx, L"前文") && Contains(wx, L"not a script") && Contains(wx, L"后文"),
+          "html_text 未知变体标签不吞正文");
 }
 
 /* ---------- AiCapUtf8HeadTail (readCapKB 默认 30 → 头 24576 + 尾 6144) ---------- */

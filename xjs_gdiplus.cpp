@@ -51,6 +51,9 @@ struct GdiLayout {
     float maxW = 0, maxH = 0;
     int wrap = -1;              /* 覆盖格式的换行 (-1 = 随格式) */
     bool ellipsis = false;
+    int spMethod = -1;          /* 覆盖格式的行距 (-1 = 随格式; 同 wrap 先例 — 曾直接写穿共享
+                                   GdiFormat 本体, 多行编辑器每帧把该格式的行距永久改成 UNIFORM) */
+    float sp = 0, spBase = 0;
     std::vector<std::pair<XjsTextRange, void*>> effects;      /* 画刷包装 (XjsSolidBrush*) → 颜色 */
     std::vector<std::pair<XjsTextRange, bool>> underlines;
 };
@@ -208,6 +211,20 @@ static float GdiLineHeight(GdiFormat* f, HDC dc) {
     TEXTMETRICW tm = {};
     GetTextMetricsW(dc, &tm);
     return (float)(tm.tmHeight + tm.tmExternalLeading);
+}
+
+/* 布局级覆盖 (行距/换行/省略号) 折算进临时格式: 覆盖只影响本布局 (与 D2D 后端语义一致) */
+static void GdiLayFmtOf(GdiLayout* L, GdiFormat* tmp) {
+    if (L->spMethod >= 0) { tmp->spacingMethod = L->spMethod; tmp->spacing = L->sp; tmp->baseline = L->spBase; }
+    if (L->wrap >= 0) tmp->wrap = L->wrap;
+    tmp->ellipsis = L->ellipsis || tmp->ellipsis;
+}
+
+/* 布局行高 (随布局级行距覆盖; 命中/度量/绘制行高必须同源) */
+static float GdiLayLineHeight(GdiLayout* L, HDC dc) {
+    GdiFormat tmp = *L->fmt;
+    GdiLayFmtOf(L, &tmp);
+    return GdiLineHeight(&tmp, dc);
 }
 
 /* 框内垂直对齐偏移 (D2D 语义: 正文块相对框顶偏移 "框高−块高" 的 0/½/1 倍)。
@@ -668,8 +685,7 @@ static void GpDrawTextLay(XjsRt* rt, XjsPoint2 org, XjsTextLayout* l, XjsBrush* 
     HDC dc = DrawDC(s);
     XjsRect r = InCur(s, XjsRectF(org.x, org.y, org.x + L->maxW, org.y + L->maxH));
     GdiFormat tmp = *L->fmt;
-    if (L->wrap >= 0) tmp.wrap = L->wrap;
-    tmp.ellipsis = L->ellipsis || tmp.ellipsis;
+    GdiLayFmtOf(L, &tmp);
     GdiDrawString(dc, L->text, &tmp, r, ToCOLORREF(sb->c));
     /* 效果范围按布局自己的格式画 (叠画子串/下划线) */
     if (!L->effects.empty() || !L->underlines.empty()) {
@@ -868,19 +884,25 @@ static void GpRoundRectGeo(const XjsRoundedRect& r, XjsGeo** out) {
     *out = new XjsGeo(g);
 }
 static void GpFillGeoIntersectRect(XjsRt* rt, XjsGeo* geo, const XjsRect& r, XjsBrush* b) {
-    /* 矩形 ∩ 圆角求交填充 (toast 色条/进度条端头跟随圆角): 裁剪到路径再填充 */
+    /* 矩形 ∩ 圆角求交填充 (toast 色条/进度条端头跟随圆角): 裁剪到路径再填充。
+       透明度组内: geo 路径是调用方按绝对坐标建的, 组内平移只该作用在 Graphics 上 —
+       曾只对矩形 InCur 平移而路径不动, 求交恒空集 = GDI+ 模式 toast 进出场动画期
+       色条/进度条整段消失 (D2D 后端 PushLayer 无此语义, 单边漏改) */
     GpSurface* s = AsSurf(rt);
     GdiGeo* gg = geo ? static_cast<GdiGeo*>(geo->h) : NULL;
     Gdiplus::Brush* br = FillBrushOf(b);
     Gdiplus::Graphics* g = DrawGfx(s);
     if (!gg || !br || !g) return;
-    XjsRect cr = InCur(s, r);
-    Gdiplus::GraphicsPath band;
-    band.AddRectangle(ToGpRect(cr));
     Gdiplus::GraphicsState stt = g->Save();
+    if (!s->alphas.empty()) {
+        const XjsRect& o = s->alphas.back().r;
+        g->TranslateTransform(-o.left, -o.top);   /* band/路径/填充三方同乘一个世界变换, 坐标系归一 */
+    }
+    Gdiplus::GraphicsPath band;
+    band.AddRectangle(ToGpRect(r));
     g->SetClip(&band, Gdiplus::CombineModeReplace);
     g->SetClip(gg->path, Gdiplus::CombineModeIntersect);
-    g->FillRectangle(br, ToGpRect(cr));
+    g->FillRectangle(br, ToGpRect(r));
     g->Restore(stt);
 }
 static void GpFreeGeo(void* n) {
@@ -954,7 +976,9 @@ static HRESULT GpLayoutMetrics(XjsTextLayout* l, XjsTextMetrics* m) {
     if (!dc) dc = DrawDC(s_curSurf);
     if (!dc) return E_FAIL;
     HFONT of = (HFONT)SelectObject(dc, L->fmt->font);
-    int wrap = L->wrap >= 0 ? L->wrap : L->fmt->wrap;
+    GdiFormat ef = *L->fmt;
+    GdiLayFmtOf(L, &ef);   /* 布局级覆盖随度量生效 (行距曾只随格式本体 = SetLineSpacing 后度量不等绘制) */
+    int wrap = ef.wrap;
     float wdt = 0, hgt = 0;
     if (wrap == XJS_WRAP_NONE) {
         SIZE sz = {};
@@ -965,10 +989,10 @@ static HRESULT GpLayoutMetrics(XjsTextLayout* l, XjsTextMetrics* m) {
         /* 多行度量与 GdiDrawMultiLine 严格同口径 (同一 GdiWrapLines + 混排测宽):
            UNIFORM 行距下高度=行数×行距 (与 D2D UNIFORM 一致, toast 卡高/md 块高/设置行高都靠它);
            词换行/字符级换行共用同一拆行实现, 绘制与度量不再两套口径 */
-        auto lines = GdiWrapLines(dc, L->fmt, L->text, L->maxW);
+        auto lines = GdiWrapLines(dc, &ef, L->text, L->maxW);
         for (auto& ln : lines)
             wdt = xf_max(wdt, GdiMixedExtent(dc, L->fmt, ln.c_str(), (int)ln.size()));
-        hgt = GdiLineHeight(L->fmt, dc) * (float)lines.size();
+        hgt = GdiLineHeight(&ef, dc) * (float)lines.size();
     }
     SelectObject(dc, of);
     *m = { 0, 0, wdt, wdt, hgt };
@@ -977,8 +1001,10 @@ static HRESULT GpLayoutMetrics(XjsTextLayout* l, XjsTextMetrics* m) {
 static void GpLayoutSetWrap(XjsTextLayout* l, int w)          { AsLay(l)->wrap = w; }
 static void GpLayoutSetCharEllipsis(XjsTextLayout* l)         { AsLay(l)->ellipsis = true; }
 static void GpLayoutSetLineSpacing(XjsTextLayout* l, int m2, float s, float b2) {
-    GdiFormat* f = AsLay(l)->fmt;
-    f->spacingMethod = m2; f->spacing = s; f->baseline = b2;
+    /* 写布局级覆盖 (GdiLayFmtOf 消费), 禁写共享格式本体 — 格式是多布局共享的 */
+    AsLay(l)->spMethod = m2;
+    AsLay(l)->sp = s;
+    AsLay(l)->spBase = b2;
 }
 static bool GpLayoutHitTest(XjsTextLayout* l, UINT32 idx, BOOL trailing, float* x, float* y, XjsHitTestMetrics* m) {
     /* 行内编辑 (NO_WRAP): 光标 x = 前缀宽度 */
@@ -991,7 +1017,7 @@ static bool GpLayoutHitTest(XjsTextLayout* l, UINT32 idx, BOOL trailing, float* 
     if (x) *x = GdiMixedExtent(dc, L->fmt, L->text.c_str(), (int)idx);
     if (y) *y = 0;
     SelectObject(dc, of);
-    if (m) *m = { 0, 0, 0, (float)GdiLineHeight(L->fmt, dc), idx, 0 };
+    if (m) *m = { 0, 0, 0, (float)GdiLayLineHeight(L, dc), idx, 0 };
     return true;
 }
 static HRESULT GpLayoutHitRange(XjsTextLayout* l, UINT32 pos, UINT32 len, float ox, float oy, XjsHitTestMetrics* out, UINT32 max, UINT32* returned) {
@@ -1006,7 +1032,7 @@ static HRESULT GpLayoutHitRange(XjsTextLayout* l, UINT32 pos, UINT32 len, float 
     float p1 = GdiMixedExtent(dc, L->fmt, L->text.c_str(), (int)pos);
     float p2 = GdiMixedExtent(dc, L->fmt, L->text.c_str() + pos, (int)len);
     SelectObject(dc, of);
-    out[0] = { ox + p1, oy, p2, (float)GdiLineHeight(L->fmt, dc), pos, len };
+    out[0] = { ox + p1, oy, p2, (float)GdiLayLineHeight(L, dc), pos, len };
     if (returned) *returned = 1;
     return S_OK;
 }
@@ -1024,7 +1050,7 @@ static bool GpLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, BO
         if (x < one) {
             if (trail) *trail = (x > pre + one / 2) ? TRUE : FALSE;
             if (inside) *inside = TRUE;
-            if (m) *m = { pre, 0, one, (float)GdiLineHeight(L->fmt, dc), i, 1 };
+            if (m) *m = { pre, 0, one, (float)GdiLayLineHeight(L, dc), i, 1 };
             SelectObject(dc, of);
             return true;
         }
@@ -1033,7 +1059,7 @@ static bool GpLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, BO
     }
     if (trail) *trail = FALSE;
     if (inside) *inside = TRUE;
-    if (m) *m = { pre, 0, 0, (float)GdiLineHeight(L->fmt, dc), (UINT32)L->text.size(), 0 };
+    if (m) *m = { pre, 0, 0, (float)GdiLayLineHeight(L, dc), (UINT32)L->text.size(), 0 };
     SelectObject(dc, of);
     return true;
 }

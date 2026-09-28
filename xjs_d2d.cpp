@@ -94,6 +94,15 @@ void XjsDeviceDiscard() {
     if (cur) XjsDeviceDiscardCtx(*cur);
 }
 
+/* 非 XjsSearchWindow 的 RT (设置窗 s_set.rt 等) 销毁前调用: 摘掉 s_layers 里以它为键的
+   透明度层 (XjsDeviceDiscardCtx 只覆盖搜索窗)。漏摘 = 键成已释放堆地址, 地址被新 RT 复用时
+   PushLayer 拿旧 RT 域的 layer → EndDraw WRONG_RESOURCE_DOMAIN 丢整帧 (设置窗 EndDraw
+   返回值无人检查, 连搜索窗的自愈网都不覆盖) + 泄漏一个 ID2D1Layer */
+void XjsLayersDropRt(XjsRt* rt) {
+    auto it = s_layers.find(rt);
+    if (it != s_layers.end()) { if (it->second) it->second->Release(); s_layers.erase(it); }
+}
+
 /* ==================== 皮肤 (正式版 skin-*.css :root 变量, 同名同义) ==================== */
 
 /* 内置默认 = skin-dark.css 值 (皮肤文件缺失或单变量缺省时的兜底) */

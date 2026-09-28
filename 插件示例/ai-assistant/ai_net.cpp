@@ -213,10 +213,21 @@ static void StripTags(const std::string& s, size_t from, size_t to, int blockMod
                 size_t nameEnd = s.find_first_of(" \t\r\n>/", i + 2);
                 std::string tag = s.substr(i + 1, (nameEnd == std::string::npos ? to : nameEnd) - (i + 1));
                 for (auto& c : tag) c = (char)tolower((unsigned char)c);
-                size_t e = FindI(s, ("</" + tag).c_str(), i + 2);
-                if (e == std::string::npos) { i = to; continue; }
-                size_t eEnd = s.find('>', e);
-                i = (eEnd == std::string::npos || eEnd > to) ? to : eEnd + 1;
+                /* 标签名精确等值才走整块剔除 (曾按前缀短路: `<scriptx` 这类未知变体取 tag=
+                   "scriptx", 全文找不到 </scriptx → i=to 把整页剩余内容静默吞掉) */
+                bool raw = (tag == "script" || tag == "style" || tag == "noscript" ||
+                            tag == "template" || tag == "svg");
+                if (raw) {
+                    size_t e = FindI(s, ("</" + tag).c_str(), i + 2);
+                    if (e == std::string::npos) { i = to; continue; }
+                    size_t eEnd = s.find('>', e);
+                    i = (eEnd == std::string::npos || eEnd > to) ? to : eEnd + 1;
+                    continue;
+                }
+                /* 未知变体: 按普通标签剥除 (落到下方 find('>') 分支语义), 只吞这一个标签 */
+                size_t e2 = s.find('>', i);
+                if (e2 == std::string::npos || e2 >= to) break;
+                i = e2 + 1;
                 continue;
             }
             size_t e = s.find('>', i);
@@ -703,6 +714,20 @@ static bool HttpGetInner(AiJob* j, const std::wstring& url, bool noRedirect, std
                     if (!WinHttpReadData(hr, buf, want, &rd) || !rd) break;
                     out8->append(buf, rd);
                 }
+                /* 到封顶时把尾部回退到最后一个 UTF-8 序列起点: 截断落在多字节中间会让
+                   AiTextToUtf8 的严格校验对整份缓冲失败 → 全页按 ANSI 误转 = 全文乱码
+                   (外溢文件同乱, 续读无法挽回)。只影响 >2MB 的 UTF-8 页 (中文页约 2/3 概率) */
+                if (out8->size() > MAXD) {
+                    size_t n = out8->size();
+                    size_t cut = n;
+                    for (size_t back = 1; back <= 3 && back < n; back++) {
+                        unsigned char c = (unsigned char)(*out8)[n - back];
+                        if ((c & 0xC0) == 0x80) continue;   /* 续字节: 继续回退 */
+                        cut = n - back + ((c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1);
+                        break;
+                    }
+                    if (cut < n && cut >= MAXD - 8) out8->resize(cut);   /* 起点异常(跨块>3)时保留原文不动 */
+                }
                 ok = true;   /* 拿到应答 (任何状态码) = 事实, 判断交调用方 */
             } else {
                 stopped = j && InterlockedCompareExchange(&j->abort, 0, 0) != 0;
@@ -769,11 +794,12 @@ static bool WebHostResolvesPublic(const std::wstring& url, std::wstring* why) {
     }
     std::wstring h = host;
     for (auto& c : h) c = (wchar_t)towlower(c);
-    static LONG wsaInit = 0;   /* getaddrinfo 前置要求; 进程生命周期初始化一次, 不清理 */
-    if (InterlockedCompareExchange(&wsaInit, 1, 0) == 0) {
+    /* WSAStartup 按引用计数, 每次进函数都调一次最简且正确: 曾用 CAS 只让首个线程初始化,
+       并发首抓的另一线程在对方 WSAStartup 返回前落到 GetAddrInfoW = WSANOTINITIALISED
+       (多窗同时首次联网才命中, 报错误导为"域名解析失败")。进程终身不 WSACleanup 口径不变 */
+    {
         WSADATA wd = {};
         if (WSAStartup(MAKEWORD(2, 2), &wd) != 0) {
-            InterlockedExchange(&wsaInit, 0);
             *why = L"网络子系统初始化失败";
             return false;
         }

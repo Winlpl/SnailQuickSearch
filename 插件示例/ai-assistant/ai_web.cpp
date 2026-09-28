@@ -134,6 +134,9 @@ std::wstring WebCfgJson() { return JDumpW(WebCfgValue()); }
 struct HCtx {
     std::wstring out;
     std::vector<int> blocks;   /* 块栈 (MD_BLOCKTYPE; LI 直下首段不再包 <p>, 段距由 li margin 表达) */
+    std::vector<char> pWrote;  /* 与 blocks 的 P 条目平行: 该 P 是否真的写过 <p> (松散列表的 P
+                                  md4c 整体跳过, leave 只在写过时才出 </p> — 曾无条件收口 =
+                                  游离 </p> 被解析成空 <p></p>, 段落粘连 + 短气泡判定失真) */
     std::vector<int> heads;    /* 打开的标题层级/任务完成标记 (闭标签用; md4c 不嵌套标题) */
     bool inCode = false;
     std::wstring codeRaw;      /* 代码块原文 (data-code 属性, 复制按钮用) */
@@ -168,10 +171,11 @@ static int HEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
     HCtx* c = (HCtx*)ud;
     switch (type) {
         case MD_BLOCK_P:
-            if (!c->blocks.empty() && c->blocks.back() == MD_BLOCK_LI) { c->blocks.push_back(type); break; }
+            if (!c->blocks.empty() && c->blocks.back() == MD_BLOCK_LI) { c->blocks.push_back(type); c->pWrote.push_back(0); break; }
             c->pStart = c->out.size();
             c->out += L"<p>";
             c->blocks.push_back(type);
+            c->pWrote.push_back(1);
             break;
         case MD_BLOCK_H: {
             int lvl = (int)((MD_BLOCK_H_DETAIL*)detail)->level;
@@ -251,7 +255,9 @@ static int HLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
     HCtx* c = (HCtx*)ud;
     switch (type) {
         case MD_BLOCK_P: {
-            if (!c->blocks.empty() && c->blocks.back() == MD_BLOCK_P) {
+            bool wrote = c->pWrote.empty() ? true : (c->pWrote.back() != 0);
+            if (!c->pWrote.empty()) c->pWrote.pop_back();
+            if (wrote && !c->blocks.empty() && c->blocks.back() == MD_BLOCK_P) {
                 c->out += L"</p>";
                 /* 加粗短句 (≤60 内部字符, 尾部最多一个冒号) 视为小标题 (参考实现 sub) */
                 if (c->out.size() > c->pStart + 12 &&
@@ -976,7 +982,9 @@ static bool WebEnsureEnv() {
             return S_OK;
         }
     };
-    hr = pfnCreateEnv(NULL, g_udfDir.c_str(), NULL, new EnvHandler());
+    EnvHandler* eh = new EnvHandler();
+    hr = pfnCreateEnv(NULL, g_udfDir.c_str(), NULL, eh);
+    eh->Release();   /* 交还初始引用: 成功 = loader AddRef 自留到 Invoke, 同步失败 = 对象就地析构 */
     if (FAILED(hr)) {
         g_envPending = false;
         g_noRuntime = true;
@@ -1217,15 +1225,27 @@ struct WebCtrlHandler : ICoreWebView2CreateCoreWebView2ControllerCompletedHandle
             c2->put_DefaultBackgroundColor(col);
             c2->Release();
         }
-        /* 桥: JS→C++ 命令 + 焦点同步 (GotFocus/LostFocus 各挂一份) + 导航/新窗拦截 */
-        ctx->web->add_WebMessageReceived(new WebMsgHandler(s), &ctx->msgTok);
+        /* 桥: JS→C++ 命令 + 焦点同步 (GotFocus/LostFocus 各挂一份) + 导航/新窗拦截。
+           登记后立即交还创建方初始引用: add_* 时 WebView2 已 AddRef 自留, 初始引用无人
+           Release = 处理器对象永不析构 (每次面板开/关泄一轮; remove_* 只归还 loader 那份) */
+        ICoreWebView2WebMessageReceivedEventHandler* mh = new WebMsgHandler(s);
+        ctx->web->add_WebMessageReceived(mh, &ctx->msgTok);
+        mh->Release();
         ctx->msgHooked = true;
-        ctrl->add_GotFocus(new WebFocusHandler(s), &ctx->focusTok);
-        ctrl->add_LostFocus(new WebFocusHandler(s), &ctx->focusTok2);
+        ICoreWebView2FocusChangedEventHandler* fh1 = new WebFocusHandler(s);
+        ctrl->add_GotFocus(fh1, &ctx->focusTok);
+        fh1->Release();
+        ICoreWebView2FocusChangedEventHandler* fh2 = new WebFocusHandler(s);
+        ctrl->add_LostFocus(fh2, &ctx->focusTok2);
+        fh2->Release();
         ctx->focusHooked = true;
-        ctx->web->add_NavigationStarting(new WebNavHandler(), &ctx->navTok);
+        ICoreWebView2NavigationStartingEventHandler* nh = new WebNavHandler();
+        ctx->web->add_NavigationStarting(nh, &ctx->navTok);
+        nh->Release();
         ctx->navHooked = true;
-        ctx->web->add_NewWindowRequested(new WebNewWinHandler(), &ctx->newTok);
+        ICoreWebView2NewWindowRequestedEventHandler* nw = new WebNewWinHandler();
+        ctx->web->add_NewWindowRequested(nw, &ctx->newTok);
+        nw->Release();
         ctx->newHooked = true;
         /* 定位 + 首页 (控制器就绪才亮子窗口 — 免白底闪帧) */
         WebSessionRect(s);
@@ -1239,7 +1259,9 @@ struct WebCtrlHandler : ICoreWebView2CreateCoreWebView2ControllerCompletedHandle
 static void WebCreateControllerFor(AiSess* s) {
     AiWebCtx* w = (AiWebCtx*)s->web;
     if (!w || !w->hwnd || w->ctrl || !g_webEnv) return;
-    g_webEnv->CreateCoreWebView2Controller(w->hwnd, new WebCtrlHandler(s));
+    WebCtrlHandler* ch = new WebCtrlHandler(s);
+    g_webEnv->CreateCoreWebView2Controller(w->hwnd, ch);
+    ch->Release();   /* 交还初始引用: 成功 = loader AddRef 自留到 Invoke, 同步失败 = 对象就地析构 */
 }
 
 /* 面板宿主窗口 (搜索窗) 前台判定 (挂起确认的系统通知闸): 任一面板宿主在前台 = 用户看得见
@@ -1770,7 +1792,9 @@ static bool FuzzyChildResolve(const std::wstring& cand, std::wstring* out) {
     DWORD a = GetFileAttributesW(parent.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return false;
     std::wstring want = NormFoldName(cand.substr(pos + 1));
-    if (want.size() < 3) return false;
+    if (want.size() < 3 || want.size() > 256) return false;   /* 超长候选跳过模糊校正层:
+        LCS 是 O(名长×want长) 全量 DP 且在本函数逐子项调用 — 粘连进来的超长 token 会把
+        UI 线程卡在枚举×DP 上 (候选来自模型输出, 长度不可信); 存在性梯子照常兜底 */
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((parent + (parent.back() == L'\\' ? L"*" : L"\\*")).c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -2227,7 +2251,10 @@ void WebCommand(AiSess* s, const Jv& msg) {
         for (auto& m : s->msgs) {
             if (m.role != 2) continue;
             for (auto& st : m.steps) {
-                if (st.state == 4 && st.kind != 11) {
+                /* kind 11=命令卡 13=file_op 卡: 都走 pendbar/eallow/edeny 挂起裁决通道 —
+                   曾只排除 11, open_file 策略卡与 file_op 卡同屏时点策略「允许」把挂起卡
+                   一起翻掉 = 常驻确认条消失, worker 无人放行 5 分钟超时按取消收场 */
+                if (st.state == 4 && st.kind != 11 && st.kind != 13) {
                     st.state = 3;
                     st.err = allow ? L"已允许文件操作, 本次回答后生效" : L"用户保持拒绝";
                 }
@@ -2362,7 +2389,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         return;
     }
     if (c == L"new") {
-        AbortSend(s);
+        SessDetachJob(s);   /* 发送中换会话: 在跑作业移交孤儿表 (照常收尾会把残段/检查点灌进新会话) */
         SessSaveConv(s);
         s->msgs.clear();
         s->usageHas = false;
@@ -2383,7 +2410,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
         unsigned long long id = (unsigned long long)(msg.Get(L"id") ? msg.Get(L"id")->num : 0);
         AiConv conv;
         if (!HistGet(id, conv)) return;   /* 按需读取: 会话正文此刻才从自己的文件载入 */
-        AbortSend(s);
+        SessDetachJob(s);   /* 发送中换会话: 在跑作业移交孤儿表 (照常收尾会污染被载入的会话文件) */
         SessSaveConv(s);
         s->msgs = std::move(conv.msgs);
         s->stepBase = (int)s->msgs.size();   /* 恢复的历史卡片不参与任何在途作业的步骤同步 */
@@ -2403,15 +2430,22 @@ void WebCommand(AiSess* s, const Jv& msg) {
     if (c == L"del") {
         unsigned long long id = (unsigned long long)(msg.Get(L"id") ? msg.Get(L"id")->num : 0);
         HistRemove(id);   /* 正文文件 + 索引条目一并删除 */
-        if (s->curId == id) { s->curId = 0; s->msgs.clear(); s->sampleSeen.clear(); WebTouch(s); WebSyncSession(s); }
+        if (s->curId == id) {
+            SessDetachJob(s);   /* 删的是当前会话: 在跑作业移交孤儿表 (否则收尾 HistUpsert 凭空造出幽灵会话) */
+            s->curId = 0; s->msgs.clear(); s->sampleSeen.clear(); s->ckpt.clear(); s->ckptCovered = 0;
+            WebTouch(s); WebSyncSession(s);
+        }
         WebSyncHist();
         return;
     }
     if (c == L"clearHist") {
+        SessDetachJob(s);   /* 全部会话已删: 在跑作业一并孤儿化 (同 del 当前会话口径) */
         HistClearAll();   /* 每个会话的正文文件 + 索引一并清掉 */
         s->curId = 0;
         s->msgs.clear();
         s->sampleSeen.clear();   /* 全部会话已删, 会话级去重缓存一并清 */
+        s->ckpt.clear();
+        s->ckptCovered = 0;
         s->usageHas = false;
         s->uPrompt = s->uCompletion = s->uTotal = s->uCacheHit = s->uCacheWrite = 0;
         s->uLastPrompt = s->uLastCompletion = s->uLastCacheHit = 0;
@@ -2527,7 +2561,9 @@ void WebCommand(AiSess* s, const Jv& msg) {
             xjs_engine* eng = xjs_GetDefaultEngine();
             for (const Jv& e : ps->arr) {
                 if (n >= 64) break;                        /* 单批上限 (余量留在前端下一轮) */
-                if (e.t != 3 || e.str.size() < 4) continue;
+                /* 短候选也要回条目 (ok=false): 曾按 size<4 跳过不回 — 前端 300ms 去抖对
+                   收不到结果的键永远重发, 直至节点重渲 (下限两端不一致: 前端 3 字符) */
+                if (e.t != 3 || e.str.empty()) continue;
                 std::wstring q;
                 int rf = ResolveClickablePath(eng, e.str, L"", &q);
                 picojson::object o;

@@ -1321,6 +1321,7 @@ static void XjsSetFreeMdDocs() {
 }
 
 static void XjsSetFreeResources() {
+    XjsLayersDropRt(s_set.rt);   /* 先摘 s_layers 条目再放 RT: 设置窗也弹 Toast (透明度层唯一使用方), 漏摘 = 键成悬垂堆地址 */
     if (s_set.rt) { s_set.rt->Release(); s_set.rt = NULL; }
     if (s_set.imgWechat) { s_set.imgWechat->Release(); s_set.imgWechat = NULL; }
     if (s_set.imgAlipay) { s_set.imgAlipay->Release(); s_set.imgAlipay = NULL; }
@@ -2995,7 +2996,11 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 return 0;
             }
             p->pressSide = -1;
-            if (p->pressAct && !p->rowsDirty) {
+            /* 待定消费/作废都在此一次性清零 (放 if 内曾残留: 行模型脏跳过回放的那次点击,
+               待定活到下一次无关松开 — 在原行 y 带内松开 = 隔山触发旧命令) */
+            int pendingAct = p->pressAct;
+            p->pressAct = 0;
+            if (pendingAct && !p->rowsDirty) {
                 /* 整行行 (选项/链接) 的松开回放要排除 侧栏/滚动条区 (与按下侧两个早退区同口径):
                    否则按住行文本水平拖到侧栏/滚动条上松开仍回放 = 皮肤/视图被误切换 (拖离=取消被破坏) */
                 RECT crcX; GetClientRect(hwnd, &crcX);
@@ -3003,9 +3008,9 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     float y = pt.y + p->scroll;
                     for (auto& card : p->cards)
                         for (auto& r : card.rows) {
-                            if (r.act != p->pressAct && r.act2 != p->pressAct) continue;
+                            if (r.act != pendingAct && r.act2 != pendingAct) continue;
                             if (y < r.y || y >= r.y + r.h) continue;
-                            bool second = (r.act2 != ACT_NONE && p->pressAct == r.act2);
+                            bool second = (r.act2 != ACT_NONE && pendingAct == r.act2);
                             /* 开关/按钮/胶囊/表格行: 须点在行尾控件上 (与按下同判, 第二钮判第二钮),
                                点行文本/输入格空白不触发 (表格行尤其如此: 行内大部分是输入框) */
                             if ((r.ctrl == CT_SWITCH || r.ctrl == CT_BUTTON || r.ctrl == CT_PILL || r.ctrl == CT_TROW) &&
@@ -3016,7 +3021,6 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                             break;
                         }
                 }
-                p->pressAct = 0;
             }
             return 0;
         }
@@ -3158,6 +3162,14 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 if (GetKeyState(VK_MENU) & 0x8000) mod |= MOD_ALT;
                 if (GetKeyState(VK_SHIFT) & 0x8000) mod |= MOD_SHIFT;
                 if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) mod |= MOD_WIN;
+                if (!mod) {
+                    /* 裸键禁止注册: RegisterHotKey(0 修饰键) 合法且会成功 — 全系统任意程序
+                       里该键被拦截 (按 F5=刷新失效), 而行语义是组合键。保持录制态等真正组合 */
+                    XjsToastShow(s_set.hwnd, XjsT(L"提示.快捷键需修饰键"), XTOAST_WARN, SS(1));
+                    p->rowsDirty = true;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
                 p->recHotkey = false;
                 /* 快捷键每窗: 写入 owner 的 hotkeyMod/Vk, 登记在主窗 hwnd (id = ID_HOTKEY_SHOW+档案槽) */
                 XjsSearchWindow* ow = XjsSetOwner();

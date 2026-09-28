@@ -2801,7 +2801,8 @@ static std::string InstrSnapshot() {
  * ("不可用/禁编造"规则本体在骨架搜索语法节, 快照只给清单)。全部为引擎只读查询, 工作线程可调。
  * 恒放请求尾部不放 instructions: 快照带秒级时间每请求必变, 混进前缀会灭掉 provider 前缀缓存。
  * filterCur = 发送时当前窗的选中筛选分类 (SendCurrent UI 线程快照进 AiJob; 分类表是引擎
- * DB 级进程共享, worker 直接读引擎)。调用方持 g_agentCs (WorkerMain 全程持锁), 读 g_agentRes 安全。 */
+ * DB 级进程共享, worker 直接读引擎)。g_agentRes 的读取在函数内短暂占 g_agentCs (UI 线程
+ * 持锁维护它), 其余为引擎只读查询。 */
 static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
     std::wstring s = L"\n## 运行环境快照 (每次请求实时采集, 时间与字段口径以此为准)\n";
     SYSTEMTIME st;
@@ -2844,10 +2845,17 @@ static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
     }
     s += L"- 已开启字段: " + (on.empty() ? std::wstring(L"(以上必建字段之外一个都没开)") : on) + L"\n";
     s += L"- 未开启字段: " + (off.empty() ? std::wstring(L"(无)") : off) + L"\n";
-    const char* ss = (g_agentRes && xjs_result_IsEffective(g_agentRes))
-                         ? xjs_result_GetSearchSettings(g_agentRes) : NULL;
-    if (ss && *ss)
-        s += L"- 搜索设置: " + W8(ss) + L" (首拼/全拼/大小写口径以此为准)\n";
+    /* g_agentRes 由 UI 线程在 g_agentCs 内维护 (AgentFetchFileIco 失效置 NULL/懒建):
+       本函数在 AgentRunTurn 构请求时不持 g_agentCs, 必须短暂占锁拷出设置串
+       (曾照旧注释裸读 — 与持锁写并发是数据竞争) */
+    {
+        EnterCriticalSection(&g_agentCs);
+        std::string ss8 = (g_agentRes && xjs_result_IsEffective(g_agentRes))
+                              ? xjs_result_GetSearchSettings(g_agentRes) : "";
+        LeaveCriticalSection(&g_agentCs);
+        if (!ss8.empty())
+            s += L"- 搜索设置: " + W8(ss8.c_str()) + L" (首拼/全拼/大小写口径以此为准)\n";
+    }
     /* 筛选器 (文件分类, 2026-09-27): 分类表 = 引擎 DB 级共享 (GetFilterJSON 的
      * [{名称,类型,后缀}] 只取名称+后缀展示, 后缀截断 — 模型只需传分类名);
      * 当前窗选中 = SendCurrent 快照。宿主分类表首项恒有「全部」(引擎清单可能不含)。
@@ -3838,8 +3846,9 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
     };
     applyCk(j->ckpt, covered);   /* 已有检查点恒应用 (纯减量) */
     if (!j->autoCompact) return;
-    /* 压力判定: 近端视图 + instructions + tools + 输出余量 ≥ 80% 窗口 */
-    long long win = AiCtxWindowGuess();
+    /* 压力判定: 近端视图 + instructions + tools + 输出余量 ≥ 80% 窗口
+       (窗口推断吃作业快照 — 曾裸读 g_cfg.model/ctx, worker 裸读 wstring = 与设置保存撕裂) */
+    long long win = AiCtxWindowGuess(j->cfgModel, j->cfgCtx);
     if (win <= 0) win = 128000;
     size_t est = AiTokEstHist(j->hist);
     est += AiTokEst8(InstrSnapshot());
@@ -3956,6 +3965,7 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
             repNote.clear();   /* 已随请求消费 */
             EnterCriticalSection(&j->cs);
             j->turnOutMs = GetTickCount64() - turnT0;   /* 速度 = 本轮输出 / 本轮耗时 (含首 token 等待) */
+            j->turnUsageTaken = false;   /* 每轮用量各取一次: 不复位 = 泵只累计第一轮, 后续轮 usage 全丢 */
             LeaveCriticalSection(&j->cs);
             if (!okTurn) failed = true;
             if (aborted) break;

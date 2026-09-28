@@ -34,6 +34,7 @@ static int XJS_PLUGIN_CALL XjsPlugin_Init(XjsPluginCtx* ctx, const XjsPluginHost
 }
 
 /* 在途/孤儿作业统一收尾 (abort → 并发关句柄打断读 → 宽限内 join) */
+static std::vector<AiJob*> s_abandoned;   /* 宽限到点 detach 的作业对象留活: worker 脱离后仍引用它收尾 */
 static void AbortAndJoinAll(ULONGLONG graceMs) {
     std::vector<AiJob*> all = s_orphans;
     s_orphans.clear();
@@ -47,18 +48,21 @@ static void AbortAndJoinAll(ULONGLONG graceMs) {
         LeaveCriticalSection(&j->cs);
     }
     for (AiJob* j : all) {
+        bool detached = false;
         if (j->th) {
             while (j->th->joinable()) {
                 EnterCriticalSection(&j->cs);
                 bool done = j->state != 0;
                 LeaveCriticalSection(&j->cs);
                 if (done) { j->th->join(); break; }
-                if (GetTickCount64() > deadline) { j->th->detach(); break; }   /* 宽限到点放弃 (进程将退) */
+                if (GetTickCount64() > deadline) { j->th->detach(); detached = true; break; }   /* 宽限到点放弃等收尾 */
                 Sleep(30);
             }
             delete j->th;
             j->th = NULL;
         }
+        if (detached) { s_abandoned.push_back(j); continue; }   /* worker 仍在跑且会解引用 j — delete = 写已释放内存
+                                                                   (OnHostGone 路径进程未必退出; 泄漏一个作业换确定性) */
         delete j;
     }
 }

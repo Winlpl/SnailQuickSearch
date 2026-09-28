@@ -423,10 +423,13 @@ static int ApiWindowCreate(XjsPluginCtx* ctx, XjsWindowToken inheritFrom,
     }
     XjsSearchWindow* from = XjsPluginApiWindow(ctx, inheritFrom, &e);   /* 尺寸继承发起窗 (0 = 主窗) */
     if (!from) return e;
+    int winsBefore = XjsSearchWindow::Count();   /* 16 窗上限被拒时 OpenNew 静默不建: 必须验数, 否则
+                                                    空白路径的 wantSlot 命中既有窗 = 把别的窗令牌当新建回 */
     {
         XjsWindowScope scope(from);
         XjsSearchWindow::OpenNew(slot);
     }
+    if (slot < 0 && XjsSearchWindow::Count() <= winsBefore) return XJS_PLUGIN_ERR_STATE;
     int wantSlot = (slot >= 0) ? slot : XjsUiProfileCount() - 1;   /* 新空白档案 = 追加的末槽 */
     XjsSearchWindow* nw = XjsSearchWindow::AtSlot(wantSlot);
     if (!nw) return XJS_PLUGIN_ERR_STATE;

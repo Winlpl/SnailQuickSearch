@@ -38,13 +38,15 @@ static LONG CALLBACK XjsVecStackLogger(PEXCEPTION_POINTERS ei) {
         if (c0 == 0x4001000A /*DBG_PRINTEXCEPTION_C*/ || c0 == 0x4001000B /*DBG_PRINTEXCEPTION_WIDE_STRING*/)
             return EXCEPTION_CONTINUE_EXECUTION;
     }
-    /* VEH 可在任意线程并发进入 (UI/引擎/钩子线程同时崩), 置位必须原子 */
-    if (InterlockedCompareExchange(&s_busy, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
+    /* 致命码过滤必须先于 s_busy 置位: VEH 收到每一个首次机会异常 (线程命名 0x406D1388 等良性
+       探测不在上面的 DBG 前置分支内), 先 CAS 再过滤会把 s_busy 永久停在 1 — 此后真崩溃全部
+       在闸外早退, 取证设施静默失效 (表象 = 崩溃后 startup_stack.txt 无线索) */
     DWORD code = ei->ExceptionRecord ? ei->ExceptionRecord->ExceptionCode : 0;
     if (!(code == 0xC0000005 || code == 0xC0000002 || code == 0xC0000409 ||
           code == 0xC00000FD || code == 0xC000001D || code == 0xC0000094))
         return EXCEPTION_CONTINUE_SEARCH;
-    s_busy = 1;
+    /* VEH 可在任意线程并发进入 (UI/引擎/钩子线程同时崩), 置位必须原子 */
+    if (InterlockedCompareExchange(&s_busy, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
     void* frames[32] = {};
     USHORT n = CaptureStackBackTrace(0, 32, frames, NULL);
     wchar_t sp[MAX_PATH];
@@ -409,8 +411,9 @@ void XjsOnPopupResult(int id) {
         XjsSaveConfig();
         XjsSearchNow(false);
     } else if ((id & ~(XJS_POPUP_EDIT | XJS_POPUP_DEL)) >= IDM_CMODE_BASE
-            && (id & ~(XJS_POPUP_EDIT | XJS_POPUP_DEL)) < IDM_CMODE_BASE + 100) {
-        /* 尾部按钮回传的 id 带高位标志, 范围判定必须先剥掉 —
+            && (id & ~(XJS_POPUP_EDIT | XJS_POPUP_DEL)) < IDM_CMODE_BASE + 500) {
+        /* 段宽 500 = 用户模式≤100 + 插件模式同表续排 (曾按 +100 判, 插件模式下标≥100 落在
+           段外 = 菜单照显点击无反应); 尾部按钮回传的 id 带高位标志, 范围判定必须先剥掉 —
            曾直接用带标志 id 判范围, 永远落不进本分支: ✎ 编辑点击=无操作 (2026-09-16 实锤)
            菜单下标 → 模式按打开时的 id 快照定位 (作用范围过滤后下标≠全局下标,
            菜单开着时容器也可能被其它窗口改动 — 禁止拿下标直索引 g_customModes) */
@@ -576,6 +579,7 @@ static void XjsSyncViewport(HWND hwnd) {
         XjsUpdateEditFont();
         XjsPopupReleaseResources();
         XjsChromeLayout();
+        XjsClampScroll();   /* 行高随 DPI 变化: 不重新钳制时深处滚动的 scrollTop 可越界 (与 WM_DPICHANGED 分支同口径, 渲染循环 first=-1) */
         XjsSearchWindow::Cur()->Invalidate();   /* 调用方都在本窗 WndProc 路径内, Cur()=本窗 */
     }
     if (g_rt) {
@@ -909,6 +913,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (XjsRenameDragging()) { XjsRenameMouseMove(pt); return 0; }   /* 重命名编辑框拖拽选字 */
             if (XjsToastMouseMove(hwnd, XSF(1), g_layout.w, g_layout.h, pt)) { SetCursor(LoadCursorW(NULL, IDC_ARROW)); return 0; }   /* Toast 卡片浮于一切之上 */
             XjsHostedMouseMove(pt);   /* 托管标签悬停计时 (多来源标签 180ms 弹来源切换菜单) */
+            XjsPreviewHoverUpdate(pt);   /* 面板按钮悬停高亮 (面板接管中内部自清, 先于列表) */
             if (XjsPreviewPanelMouseMove(pt)) return 0;   /* 面板接管: 捕获中/悬停内容区 → 转发 (先于列表) */
             if (XjsListMouseMove(pt) || XjsPreviewMouseMove(pt)) return 0;
             XjsUpdateHoverState(pt);
@@ -940,6 +945,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_MOUSELEAVE: {
             g_mouseTracking = false;
+            XjsPreviewHoverReset();   /* 面板按钮悬停高亮随指针离窗熄灭 (本分支末尾已整帧重绘) */
             XjsPreviewPanelMouseLeave();   /* 面板接管: 指针离窗 = 离开面板 (悬停态复位, SDK x=y=-1 约定) */
             XjsListHoverChanged(g_hoverRow, g_listHover);   /* 移出列表: 末次悬停行也走渐隐拖尾 */
             g_listHover = false;
@@ -1515,8 +1521,10 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return TRUE;
         case WM_ENDSESSION:
             /* 会话结束 (注销/关机): 进程随后被杀, 不会走主窗 WM_DESTROY 收尾 — 配置在此落盘
-               (窗口矩形/历史/每窗设置; 引擎库随后同存), 漏存 = 用户会话内全部设置丢失 */
-            if (wParam) {
+               (窗口矩形/历史/每窗设置; 引擎库随后同存), 漏存 = 用户会话内全部设置丢失。
+               只主窗执行: WM_ENDSESSION 对每个顶层窗口各投一份, 引擎收尾跑 N 遍无意义, 且
+               扫描中首遍删库后其余窗口会再走保存分支把半成品索引复活 (与删库语义相反) */
+            if (wParam && w->isMain) {
                 XjsSaveWindowRect();
                 XjsSaveConfig();
                 XjsEngineShutdown(false);

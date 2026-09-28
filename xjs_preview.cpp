@@ -240,28 +240,41 @@ void XjsPreviewToggle() {
     XjsSearchWindow::Cur()->Invalidate();
 }
 
+/* 预览卡片行 = 卡片当前显示的项 (g_previewFileId): 卡上按钮 (复制序列号/查找大目录·大文件/
+   定位/打开) 作用于用户看到的这张卡 — 用列表选中项会在 图钉锁定预览 时与卡片分叉, 按钮静默
+   落空 (表象 = "复制点不了") */
+static XjsRowData* XjsPreviewCardRow() {
+    if (g_previewFileId < 0 || !g_result) return NULL;
+    int idx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
+    return idx >= 0 ? XjsEnsureRowData(idx) : NULL;
+}
+
 /* 查找大目录: 按父路径聚合子项数 (SQL GROUP BY; 空间地图插件另提供矩形树图视图) */
 void XjsPreviewQueryBigDirs() {
-    int idx = XjsSelPrimaryIdx();
-    XjsRowData* rd = idx >= 0 ? XjsEnsureRowData(idx) : NULL;
+    XjsRowData* rd = XjsPreviewCardRow();
     if (!rd || !rd->isDrive) return;
+    /* 引擎 SQL 的 LIKE 里 \ 是转义字符, 路径分隔符必须写 \\ (单写一个 \ 匹配 0 条) */
     std::wstring sql = L"SELECT ParentPath, COUNT(*) AS cnt FROM alltable WHERE ParentPath LIKE '" +
-        rd->name + L"\\%' GROUP BY ParentPath ORDER BY cnt DESC;";
+        rd->name + L"\\\\%' GROUP BY ParentPath ORDER BY cnt DESC;";
     g_mode = XMODE_SQL;
     XjsSearchSetText(sql);   /* 自绘搜索框: 置入即触发搜索 */
 }
 
 void XjsPreviewQueryBigFiles() {
-    int idx = XjsSelPrimaryIdx();
-    XjsRowData* rd = idx >= 0 ? XjsEnsureRowData(idx) : NULL;
+    XjsRowData* rd = XjsPreviewCardRow();
     if (!rd || !rd->isDrive) return;
     std::wstring sql = L"SELECT * FROM alltable WHERE IsDir=0 AND ParentPath LIKE '" +
-        rd->name + L"\\%' AND Size > '100M' ORDER BY Size DESC;";
+        rd->name + L"\\\\%' AND Size > '100M' ORDER BY Size DESC;";
     g_mode = XMODE_SQL;
     XjsSearchSetText(sql);   /* 自绘搜索框: 置入即触发搜索 */
 }
 
 /* ==================== 渲染 ==================== */
+
+/* 面板按钮悬停高亮 (鼠标交互瞬态, 同列拖动文件级 static 口径): 存命中命令号, 0=无。
+   渲染按命令号点亮对应按钮; 变化才整帧失效 — 面板内空处移动不重绘 */
+static int s_pvHover = 0;
+static bool XjsPvHover(int cmd) { return s_pvHover == cmd; }
 
 /* 信息行: label 左 / value 右; 返回下一行 y */
 static float XjsInfoRow(float yTop, const wchar_t* label, const std::wstring& value, float px) {
@@ -272,10 +285,10 @@ static float XjsInfoRow(float yTop, const wchar_t* label, const std::wstring& va
     return yTop + rowH;
 }
 
-/* 描边按钮 */
-static void XjsPanelButton(const XjsRect& r, const wchar_t* text, int iconKind) {
-    g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), g_br[XTH_PANEL2]);
-    g_rt->DrawRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), g_br[XTH_BORDER], 1.0f);
+/* 描边按钮 (hover=悬停高亮) */
+static void XjsPanelButton(const XjsRect& r, const wchar_t* text, int iconKind, bool hover) {
+    g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), g_br[hover ? XTH_ROW_HOVER : XTH_PANEL2]);
+    g_rt->DrawRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), g_br[hover ? XTH_ACCENT : XTH_BORDER], 1.0f);
     float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
     float tw = XjsMeasureText(text, g_tfMenu);
     float tx = cx - tw / 2 - XSF(10);
@@ -300,9 +313,9 @@ static void XjsPanelButton(const XjsRect& r, const wchar_t* text, int iconKind) 
     g_rt->DrawText(text, (UINT32)wcslen(text), g_tfMenu, tr, g_br[XTH_TEXT]);
 }
 
-/* 圆形小按钮 (面板头: 锁/最大/关闭) */
-static void XjsPanelHeaderBtn(const XjsRect& r, int kind, bool active) {
-    if (active) g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(6), XSF(6)), g_br[XTH_ROW_HOVER]);
+/* 圆形小按钮 (面板头: 锁/最大/关闭; hover=悬停高亮) */
+static void XjsPanelHeaderBtn(const XjsRect& r, int kind, bool active, bool hover) {
+    if (active || hover) g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(6), XSF(6)), g_br[XTH_ROW_HOVER]);
     float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
     XjsBrush* bc = active ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_DIM];
     if (kind == 0) {
@@ -368,9 +381,9 @@ void XjsPreviewRender() {
     s_hits.lockBtn = XjsRectF(body.right - XSF(96), p.top + XSF(8), body.right - XSF(72), p.top + XSF(32));
     s_hits.maxBtn = XjsRectF(body.right - XSF(68), p.top + XSF(8), body.right - XSF(44), p.top + XSF(32));
     s_hits.closeBtn = XjsRectF(body.right - XSF(40), p.top + XSF(8), body.right - XSF(16), p.top + XSF(32));
-    XjsPanelHeaderBtn(s_hits.lockBtn, 0, g_previewLocked);
-    XjsPanelHeaderBtn(s_hits.maxBtn, 1, false);
-    XjsPanelHeaderBtn(s_hits.closeBtn, 2, false);
+    XjsPanelHeaderBtn(s_hits.lockBtn, 0, g_previewLocked, XjsPvHover(3));
+    XjsPanelHeaderBtn(s_hits.maxBtn, 1, false, XjsPvHover(2));
+    XjsPanelHeaderBtn(s_hits.closeBtn, 2, false, XjsPvHover(1));
     g_rt->FillRectangle(XjsRectF(body.left, p.top + headH, body.right, p.top + headH + 1), g_br[XTH_BORDER]);
 
     if (!rd || g_previewFileId < 0) {
@@ -461,9 +474,15 @@ void XjsPreviewRender() {
         s_hits.copySerial = XjsRectF(body.right - XSF(60), cy + XSF(2), body.right - XSF(16), cy + rowH - XSF(2));
         {
             cy = XjsInfoRow(cy, XjsT(L"预览.序列号"), serial, px);
-            g_rt->FillRoundedRectangle(XjsRoundedRectF(s_hits.copySerial, XSF(5), XSF(5)), g_br[XTH_PANEL2]);
+            g_rt->FillRoundedRectangle(XjsRoundedRectF(s_hits.copySerial, XSF(5), XSF(5)),
+                g_br[XjsPvHover(4) ? XTH_ROW_HOVER : XTH_PANEL2]);
             std::wstring cp = XjsT(L"通用词.复制");
-            g_rt->DrawText(cp.c_str(), (UINT32)cp.length(), g_tfTiny, s_hits.copySerial, g_br[XTH_TEXT_DIM]);
+            /* 水平居中 (文本格式纵对齐恒中, 横对齐是 leading — 量宽后画在中间) */
+            float tw = XjsMeasureText(cp.c_str(), g_tfTiny);
+            float cx = (s_hits.copySerial.left + s_hits.copySerial.right) / 2;
+            g_rt->DrawText(cp.c_str(), (UINT32)cp.length(), g_tfTiny,
+                XjsRectF(cx - tw / 2, s_hits.copySerial.top, cx + tw / 2, s_hits.copySerial.bottom),
+                g_br[XjsPvHover(4) ? XTH_TEXT : XTH_TEXT_DIM]);
         }
         cy = XjsInfoRow(cy, XjsT(L"预览.可用空间"), Utf8ToUtf16(xjs_util_FormatFileSize(rd->driveFree)), px);
         cy = XjsInfoRow(cy, XjsT(L"预览.盘符"), rd->name + L"\\", px);
@@ -472,8 +491,8 @@ void XjsPreviewRender() {
         float bw2 = (pw - XSF(8)) / 2;
         s_hits.bigDirs = XjsRectF(px, cy, px + bw2, cy + XSF(32));
         s_hits.bigFiles = XjsRectF(px + bw2 + XSF(8), cy, px + pw, cy + XSF(32));
-        XjsPanelButton(s_hits.bigDirs, XjsT(L"预览.查找大目录"), -1);
-        XjsPanelButton(s_hits.bigFiles, XjsT(L"预览.查找大文件"), -1);
+        XjsPanelButton(s_hits.bigDirs, XjsT(L"预览.查找大目录"), -1, XjsPvHover(5));
+        XjsPanelButton(s_hits.bigFiles, XjsT(L"预览.查找大文件"), -1, XjsPvHover(6));
     } else {
         /* ===== 文件 / 目录 ===== */
         /* 内容位图: 内置解码图优先, 插件交付位图兜底 (世代/目标同源才取) */
@@ -554,8 +573,8 @@ void XjsPreviewRender() {
     float bw3 = (pw - XSF(8)) / 2;
     s_hits.locate = XjsRectF(px, fbY, px + bw3, fbY + fbH);
     s_hits.open = XjsRectF(px + bw3 + XSF(8), fbY, px + pw, fbY + fbH);
-    XjsPanelButton(s_hits.locate, XjsT(L"预览.定位文件"), 0);
-    XjsPanelButton(s_hits.open, XjsT(L"通用词.打开"), 1);
+    XjsPanelButton(s_hits.locate, XjsT(L"预览.定位文件"), 0, XjsPvHover(7));
+    XjsPanelButton(s_hits.open, XjsT(L"通用词.打开"), 1, XjsPvHover(8));
 }
 
 /* ==================== 鼠标 ==================== */
@@ -595,6 +614,21 @@ static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
     return true;
 }
 
+void XjsPreviewHoverUpdate(POINT pt) {
+    int cmd = 0;
+    bool in = g_previewVisible && !g_previewDrag && !g_plugPanelOn && s_hits.valid &&
+              XjsPtIn(g_layout.preview, pt) && XjsPreviewHitCmd(pt, &cmd);
+    int hov = in ? cmd : 0;
+    if (hov != s_pvHover) {
+        s_pvHover = hov;
+        XjsSearchWindow::Cur()->Invalidate();
+    }
+}
+
+void XjsPreviewHoverReset() {
+    s_pvHover = 0;   /* 失效由调用方负责 (WM_MOUSELEAVE 分支本就整帧重绘) */
+}
+
 bool XjsPreviewMouseDown(POINT pt) {
     if (!g_previewVisible || !s_hits.valid) return false;
     XjsLayout& L = g_layout;
@@ -631,20 +665,19 @@ static void XjsPreviewRunCmd(int cmd) {
         g_previewLocked = !g_previewLocked;
     } else if (cmd == 4) {
         wchar_t sb[32];
-        /* 序列号从行数据再取一次 (仅驱动器行有意义; 双保险 — 命中表已按帧清零) */
-        int idx = XjsSelPrimaryIdx();
-        XjsRowData* rd = (idx >= 0 && idx < g_resultCount) ? XjsEnsureRowData(idx) : NULL;
+        /* 序列号取卡片正在显示的驱动器 (命中表已按帧清零) */
+        XjsRowData* rd = XjsPreviewCardRow();
         if (rd && rd->isDrive) {
             _snwprintf(sb, 32, L"%04X-%04X", HIWORD(rd->driveSerial), LOWORD(rd->driveSerial));
             XjsCopyClipboard(sb);
+            XjsToastShow(g_hWnd, XjsT(L"状态栏.已复制"), XTOAST_SUCCESS, XSF(1));   /* 无反馈会被当"点不了" */
         }
     } else if (cmd == 5) {
         XjsPreviewQueryBigDirs();
     } else if (cmd == 6) {
         XjsPreviewQueryBigFiles();
     } else if (cmd == 7 || cmd == 8) {
-        int idx = XjsSelPrimaryIdx();
-        XjsRowData* rd = idx >= 0 ? XjsEnsureRowData(idx) : NULL;
+        XjsRowData* rd = XjsPreviewCardRow();
         if (rd) {
             bool open = (cmd == 8);
             if (rd->isDrive) {
@@ -818,6 +851,7 @@ bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wc
         w->plugPanelKey = false;
         w->plugPanelCapture = false;
         w->plugPanelResyncPosted = false;
+        s_pvHover = 0;   /* 宿主头部/正文按钮不再画: 悬停态一并熄灭 (关闭恢复时不残留高亮) */
         w->plugPanelCaretX = w->plugPanelCaretY = 0;
         {
             XjsPanelLock lk;
@@ -842,13 +876,15 @@ bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wc
 void XjsPreviewPanelClose(XjsSearchWindow* w, unsigned long long window, bool restore) {
     if (!w || !w->plugPanelOn) return;
     XjsPanelSend(w, XJS_HPANEL_CLOSE, 0, 0, 0, 0, 0);   /* 先通知收尾 (派发按仍在的 pluginId 找插件) */
-    w->plugPanelOn = false;
-    w->plugPanelPluginId.clear();
-    w->plugPanelKey = false;
-    w->plugPanelCapture = false;
-    w->plugPanelResyncPosted = false;
     {
+        /* 会话态翻转必须整体在面板锁内: 插件工作线程的 交付/取尺寸 在锁内校验归属,
+           锁外翻转 = 校验读到半新半旧 (任意线程 API 与 UI 关闭并发的悬垂解引用防线) */
         XjsPanelLock lk;
+        w->plugPanelOn = false;
+        w->plugPanelPluginId.clear();
+        w->plugPanelKey = false;
+        w->plugPanelCapture = false;
+        w->plugPanelResyncPosted = false;
         w->plugPanelBmp.clear();
         w->plugPanelBmpW = w->plugPanelBmpH = w->plugPanelBmpStride = 0;
         w->plugPanelRev++;
@@ -872,42 +908,58 @@ void XjsPreviewPanelCloseForToggle() {
         XjsPreviewPanelClose(XjsSearchWindow::Cur(), XjsPluginCurWindowToken(), false);
 }
 
-/* 插件工作线程交付落点 (xjs_plugin.cpp FnPanelDeliverBitmap 转): 校验世代后暂存,
-   命中只失效预览区 (同 XjsPreviewPluginDeliverBitmap 口径) */
-bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h, const void* bgra, int stride) {
-    if (!w || !w->plugPanelOn) return false;
+/* 插件工作线程交付落点 (xjs_plugin.cpp FnPanelDeliverBitmap 转): 归属+世代校验后暂存,
+   命中只失效预览区 (同 XjsPreviewPluginDeliverBitmap 口径)。
+   任意线程: 归属校验必须与拷贝同锁 (UI 线程关会话/拆窗的对应段也持锁, 校验通过后
+   本调用期间窗对象不可能被拆; 锁外校验 = 读半新半旧/已 delete 的对象) */
+bool XjsPreviewPanelDeliver(XjsSearchWindow* w, const wchar_t* pluginId, long long serial, int w2, int h, const void* bgra, int stride) {
+    if (!w || !pluginId) return false;
     if (!bgra || w2 <= 0 || h <= 0 || w2 > 16384 || h > 16384 || stride < w2 * 4) return false;
     if (stride > w2 * 4 + 4096 || (long long)stride * h > (256LL << 20)) return false;   /* 上限同预览交付 */
     {
         XjsPanelLock lk;
+        if (!w->plugPanelOn || w->plugPanelPluginId != pluginId) return false;   /* 不是本插件的会话 */
         if (serial != w->plugPanelSerial || w2 != w->plugPanelW || h != w->plugPanelH) return false;   /* 过期世代/尺寸 */
         w->plugPanelBmp.assign((const uint8_t*)bgra, (const uint8_t*)bgra + (size_t)stride * h);
         w->plugPanelBmpW = w2;
         w->plugPanelBmpH = h;
         w->plugPanelBmpStride = stride;
         w->plugPanelRev++;
-    }
-    if (w->hWnd) {   /* 只失效预览区 (插件整块交付含头部带) */
-        XjsRect b = w == XjsSearchWindow::Cur() ? g_layout.preview : XjsRectF(0, 0, 0, 0);
-        if (b.right > b.left) {
-            RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
-            InvalidateRect(w->hWnd, &r, FALSE);
-        } else {
-            w->Invalidate();
+        if (w->hWnd) {   /* 只失效预览区 (插件整块交付含头部带); 失效也在锁内: 出锁后不再碰本对象 */
+            XjsRect b = w == XjsSearchWindow::Cur() ? g_layout.preview : XjsRectF(0, 0, 0, 0);
+            if (b.right > b.left) {
+                RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
+                InvalidateRect(w->hWnd, &r, FALSE);
+            } else {
+                w->Invalidate();
+            }
         }
     }
     return true;
 }
 
-/* 当前世代读取 (xjs_plugin.cpp FnPanelGetInfo 转; 任意线程) */
-void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h, float* scale) {
-    if (!w) { if (serial) *serial = 0; if (w2) *w2 = 0; if (h) *h = 0; if (scale) *scale = 1.0f; return; }
+/* 当前世代读取 (xjs_plugin.cpp FnPanelGetInfo 转; 任意线程) — 归属校验同锁 (见 Deliver),
+   返回 false = 不是本插件的在会话 (输出已清零) */
+bool XjsPreviewPanelInfo(XjsSearchWindow* w, const wchar_t* pluginId, long long* serial, int* w2, int* h, float* scale) {
+    if (serial) *serial = 0;
+    if (w2) *w2 = 0;
+    if (h) *h = 0;
+    if (scale) *scale = 1.0f;
+    if (!w || !pluginId) return false;
     XjsPanelLock lk;
+    if (!w->plugPanelOn || w->plugPanelPluginId != pluginId) return false;
     if (serial) *serial = w->plugPanelSerial;
     if (w2) *w2 = w->plugPanelW;
     if (h) *h = w->plugPanelH;
     if (scale) *scale = w->plugPanelScale;
+    return true;
 }
+
+/* 窗口拆毁 exclusivity (xjs_app.cpp DestroyAndFree): 持面板锁跨越 delete — 插件工作线程
+   可能正在锁内做归属校验/字节拷贝, 锁内看到的必是活对象 (CRITICAL_SECTION 同线程可重入,
+   析构链里的 XjsPanelDropCache 不会自锁死) */
+void XjsPreviewPanelLockEnter() { EnterCriticalSection(&s_panelCs.cs); }
+void XjsPreviewPanelLockLeave() { LeaveCriticalSection(&s_panelCs.cs); }
 
 /* 渲染接管位图 (XjsPreviewRender 会话分支; 绘制帧兼探测尺寸/位置失配 → 投 WM_PANEL_RESYNC,
    下一拍消息循环里做世代同步 — 插件回调禁在 WM_PAINT 内) */
@@ -1072,8 +1124,7 @@ void XjsPreviewPanelUpdateIme(HWND hwnd) {
     s_busy = true;
     XjsRect cr = XjsPreviewPanelContentRect();
     POINT p = { (LONG)(cr.left + w->plugPanelCaretX), (LONG)(cr.top + w->plugPanelCaretY) };
-    if (!w->sysCaretMade && CreateCaret(hwnd, (HBITMAP)NULL, 1, 1)) w->sysCaretMade = true;
-    if (w->sysCaretMade) SetCaretPos(p.x, p.y);
+    if (XjsSysCaretEnsure(hwnd)) SetCaretPos(p.x, p.y);   /* 隐藏系统光标作位置源 (归属按 hwnd 记账) */
     HIMC himc = ImmGetContext(hwnd);
     if (himc) {
         COMPOSITIONFORM cf = {};

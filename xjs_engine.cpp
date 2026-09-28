@@ -232,19 +232,17 @@ void XjsSyncWatchTick() {
     XjsPluginOnSyncAfter();                 /* 插件 events 订阅: 文件同步节流刷新点 (聚合语义, UI 线程) */
 }
 
-/* ==================== 搜索历史导航 (Alt+←/→ / 鼠标侧键, 源样式会话导航栈口径) ==================== */
-
-static std::vector<std::wstring> s_navStack;
-static int s_navPos = -1;
-static bool s_navJumping = false;
+/* ==================== 搜索历史导航 (Alt+←/→ / 鼠标侧键, 源样式会话导航栈口径) ====================
+ * 栈/位置/回放标记都是每窗会话状态 (g_navStack 等宏 → Cur()), 曾为进程级 static: B 窗导航
+ * 会回放 A 窗输入过的搜索词 */
 
 void XjsHistoryNav(int dir) {
-    int np = s_navPos + dir;
-    if (np < 0 || np >= (int)s_navStack.size()) return;
-    s_navPos = np;
-    s_navJumping = true;
-    XjsSearchSetText(s_navStack[s_navPos]);   /* 置入即触发搜索 (false 不再入栈) */
-    s_navJumping = false;
+    int np = g_navPos + dir;
+    if (np < 0 || np >= (int)g_navStack.size()) return;
+    g_navPos = np;
+    g_navJumping = true;
+    XjsSearchSetText(g_navStack[g_navPos]);   /* 置入即触发搜索 (false 不再入栈) */
+    g_navJumping = false;
     XjsSearchWindow::Cur()->Invalidate();
 }
 
@@ -300,11 +298,11 @@ void XjsSearchNow(bool commitHistory) {
         if (commitHistory && !text.empty()) {
             XjsAddHistory(text);
             /* 会话导航栈: 提交型搜索入栈, 截掉前进分支 (源样式 07-search.js 同语义) */
-            if (!s_navJumping) {
-                if (s_navPos >= 0 && s_navPos + 1 < (int)s_navStack.size()) s_navStack.resize(s_navPos + 1);
-                if (s_navStack.empty() || s_navStack.back() != text) s_navStack.push_back(text);
-                if (s_navStack.size() > 200) s_navStack.erase(s_navStack.begin());
-                s_navPos = (int)s_navStack.size() - 1;
+            if (!g_navJumping) {
+                if (g_navPos >= 0 && g_navPos + 1 < (int)g_navStack.size()) g_navStack.resize(g_navPos + 1);
+                if (g_navStack.empty() || g_navStack.back() != text) g_navStack.push_back(text);
+                if (g_navStack.size() > 200) g_navStack.erase(g_navStack.begin());
+                g_navPos = (int)g_navStack.size() - 1;
             }
         }
         SetWindowTextW(g_hWnd, text.empty() ? XjsT(L"应用.名称") : (text + L" - " + XjsT(L"应用.名称")).c_str());
@@ -2252,6 +2250,21 @@ void XjsSaveWindowRect() {
 
 /* 重建核心: enableFields[7] = 评分/大小/修改/创建/访问/属性/别名 (只 AddField 勾选的, 未勾选=关闭);
    drivesJsonWide = L"[""C:\\"",""D:\\""]" 形式的盘符 JSON, 空 = 全盘扫描 (正式版 rebuildIndex 同口径) */
+/* 重建索引的每窗结果对象销毁 (照窗口析构同款协议: 先摘回调/摘 UserValue 再 Destroy)。
+   结果对象创建时即按"库内当前已开启字段"定死查询顺序 — 只销毁当前窗会让其余窗的旧对象
+   永久停留在重建前的字段集/查询顺序 (EnsureResultAll 对已有对象早退), 直到该窗关闭重开 */
+static void XjsDestroyWinResult(XjsSearchWindow* w) {
+    if (!w->result) return;
+    xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_COMPLETE,  NULL, NULL);
+    xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_CHANGE,    NULL, NULL);
+    xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_FAILED,    NULL, NULL);
+    xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_DRAW_ICON, NULL, NULL);
+    xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_ICON_ASK,  NULL, NULL);
+    xjs_result_SetUserValue(w->result, NULL);
+    xjs_result_Destroy(w->result);
+    w->result = NULL;
+}
+
 void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJsonWide) {
     if (!g_engine) return;
     if (g_isScanning) {
@@ -2262,7 +2275,7 @@ void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJs
     xjs_sync_AllStop(g_engine, FALSE);
     std::wstring dbPath = XjsGetExeDir() + L"\\xjs_db.dat";
     DeleteFileW(dbPath.c_str());
-    if (g_result) { xjs_result_Destroy(g_result); g_result = NULL; }   /* 选中集合随结果对象一并销毁 */
+    XjsSearchWindow::ForEach(&XjsDestroyWinResult);   /* 全部窗口的结果对象随库清空一并销毁 (选中集合随之作废), 扫描完成后按新字段集重建 */
     XjsClearRenderCaches();
     g_resultCount = 0;
     g_anchorIdx = g_focusIdx = -1;
@@ -2280,7 +2293,11 @@ void XjsEngineRebuildEx(const bool enableFields[7], const std::wstring& drivesJs
 }
 
 void XjsEngineShutdown(bool warnOnSaveFail) {
-    if (!g_engine) return;
+    /* 进程一次性闸: 扫描中首遍走"停扫+删库"分支后, 任何后续入口 (重复的关机广播/
+       收尾路径) 不得再进保存分支把半成品索引落盘复活 — 删库的本意就是下次全量重扫 */
+    static bool s_done = false;
+    if (!g_engine || s_done) return;
+    s_done = true;
     int state = xjs_db_GetEngineState(g_engine);
     bool scanning = g_isScanning || state == XJS_DB_STATE_SCANNING;
     std::wstring dbPath = XjsGetExeDir() + L"\\xjs_db.dat";
@@ -2355,6 +2372,7 @@ void XjsTrayReaddAfterExplorer(HWND hwnd) {
     /* TaskbarCreated = 任务栏(重)创建, 托盘图标必然已被系统整体销毁 — 无条件重挂。
        不判 g_inTray: 启动竞态下 NIM_ADD 失败 (g_inTray=false) 时任务栏稍后才创建,
        这条广播正是补挂的唯一时机 (曾判 g_inTray 提前返回 = 该场景永不补挂) */
+    if (g_nid.hIcon) { DestroyIcon(g_nid.hIcon); g_nid.hIcon = NULL; }   /* 旧私有图标句柄随重挂销毁 (绕过 g_inTray 重入路径会漏这一对) */
     g_inTray = false;        /* 强制 XjsTrayAdd 走 NIM_ADD (MODIFY 对不存在的图标无效) */
     XjsTrayAdd(hwnd);
 }

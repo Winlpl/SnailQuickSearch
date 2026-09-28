@@ -11,6 +11,13 @@
 
 /* ==================== 布局 ==================== */
 
+/* 清空钮可见性唯一口径: 有输入 或 已有托管标签 (纯标签态 = 输入词已转标签、框已清空,
+   只看输入会让 × 不画不可点 — 标签失去唯一的一键清空入口, 只能逐个删)。
+   布局/渲染/悬停/命中四处共用, 禁再抄条件 */
+static bool XjsSearchClearVisible() {
+    return !s_searchEd.text.empty() || !g_hostedTags.empty();
+}
+
 void XjsChromeLayout() {
     RECT rc; GetClientRect(g_hWnd, &rc);
     XjsLayout& L = g_layout;
@@ -70,8 +77,7 @@ void XjsChromeLayout() {
     L.modeBtn = XjsRectF(L.searchBox.left + XSF(3), XSF(7), L.searchBox.left + XSF(31), XSF(33));
     L.historyBtn = XjsRectF(L.searchBox.right - XSF(29), XSF(7), L.searchBox.right - XSF(3), XSF(33));
     L.clearBtn = XjsRectF(L.historyBtn.left - XSF(28), XSF(7), L.historyBtn.left, XSF(33));
-    bool hasText = !s_searchEd.text.empty() || !g_hostedTags.empty();   /* 有标签也显清空钮 (源样式 updateSearchBtns) */
-    if (!hasText) L.clearBtn = L.historyBtn;
+    if (!XjsSearchClearVisible()) L.clearBtn = L.historyBtn;
     /* 输入区 (自绘): 文本/选区/光标全在 D2D 里垂直居中绘制, 无原生 EDIT */
     L.editRect = XjsRectF(L.modeBtn.right + XSF(4), L.searchBox.top + XSF(2),
                              L.clearBtn.left - XSF(2), L.searchBox.bottom - XSF(2));
@@ -129,7 +135,7 @@ void XjsSearchFocus(bool on) {
         s_searchEd.anchor = -1;
         s_searchEd.dragging = false;
         s_searchDragPending = false;   /* 焦点变化作废"未聚焦按下待定" (拖窗/聚焦二选一已失时机) */
-        if (g_sysCaretMade) { DestroyCaret(); g_sysCaretMade = false; }
+        XjsSysCaretDestroy(g_hWnd);   /* 搜索框失焦: 系统光标挂在本窗才销毁 (归属按 hwnd 记账) */
         XjsSearchInvalidate();
         return;
     }
@@ -719,7 +725,7 @@ void XjsChromeRenderTitlebar() {
             XjsDrawMagnifier(XjsPoint2F((mb.left + mb.right) / 2, (mb.top + mb.bottom) / 2), XSF(6), bc, 1.6f);
         }
         /* 清空 × */
-        if (!s_searchEd.text.empty()) {
+        if (XjsSearchClearVisible()) {
             XjsRect cb = L.clearBtn;
             float ccx = (cb.left + cb.right) / 2, ccy = (cb.top + cb.bottom) / 2, u = XSF(5);
             XjsBrush* cbr = (g_hoverBtn & HB_CLEAR) ? (XjsBrush*)g_br[XTH_TEXT] : (XjsBrush*)g_br[XTH_TEXT_FAINT];
@@ -912,7 +918,7 @@ void XjsUpdateHoverState(POINT pt) {
         if (newWndBtn == WBTN_NONE) {
             if (XjsPtIn(g_layout.menuBtn, pt)) newBtn |= HB_MENU;
             if (XjsPtIn(g_layout.modeBtn, pt)) newBtn |= HB_PILL;
-            if (!s_searchEd.text.empty() && XjsPtIn(g_layout.clearBtn, pt)) newBtn |= HB_CLEAR;
+            if (XjsSearchClearVisible() && XjsPtIn(g_layout.clearBtn, pt)) newBtn |= HB_CLEAR;
             if (XjsPtIn(g_layout.historyBtn, pt)) newBtn |= HB_HISTORY;
             if (g_layout.filterBtn.right > g_layout.filterBtn.left &&   /* 隐藏态 = 零矩形 (每窗设置) */
                 XjsPtIn(g_layout.filterBtn, pt)) newBtn |= HB_FILTER;
@@ -976,7 +982,7 @@ static int XjsChromeHitCmd(POINT pt) {
     if (g_layout.filterBtn.right > g_layout.filterBtn.left &&   /* 隐藏态 = 零矩形 (每窗设置) */
         XjsPtIn(g_layout.filterBtn, pt)) return 6;
     if (XjsPtIn(g_layout.modeBtn, pt)) return 7;
-    if (!s_searchEd.text.empty() && XjsPtIn(g_layout.clearBtn, pt)) return 8;
+    if (XjsSearchClearVisible() && XjsPtIn(g_layout.clearBtn, pt)) return 8;
     if (XjsPtIn(g_layout.historyBtn, pt)) return 9;
     return 0;
 }
@@ -1057,6 +1063,7 @@ bool XjsChromeMouseUp(POINT pt) {
             if (XjsPluginModeCount() > 0) {
                 std::vector<XjsPopupItem> pmItems;
                 for (int pm = 0; pm < XjsPluginModeCount(); pm++) {
+                    if ((int)s_pillModeIds.size() >= 500) break;   /* 段宽上限 (IDM_CMODE_BASE+500 = IDM_HISTORY_BASE) */
                     XjsPluginModeRef r;
                     if (!XjsPluginModeAt(pm, &r)) break;
                     const XjsPluginModeDef* d = XjsPluginModeDefAt(r);

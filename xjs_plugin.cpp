@@ -870,7 +870,7 @@ static int FnDialog(XjsPluginCtx* ctx, const char* kind, const char* optsJson, c
                 fs.push_back({ keep[i * 2].c_str(), keep[i * 2 + 1].c_str() });
             }
             fs.push_back({ NULL, NULL });
-            d->SetFileTypes((UINT)fs.size(), fs.data());
+            d->SetFileTypes((UINT)(fs.size() - 1), fs.data());   /* 终结项不计入数量 (多传 = 下拉多一个空白筛选档) */
         }
         if (!o.initialDir.empty()) {
             IShellItem* it = NULL;
@@ -1083,15 +1083,9 @@ static int FnPanelGetInfo(XjsPluginCtx* ctx, XjsWindowToken window, long long* s
     XjsPluginEntry* p; int e;
     if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式渲染前取尺寸) */
     XjsSearchWindow* win = PluginWindowOfToken(window);
-    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) {
-        if (serial) *serial = 0;
-        if (w) *w = 0;
-        if (h) *h = 0;
-        if (scale) *scale = 1.0f;
-        return XJS_PLUGIN_ERR_STATE;
-    }
-    XjsPreviewPanelInfo(win, serial, w, h, scale);
-    return XJS_PLUGIN_OK;
+    /* 归属校验在 XjsPreviewPanelInfo 的面板锁内做 (锁外读 plugPanelOn/PluginId = 与 UI 线程
+       关会话/拆窗竞态); 不归属时 Info 输出零值并返回 false */
+    return XjsPreviewPanelInfo(win, p->mf.id.c_str(), serial, w, h, scale) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 
 static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long long serial,
@@ -1099,8 +1093,8 @@ static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long l
     XjsPluginEntry* p; int e;
     if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式交付) */
     XjsSearchWindow* win = PluginWindowOfToken(window);
-    if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
-    return XjsPreviewPanelDeliver(win, serial, w, h, bgra, stride) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
+    if (!win) return XJS_PLUGIN_ERR_STATE;
+    return XjsPreviewPanelDeliver(win, p->mf.id.c_str(), serial, w, h, bgra, stride) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 
 static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {
@@ -1627,6 +1621,8 @@ static void XjsPluginPanelValidateOne(XjsSearchWindow* w) {
     if (!w->plugPanelOn) return;
     for (auto& e : s_plugins)
         if (PluginActive(e) && (e.mf.caps & XPC_PANEL) && e.mf.id == w->plugPanelPluginId) return;   /* owner 仍在 */
+    XjsWindowScope scope(w);   /* Close 的 CLOSE 派发与预览恢复全走 Cur() (令牌/预览重载):
+                                  ForEach 不重绑 Cur, 缺作用域 = CLOSE 错投/丢失 + 预览恢复落错窗 */
     XjsPreviewPanelClose(w, PluginTokenOf(w->hWnd), true);
 }
 void XjsPluginPanelValidateOwners() {

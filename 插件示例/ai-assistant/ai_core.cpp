@@ -100,8 +100,8 @@ static std::string U16BytesToU8(const char* d, size_t n, UINT codePage) {
         if (codePage == 1200)
             memcpy(&w[0], d, n);
         else
-            for (size_t i = 0; i < n / 2; i++)
-                w[i] = (wchar_t)(((unsigned char)d[2 * i + 1] << 8) | (unsigned char)d[2 * i]);
+            for (size_t i = 0; i < n / 2; i++)   /* BE: 高字节在前 (曾写成 LE 拼法 = BE 文件全文乱码) */
+                w[i] = (wchar_t)(((unsigned char)d[2 * i] << 8) | (unsigned char)d[2 * i + 1]);
     }
     return U8(w);
 }
@@ -257,9 +257,10 @@ void CfgClampAgent() {
 }
 
 /* 上下文窗口 token (2026-09-27): 档案指定值优先; 缺省按模型名推断 — 与前端用量条
- * 同表同值 (ai_web_ui.cpp 的 T 表), 压缩压力判定与"剩余"显示共用一份口径 */
-long long AiCtxWindowGuess() {
-    if (g_cfg.ctx > 0) return g_cfg.ctx;
+ * 同表同值 (ai_web_ui.cpp 的 T 表), 压缩压力判定与"剩余"显示共用一份口径。
+ * 纯函数 (模型/ctx 由调用方传作业快照): worker 线程调用, 严禁裸读 g_cfg (wstring 撕裂) */
+long long AiCtxWindowGuess(const std::wstring& modelW, long long ctx) {
+    if (ctx > 0) return ctx;
     static const struct { const wchar_t* k; long long w; } T[] = {
         { L"deepseek", 1000000 }, { L"gemini", 1000000 }, { L"gpt-4.1", 1047576 },
         { L"gpt-4o", 128000 },    { L"gpt-4-turbo", 128000 }, { L"gpt-3.5", 16385 },
@@ -267,7 +268,7 @@ long long AiCtxWindowGuess() {
         { L"moonshot", 131072 },  { L"kimi", 131072 },    { L"llama", 131072 },
         { L"mistral", 131072 },
     };
-    std::wstring m = g_cfg.model;
+    std::wstring m = modelW;
     for (auto& c : m) c = (wchar_t)towlower(c);
     for (const auto& e : T)
         if (m.find(e.k) != std::wstring::npos) return e.w;

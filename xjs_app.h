@@ -127,7 +127,7 @@ void XjsSetPhase(const wchar_t* p);
 #define IDM_CTX_BASE        1000   /* 文件右键: +1..8 单选组 / +9 重命名 +10 别名 +11 多选打开 +12 多选定位;
                                       +20..24 搜索框右键编辑; +30 别名对话框; +40..44 重命名框右键编辑 */
 #define IDM_MODE_BASE       2000   /* +0..4 关键词模式 (通配符/正则/SQL/Lua 过滤/Lua 执行) */
-#define IDM_CMODE_BASE      2500   /* 用户自定义搜索模式菜单项 (+下标, 上限100) */
+#define IDM_CMODE_BASE      2500   /* 用户自定义+插件搜索模式菜单项 (+下标, 段宽500: 用户模式≤100, 插件模式同表续排) */
 #define IDM_HISTORY_BASE    3000   /* +0..998 历史项; +999 清空历史 */
 #define IDM_FILTER_BASE     4000   /* +筛选分类下标 (XjsApplyFilter) */
 #define IDM_MENU_BASE       5000   /* ☰菜单: +46 新窗口 +50 设置 +51 捐赠(开设置直达捐赠页) +80..143 窗口启动器 (档案槽) */
@@ -995,13 +995,17 @@ public:
     bool openHideWindow = false;
     XjsMatchSettings match;      /* 搜索匹配 ×8 (每窗, 随 uiWindows 档案持久化) */
     std::vector<std::wstring> history;   /* 搜索历史 (每窗; 曾为进程共享 g_history) */
+    /* 会话导航栈 (Alt+←/→ / 鼠标侧键, 每窗会话; 曾为进程共享 static → 多窗串味) */
+    std::vector<std::wstring> navStack;
+    int navPos = -1;
+    bool navJumping = false;
     /* 列表框行为 (每窗, 随 uiWindows 档案持久化) */
     bool driveProgress = true;   /* 绘制驱动器占用进度条 */
     bool rowHover = true;        /* 高亮鼠标经过行 */
     bool rowHoverFade = true;    /* 鼠标经过残影 (渐隐拖尾; 依赖 rowHover) */
     HWND hWnd = NULL;
     HFONT hFontEdit = NULL;      /* 仅 IME 组字窗口字体 (每窗各自 DPI) */
-    bool sysCaretMade = false;   /* IME 锚点隐藏系统光标 (挂在本窗上) */
+    /* (sysCaretMade 已删: 系统光标是线程级单实例, 归属改按 hwnd 记账 → XjsSysCaretEnsure/Destroy) */
     XjsColumnSet colsDetails;   /* 列布局每窗独立 (字段名持久化) */
     XjsColumnSet colsList;
 
@@ -1215,7 +1219,6 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 /* ---- 每窗状态 → XjsSearchWindow 字段 (宏重定向; 字段名 = 原名去 g_) ---- */
 #define g_hWnd            (XjsSearchWindow::Cur()->hWnd)
 #define g_hFontEdit       (XjsSearchWindow::Cur()->hFontEdit)
-#define g_sysCaretMade    (XjsSearchWindow::Cur()->sysCaretMade)
 #define g_blurAction      (XjsSearchWindow::Cur()->blurAction)       /* 窗口失去焦点动作 (每窗) */
 #define g_appearPos       (XjsSearchWindow::Cur()->appearPos)        /* 激活/创建时位置 (每窗) */
 #define g_showCtrlBtns    (XjsSearchWindow::Cur()->showCtrlBtns)     /* 显示控制按钮 (每窗) */
@@ -1309,6 +1312,9 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_openHideWindow  (XjsSearchWindow::Cur()->openHideWindow)   /* 打开文件后隐藏窗口 (每窗) */
 #define g_match           (XjsSearchWindow::Cur()->match)            /* 搜索匹配 ×8 (每窗) */
 #define g_history         (XjsSearchWindow::Cur()->history)          /* 搜索历史 (每窗; 曾为进程共享) */
+#define g_navStack        (XjsSearchWindow::Cur()->navStack)         /* 会话导航栈 (每窗; 曾为进程共享 static) */
+#define g_navPos          (XjsSearchWindow::Cur()->navPos)           /* 会话导航栈位置 (每窗) */
+#define g_navJumping      (XjsSearchWindow::Cur()->navJumping)       /* 导航回放中 (入栈抑制, 每窗) */
 #define g_name            (XjsSearchWindow::Cur()->name)             /* 窗口名称 (每窗, 主窗固定) */
 #define g_driveProgress   (XjsSearchWindow::Cur()->driveProgress)    /* 绘制驱动器占用进度条 (每窗) */
 #define g_rowHover        (XjsSearchWindow::Cur()->rowHover)         /* 高亮鼠标经过行 (每窗) */
@@ -1524,6 +1530,7 @@ void XjsDeviceCreate();
 void XjsDeviceResize(int w, int h);              /* 窗口尺寸变化: HwndRT Resize */
 void XjsDeviceDiscardCtx(XjsSearchWindow& w);   /* 显式上下文: 撕毁期 Cur() 可能被嵌套消息重绑 */
 void XjsDeviceDiscard();                        /* Cur() 便捷版 (撕毁路径一律用 Ctx 显式传参) */
+void XjsLayersDropRt(XjsRt* rt);                /* 非搜索窗 RT (设置窗等) 释放前摘 s_layers 条目 */
 void XjsReleaseTextFormats();
 void XjsEllSignCacheDropFormat(XjsFormat* fmt);   /* 格式被单独释放 (弹窗旁路) 前从省略号签名缓存摘除 */
 void XjsRecreateTextFormats();   /* 页面缩放变化后按新倍率重建文本格式 */
@@ -1724,6 +1731,8 @@ bool XjsPreviewMouseDown(POINT pt);
 bool XjsPreviewResizerHit(POINT pt);              // 分隔线命中带 (按下+光标共用, 宽于视觉线)
 bool XjsPreviewMouseMove(POINT pt);
 bool XjsPreviewMouseUp(POINT pt);
+void XjsPreviewHoverUpdate(POINT pt);             // 面板按钮悬停高亮跟踪 (MOVE 调, 变化才失效)
+void XjsPreviewHoverReset();                      // 指针离窗/面板接管开始: 清悬停 (失效归调用方)
 void XjsPreviewQueryBigDirs();                    // 查找大目录 (SQL)
 void XjsPreviewQueryBigFiles();                   // 查找大文件 (SQL)
 void XjsPreviewWheel(int dir);                    // Ctrl+滚轮缩放预览图片 (dir=±1)
@@ -1734,6 +1743,8 @@ bool XjsPreviewIsText();                          // 当前预览目标是文本
 std::wstring XjsGenerateWindowName();   /* 新窗口默认名称 = GUID (CoCreateGuid, 36 连字符格式) */
 void XjsShowInputDialog(HWND owner, const wchar_t* title, const wchar_t* desc, const std::wstring& initial,
                         int resultId);            /* 自绘输入对话框 (WM_INPUT_DONE 回传给 owner) */
+bool XjsSysCaretEnsure(HWND hwnd);   /* IME 锚点隐藏系统光标: 确保挂在 hwnd (线程级单实例, 归属按 hwnd 记账) */
+void XjsSysCaretDestroy(HWND hwnd);  /* 归属匹配才销毁 (挂靠窗口已亡时兜底清理) */
 
 /* ---- main (窗口/控件) ---- */
 void XjsApplyZoom(int tenths);                    // 应用页面缩放 (5..20; 重建字体/文本格式)
@@ -1877,9 +1888,11 @@ bool XjsPreviewPanelWantsPt(POINT pt);            /* 接管中且 pt 落内容�
 void XjsPreviewPanelMouse(int type, POINT pt);    /* DBLCLK/RDOWN/RUP 转发 (type = XJS_PANEL_*, 主窗内联小转发用) */
 void XjsPreviewPanelMouseLeave();                 /* WM_MOUSELEAVE: 转发 x=y=-1 (指针离面板, 悬停态复位) */
 void XjsPreviewPanelKeyBlur(POINT pt);            /* 面板外宿主点击: 收回键盘让渡 + KEY_BLUR 事件 (插件字段失焦) */
-/* 宿主表落点包装 (xjs_plugin.cpp FnPanel* 调; 交付任意线程/读取任意线程, 状态由 s_panelCs 保护) */
-bool XjsPreviewPanelDeliver(XjsSearchWindow* w, long long serial, int w2, int h, const void* bgra, int stride);
-void XjsPreviewPanelInfo(XjsSearchWindow* w, long long* serial, int* w2, int* h, float* scale);
+/* 宿主表落点包装 (xjs_plugin.cpp FnPanel* 调; 交付任意线程/读取任意线程 — 归属校验与读写同锁 s_panelCs) */
+bool XjsPreviewPanelDeliver(XjsSearchWindow* w, const wchar_t* pluginId, long long serial, int w2, int h, const void* bgra, int stride);
+bool XjsPreviewPanelInfo(XjsSearchWindow* w, const wchar_t* pluginId, long long* serial, int* w2, int* h, float* scale);   /* false=非本插件在会话 (输出清零) */
+void XjsPreviewPanelLockEnter();                  /* 窗口拆毁 exclusivity: 持面板锁跨越 delete (见 xjs_preview.cpp) */
+void XjsPreviewPanelLockLeave();
 void XjsPreviewPanelKey(unsigned vk);             /* KEY_DOWN (插件持键盘期间主窗路由) */
 void XjsPreviewPanelChar(unsigned int ch);        /* KEY_CHAR (键盘字符/IME 上屏统一码点入口) */
 bool XjsPreviewPanelImeResult(HWND hwnd, LPARAM lParam);   /* GCS_RESULTSTR 整串取回 → 拆码点转发 (消费=真) */

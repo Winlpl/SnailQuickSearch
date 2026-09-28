@@ -376,6 +376,7 @@
  "提示.模式快捷键已清除": "\" global hotkey cleared",
  "提示.模式快捷键已更新": "\" global hotkey updated to ",
  "提示.快捷键被占用": "This combo is taken by another program; the original hotkey was kept",
+  "提示.快捷键需修饰键": "Global hotkeys must include a Ctrl/Alt/Shift/Win modifier; record the combo again",
  "提示.切换兼容模式": "Switched to Compatible mode; restart the program to apply",
  "提示.切换标准模式": "Switched to Standard mode; restart the program to apply",
  "提示.关键词已保存": "Specified keyword saved",
