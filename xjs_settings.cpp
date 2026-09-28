@@ -2572,8 +2572,10 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                 if (g_doubleCtrlTarget == name) desc += XjsT(L"设置.窗口管理.删除确认.双击Ctrl目标");
                 int cmN = XjsCmWindowCount(name);   /* 专属搜索模式按档案名绑定, 删档连带删 (先计数用于提示) */
                 if (cmN > 0) desc += XjsT(L"设置.窗口管理.删除确认.专属模式前缀") + std::to_wstring(cmN) + XjsT(L"设置.窗口管理.删除确认.专属模式后缀");
+                std::string askBtns = std::string("[{\"text\":\"") + XjsTUtf8(L"通用词.删除") +
+                                      "\",\"style\":\"danger\"},{\"text\":\"" + XjsTUtf8(L"通用词.取消") + "\"}]";
                 int askR = XjsShowAskDialog(s_set.hwnd, XjsT(L"设置.窗口管理.删除按钮"), desc.c_str(),
-                                     R"([{"text":"删除","style":"danger"},{"text":"取消"}])");   /* 未确认 (取消/失活/Esc) */
+                                            askBtns.c_str());   /* 未确认 (取消/失活/Esc) */
                 if (askR != 0) break;
                 if (w) XjsDismissWindow(w->hWnd);   /* 同步销毁 (含结果对象) */
                 if (g_doubleCtrlTarget == name) {   /* 双击 Ctrl 目标失效 → 禁用 (复用装卸逻辑) */
