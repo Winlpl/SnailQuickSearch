@@ -51,6 +51,7 @@ static int s_winCount = 0;
 static XjsSearchWindow* s_curWin = NULL;
 static XjsSearchWindow* s_pendingWin = NULL;   /* CreateWindowExW 期间待绑定的上下文 */
 static HWND s_hWndMain = NULL;
+static DWORD s_uiThreadId = 0;   /* UI 线程 id (wWinMain 登记): Cur() 线程断言用, 0=未登记不检查 */
 /* 主窗指针 (isMain 持有者的镜像): Main() 唯一被引擎回调线程调用 (UI 线程也用),
    禁止像旧实现那样在引擎线程遍历 s_wins — 与 UI 线程 DestroyAndFree 的
    尾槽清 NULL/对象 delete 直接竞态 (NULL 槽解引用 / UAF)。UI 线程在 isMain
@@ -63,7 +64,22 @@ XjsSearchWindow::XjsSearchWindow() {
     colsList.Init(s_colsListDef, 9);
 }
 
-XjsSearchWindow* XjsSearchWindow::Cur() { return s_curWin; }
+void XjsMarkUiThread() { s_uiThreadId = GetCurrentThreadId(); }
+
+XjsSearchWindow* XjsSearchWindow::Cur() {
+    /* "引擎线程禁 Cur()"红线的运行期断言 (2026-09-29 机制化): 非 UI 线程走到这里,
+       拿到的是"UI 线程最近 Enter 的那扇窗" = 数据竞争/串窗/悬垂。
+       只诊断不改变行为: 输出调试串一次, 挂调试器时中断; 无调试器的正常运行零影响。 */
+    if (s_uiThreadId && GetCurrentThreadId() != s_uiThreadId) {
+        static volatile LONG s_curCrossWarned = 0;
+        if (!InterlockedCompareExchange(&s_curCrossWarned, 1, 0) && IsDebuggerPresent()) {
+            OutputDebugStringW(L"[蜗牛快搜] XjsSearchWindow::Cur() 被非UI线程调用 "
+                               L"(引擎线程禁 Cur() 红线 — 用 OfResult/Main(), 见 xjs_app.h 宏节注释)\n");
+            DebugBreak();
+        }
+    }
+    return s_curWin;
+}
 
 /* 新窗口默认名称 = GUID (CoCreateGuid, 标准连字符格式 36 字符): 用户可随时重命名 */
 std::wstring XjsGenerateWindowName() {

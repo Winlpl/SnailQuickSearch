@@ -1732,11 +1732,14 @@ static HWND XjsFindInstanceWindow(const wchar_t* cls) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int nCmdShow) {
     AddVectoredExceptionHandler(1, XjsVecStackLogger);   /* 恒第一句: 抢在任何处理器 (含 DLL VEH) 之前拿到崩溃栈 */
-    /* 第二句: xjs_EnableException(TRUE, NULL) — DLL 的 VEH, 2026-09-29 用户口径恢复 (2026-09-27 曾暂禁):
-       enableTry=TRUE 启用内部 try-catch 保护 ("try要捕获"), 回调 NULL=内置默认处理, 抓全部线程
-       (含引擎异步回调线程) 首轮异常写 xunjieso_捕获崩溃N.txt。两句位次不得对调或后挪;
+    /* 第二句: xjs_EnableException — DLL 的 VEH。2026-09-29 用户口径 "try改成false":
+       enableTry=FALSE 不启用内部 try-catch 保护 (TRUE 档会把 RPC_S_SERVER_UNAVAILABLE 等良性
+       首轮异常也当事件上报 — 实测: 点附件按钮开系统文件对话框时, WebDAV 虚拟盘 (Z:) 枚举经
+       MPR→davclnt 向 WebClient 服务发 RPC, 服务未运行即抛 1727, 属系统内部已处理的异常),
+       回调 NULL=内置默认处理。两句位次不得对调或后挪;
        若白屏闪退复发, 先查历史教训: 旧 DLL 处理器在异常分发时做堆操作, 与引擎线程并发破坏堆 */
-    xjs_EnableException(TRUE, NULL);
+    xjs_EnableException(FALSE, NULL);
+    XjsMarkUiThread();   /* 第三句: 登记 UI 线程 id — Cur() 的"引擎线程禁 Cur()"断言以此为基准 */
 
     /* 单实例守卫: 已有实例(含托盘隐藏中)时唤起它并退出 —— 双进程并发初始化引擎、
        抢 xjs_db.dat、重复托盘图标与双击 Ctrl 钩子 = 启动期堆破坏, 白屏闪退 (初始化冲突)

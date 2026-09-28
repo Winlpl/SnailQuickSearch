@@ -335,20 +335,9 @@ static void PumpStreams() {
                 bool uiResolved = (m.steps.size() == 1 && m.steps[0].state == 3 &&
                                    steps[seen].state == 4);   /* 确认卡已允许/拒绝: 保持 UI 态 */
                 bool changed = (int)m.steps.size() != 1 ||
-                               m.steps[0].state != steps[seen].state ||
-                               m.steps[0].count != steps[seen].count ||
-                               m.steps[0].err != steps[seen].err ||
-                               m.steps[0].top != steps[seen].top ||
-                               m.steps[0].wrote != steps[seen].wrote ||
-                               m.steps[0].chg != steps[seen].chg ||
-                               m.steps[0].name != steps[seen].name ||
-                               m.steps[0].mode != steps[seen].mode ||
-                               m.steps[0].query != steps[seen].query ||
-                               m.steps[0].filter != steps[seen].filter ||
-                               m.steps[0].req != steps[seen].req ||
-                               m.steps[0].arg != steps[seen].arg ||
-                               m.steps[0].cid != steps[seen].cid ||
-                               m.steps[0].res8 != steps[seen].res8;
+                               !(steps[seen] == m.steps[0]);   /* operator== (排除 open/adj) —
+                               字段清单唯一事实源在 ai_assistant.h; 曾是 14 字段手抄清单,
+                               与 dst 拷贝清单漂移 (adj 靠"必伴随询问态"隐式约定兜底) */
                 if (changed && !uiResolved) {
                     m.steps.assign(1, steps[seen]);
                     WebTouch(&s);

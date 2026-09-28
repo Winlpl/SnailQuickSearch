@@ -4310,27 +4310,13 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
                                                                   没有全文, 不造空档描述符) */
                 EnterCriticalSection(&j->cs);
                 if (sidx >= 0 && sidx < (int)j->steps.size()) {
-                    AiToolStep& dst = j->steps[sidx];
-                    dst.kind = local.kind;
-                    dst.state = local.state;
-                    dst.mode = local.mode;
-                    dst.query = local.query;
-                    dst.argz = local.argz;
-                    dst.count = local.count;
-                    dst.elapsedMs = local.elapsedMs;
-                    dst.err = local.err;
-                    dst.top = local.top;   /* open 展开态归泵/用户, 不覆盖 */
-                    dst.wrote = local.wrote;   /* 导出的文件 (卡片常显块+落库) */
-                    dst.chg = local.chg;   /* file_op 逐项更改记录 (卡片常显块+回合聚合+落库) */
-                    dst.adj = local.adj;   /* 待应用的调整 (提案数据; 漏拷 = 卡片按钮区不渲染) */
-                    dst.filter = local.filter;   /* 筛选分类 (漏拷 = 徽标不渲染, 2026-09-27 实锤:
-                                                     卡片先入队后执行, filter 在执行时才填进 local) */
-                    dst.req = local.req;   /* 要求返回字段显示形 (卡片右键查看; 漏拷 = 菜单空) */
-                    dst.arg = local.arg;   /* 原始参数 JSON (跨轮完整重发+落库; 漏拷 = 下一轮模型
-                                               看不到自己当时的调用参数, 2026-09-27 实锤会话-107) */
-                    dst.cid = local.cid;   /* function_call 配对标识 (跨轮回喂成对+落库) */
-                    dst.res8 = local.res8;   /* 结果载荷 (漏拷 = 会话文件「结果」恒空, 2026-09-27
-                                                 实锤 — 新增落库字段必须同步进本清单) */
+                    /* 整结构赋值, 不再逐字段手抄 (filter/res8 两次"漏拷"实锤同源):
+                       入队时 push 的就是 local 全量, 此处回写 = 原字段 + 执行期新填内容。
+                       唯一例外 open (展开态归泵/用户) 赋值后还原。新增字段无须来此登记 —
+                       比对清单在 AiToolStep::operator==, 落库在 ai_core HistConv*。 */
+                    bool openSaved = j->steps[sidx].open;
+                    j->steps[sidx] = local;
+                    j->steps[sidx].open = openSaved;
                     j->stepsVersion++;
                 }
                 LeaveCriticalSection(&j->cs);

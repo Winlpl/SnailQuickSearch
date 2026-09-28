@@ -319,6 +319,18 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
                                          文件大小"; 卡片右键查看; 随历史落库) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
+    /* 步骤同步比对唯一事实源 (泵 changed 检测 + 新增字段默认参与):
+       刻意排除 open (纯 UI 态) 与 adj (adj 差异不得触发镜像 assign —
+       会话份逐项裁决状态会被 worker 镜像覆盖, "UI 裁决优先" 口径)。
+       手工字段清单只剩此处与 ai_core 落库存取两处 (dst 镜像已是整结构赋值)。 */
+    bool operator==(const AiToolStep& o) const {
+        return kind == o.kind && name == o.name && state == o.state &&
+               mode == o.mode && query == o.query && argz == o.argz &&
+               arg == o.arg && cid == o.cid && res8 == o.res8 &&
+               count == o.count && elapsedMs == o.elapsedMs && err == o.err &&
+               top == o.top && wrote == o.wrote && chg == o.chg &&
+               filter == o.filter && req == o.req;
+    }
 };
 /* 用户消息附带的多模态输入 (随历史落库; 图片经前端压缩, 视频/音频直接 data URL)。
  * dataUrl = "data:<mime>;base64,<...>" — 请求体 (input_image/input_file) 与

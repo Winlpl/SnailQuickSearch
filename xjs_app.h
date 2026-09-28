@@ -118,6 +118,7 @@ void XjsPostToUiDone();                                        /* 引擎消息�
 void XjsPostToUiDropWindow(XjsSearchWindow* w);                /* 窗口销毁: 返还该窗已投未处理消息的闸门计数 */
 bool XjsPostUiOwnedString(XjsSearchWindow* w, UINT msg, LPARAM lp, std::string* payload);  /* 堆载荷投递 (销毁兜底释放) */
 std::string* XjsUiOwnedStringTake(std::string* payload);       /* 消费点摘登记并接管所有权 (调用方 delete) */
+void XjsMarkUiThread();   /* wWinMain 第三句登记 UI 线程: Cur() 据此对"引擎线程禁 Cur()"红线做运行期断言 */
 void XjsUiOwnedStringsDropHwnd(HWND hwnd);                     /* 窗口销毁: 释放该窗名下未消费的登记载荷 */
 
 /* 崩溃取证阶段标记 (定义在 main.cpp; VEH 落盘 startup_stack.txt 首行 phase=)。
@@ -961,7 +962,9 @@ struct XjsUiProfile {
  * 搜索结果对象 (xjs_result) 与全部界面状态 (D2D 设备/选择/滚动/预览/重命名…)。
  * 原 g_* 每窗全局改为 XjsSearchWindow 字段, 经宏 (XjsSearchWindow::Cur()->…) 重定向, 既有代码零改动。
  * "当前窗"在主窗 WndProc 入口按 hwnd 绑定; 引擎线程回调禁用 Cur(),
- * 一律经 OfResult(结果对象→所属窗) / MainHwnd(引擎级事件) 显式定位。 */
+ * 一律经 OfResult(结果对象→所属窗) / MainHwnd(引擎级事件) 显式定位。
+ * 线程纪律有运行期断言兜底 (wWinMain 经 XjsMarkUiThread 登记 UI 线程, Cur() 检测
+ * 非 UI 线程调用 — 挂调试器时中断报点, 无调试器零影响)。 */
 class XjsSearchWindow {
 public:
     bool isMain = false;         /* 主窗: 托盘/热键/引擎生命周期/配置归属 */
