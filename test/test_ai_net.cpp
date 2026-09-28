@@ -147,16 +147,15 @@ static void TestHtmlToText() {
           "html_text 未知变体标签不吞正文");
 }
 
-/* ---------- AiCapUtf8HeadTail (readCapKB 默认 30 → 头 24576 + 尾 6144) ---------- */
+/* ---------- AiCapUtf8HeadTail (readCapKB 作业快照 30 → 头 24576 + 尾 6144) ---------- */
 static void TestCap() {
-    g_cfg.readCapKB = 30;
     /* 1) 未超上限原样返回 */
     std::string shortTxt = "hello";
-    CHECK(AiCapUtf8HeadTail(shortTxt) == shortTxt, "cap 未超上限原样");
+    CHECK(AiCapUtf8HeadTail(shortTxt, 30) == shortTxt, "cap 未超上限原样");
     /* 2) ASCII 超上限: 40000 字节 → 头 24576 + 尾 6144, 省略 9280 */
     std::string big(40000, 'a');
     for (size_t i = 0; i < big.size(); i++) big[i] = (char)('a' + i % 26);
-    std::string cut = AiCapUtf8HeadTail(big);
+    std::string cut = AiCapUtf8HeadTail(big, 30);
     CHECK(cut.size() > 24576 + 6144, "cap 截后长于头尾和");
     CHECK(cut.compare(0, 24576, big, 0, 24576) == 0, "cap 头 24576 字节原样");
     CHECK(cut.compare(cut.size() - 6144, 6144, big, 40000 - 6144, 6144) == 0, "cap 尾 6144 字节原样");
@@ -165,7 +164,7 @@ static void TestCap() {
      *    Utf8Floor 应回退到 24575; 尾部 27431 起恰在字符边界 (2856/3=952 整除) */
     std::string cjk(24575, 'a');
     for (int i = 0; i < 3000; i++) cjk += "\xE4\xB8\xAD";
-    std::string cut2 = AiCapUtf8HeadTail(cjk);
+    std::string cut2 = AiCapUtf8HeadTail(cjk, 30);
     CHECK(Contains(W8(cut2.c_str()), L"中间省略 2856 字节"), "cap CJK 省略量");
     size_t markerPos = cut2.find("\xE7\x95\xA5\x20");   /* "略 " 的 UTF-8 */
     CHECK(markerPos != std::string::npos && markerPos > 24575, "cap CJK 头部在字符边界落刀");

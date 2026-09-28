@@ -195,11 +195,51 @@ int MdLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* ud) {
     return 0;
 }
 
+/* 实体解码 (md4c 契约: MD_TEXT_ENTITY 交付原文, 解码责任在渲染方): 常用命名实体 +
+ * 数字形式 (十进制/十六进制); 未知/畸形原样透传 (显示原文好过吞字符)。
+ * 曾整体透传 = HTML 转写文档渲染出字面 "AT&amp;T" */
+static std::wstring MdDecodeEntity(const char* s, MD_SIZE n) {
+    std::string e(s, n);
+    if (e.size() >= 3 && e[0] == '&' && e[e.size() - 1] == ';') {
+        std::string body = e.substr(1, e.size() - 2);
+        static const struct { const char* name; wchar_t ch; } NAMED[] = {
+            {"amp", L'&'}, {"lt", L'<'}, {"gt", L'>'}, {"quot", L'"'}, {"apos", L'\''},
+            {"nbsp", 160}, {"copy", 0x00A9}, {"reg", 0x00AE}, {"trade", 0x2122},
+            {"hellip", 0x2026}, {"mdash", 0x2014}, {"ndash", 0x2013},
+            {"ensp", 0x2002}, {"emsp", 0x2003}, {"thinsp", 0x2009},
+            {"laquo", 0x00AB}, {"raquo", 0x00BB}, {"times", 0x00D7}, {"divide", 0x00F7},
+        };
+        if (!body.empty() && body[0] == '#') {
+            char* endp = NULL;
+            unsigned long cp;
+            if (body.size() > 9) return MdUtf8(s, n);   /* 过长拒绝 (荒谬码点不硬猜) */
+            if (body.size() >= 2 && (body[1] == 'x' || body[1] == 'X'))
+                cp = strtoul(body.c_str() + 2, &endp, 16);
+            else
+                cp = strtoul(body.c_str() + 1, &endp, 10);
+            if (!endp || *endp || cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+                return MdUtf8(s, n);
+            std::wstring out;
+            if (cp < 0x10000) out += (wchar_t)cp;
+            else {
+                cp -= 0x10000;
+                out += (wchar_t)(0xD800 + (cp >> 10));
+                out += (wchar_t)(0xDC00 + (cp & 0x3FF));
+            }
+            return out;
+        }
+        for (const auto& nd : NAMED)
+            if (body == nd.name) return std::wstring(1, nd.ch);
+    }
+    return MdUtf8(s, n);
+}
+
 int MdText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) {
     auto* c = (MdParseCtx*)ud;
     if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) c->AppendText(L" ");   /* 软/硬换行一律作空格 */
     else if (type == MD_TEXT_NULLCHAR) c->AppendText(L"\uFFFD");
-    else c->AppendText(MdUtf8(text, size));   /* 实体原文透传 */
+    else if (type == MD_TEXT_ENTITY) c->AppendText(MdDecodeEntity(text, size));
+    else c->AppendText(MdUtf8(text, size));
     return 0;
 }
 

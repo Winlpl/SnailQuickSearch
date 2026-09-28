@@ -445,7 +445,11 @@ static void GdiDrawString(HDC dc, const std::wstring& s, GdiFormat* f, const Xjs
 /* 效果范围 (链接色/下划线) 叠画: 按 GdiWrapLines 的行分布把范围内的子串重画 (混排逐段) */
 static void GdiDrawEffects(HDC dc, GdiLayout* L, const XjsRect& r) {
     if (L->effects.empty() && L->underlines.empty()) return;
-    GdiFormat* f = L->fmt;
+    /* 布局级 wrap/行距覆盖与正文绘制同源 (正文 GpDrawTextLay 走 GdiLayFmtOf,
+       效果叠画曾用格式本体 = 覆盖生效的布局里链接子串按默认行距重排画错位) */
+    GdiFormat ef = *L->fmt;
+    GdiLayFmtOf(L, &ef);
+    GdiFormat* f = &ef;
     float lineH = GdiLineHeight(f, dc);
     auto lines = GdiWrapLines(dc, f, L->text, r.right - r.left);
     /* 与 GdiDrawMultiLine 同一 UNIFORM 基线平移 (效果范围叠画必须落回基线, 否则相对正文漂移) */
@@ -516,7 +520,9 @@ static void GdiDrawEffects(HDC dc, GdiLayout* L, const XjsRect& r) {
 
 void GpSurface::EnsureSize(int nw, int nh) {
     nw = xf_max(nw, 1); nh = xf_max(nh, 1);
-    if (memDC && w == nw && h == nh) return;
+    /* hbmp/gfx 一并入"已建成"判定: 曾只看 memDC — DIB 建失败后 memDC 照记尺寸,
+       之后每帧短路 = 永久往 1x1 单色残位图上画 (整窗空白不再重试) */
+    if (memDC && hbmp && gfx && w == nw && h == nh) return;
     Destroy();
     w = nw; h = nh;
     HDC sdc = GetDC(hwnd);
@@ -529,11 +535,20 @@ void GpSurface::EnsureSize(int nw, int nh) {
     bi.bmiHeader.biCompression = BI_RGB;
     hbmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
     ReleaseDC(hwnd, sdc);
-    memDC = CreateCompatibleDC(NULL);
-    oldBmp = SelectObject(memDC, hbmp);
-    gfx = Gdiplus::Graphics::FromHDC(memDC);
-    gfx->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    gfx->SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    if (!hbmp) {
+        /* DIB 分配失败: 退 1×1 占位保表面自洽 (绘制侧不必判空), 尺寸可满足的帧自动重建真尺寸 */
+        w = 1; h = 1;
+        bi.bmiHeader.biWidth = 1;
+        bi.bmiHeader.biHeight = -1;
+        hbmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
+    }
+    memDC = hbmp ? CreateCompatibleDC(NULL) : NULL;
+    oldBmp = memDC ? SelectObject(memDC, hbmp) : NULL;
+    gfx = memDC ? Gdiplus::Graphics::FromHDC(memDC) : NULL;   /* FromHDC 失败可返回 NULL, 直调虚表 = AV */
+    if (gfx) {
+        gfx->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        gfx->SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    }
 }
 
 void GpSurface::Destroy() {
@@ -743,9 +758,9 @@ static void GpPushAlpha(XjsRt* rt, const XjsRect& r, float opacity) {
     if (!a.hbmp) return;
     memset(a.bits, 0, (size_t)a.w * 4 * a.h);   /* 未画区域 = 透明黑 (混合时不动母画布) */
     a.dc = CreateCompatibleDC(NULL);
-    a.oldBmp = SelectObject(a.dc, a.hbmp);
-    a.gfx = Gdiplus::Graphics::FromHDC(a.dc);
-    a.gfx->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    a.oldBmp = a.dc ? SelectObject(a.dc, a.hbmp) : NULL;
+    a.gfx = a.dc ? Gdiplus::Graphics::FromHDC(a.dc) : NULL;
+    if (a.gfx) a.gfx->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);   /* FromHDC 失败可返回 NULL */
     s->alphas.push_back(a);
 }
 static void GpPopAlpha(XjsRt* rt) {
@@ -973,7 +988,7 @@ static HRESULT GpLayoutMetrics(XjsTextLayout* l, XjsTextMetrics* m) {
     GdiLayout* L = AsLay(l);
     if (!L || !L->fmt || !L->fmt->font || !m) return E_FAIL;
     HDC dc = s_measureDC;
-    if (!dc) dc = DrawDC(s_curSurf);
+    if (!dc) dc = s_curSurf ? DrawDC(s_curSurf) : NULL;   /* 同下: 判空须在解引用之前 */
     if (!dc) return E_FAIL;
     HFONT of = (HFONT)SelectObject(dc, L->fmt->font);
     GdiFormat ef = *L->fmt;
@@ -1010,7 +1025,7 @@ static bool GpLayoutHitTest(XjsTextLayout* l, UINT32 idx, BOOL trailing, float* 
     /* 行内编辑 (NO_WRAP): 光标 x = 前缀宽度 */
     GdiLayout* L = AsLay(l);
     if (!L || !L->fmt || !L->fmt->font) return false;
-    HDC dc = s_measureDC ? s_measureDC : DrawDC(s_curSurf);
+    HDC dc = s_measureDC ? s_measureDC : (s_curSurf ? DrawDC(s_curSurf) : NULL);   /* 帧外 s_curSurf 可为 NULL, DrawDC 先解引用再判空曾反序 */
     if (!dc) return false;
     HFONT of = (HFONT)SelectObject(dc, L->fmt->font);
     idx = (UINT32)xf_min((int)idx, (int)L->text.size());
@@ -1024,7 +1039,7 @@ static HRESULT GpLayoutHitRange(XjsTextLayout* l, UINT32 pos, UINT32 len, float 
     /* md 行内代码底色: 单矩形近似 (前缀宽 → 段宽) */
     GdiLayout* L = AsLay(l);
     if (!L || !L->fmt || !L->fmt->font || !max || !out) return E_FAIL;
-    HDC dc = s_measureDC ? s_measureDC : DrawDC(s_curSurf);
+    HDC dc = s_measureDC ? s_measureDC : (s_curSurf ? DrawDC(s_curSurf) : NULL);   /* 帧外 s_curSurf 可为 NULL, DrawDC 先解引用再判空曾反序 */
     if (!dc) return E_FAIL;
     HFONT of = (HFONT)SelectObject(dc, L->fmt->font);
     pos = (UINT32)xf_min((int)pos, (int)L->text.size());
@@ -1040,7 +1055,7 @@ static bool GpLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, BO
     /* 行内编辑: 逐字累计宽度找落点 (近似 DWrite HitTestPoint) */
     GdiLayout* L = AsLay(l);
     if (!L || !L->fmt || !L->fmt->font) return false;
-    HDC dc = s_measureDC ? s_measureDC : DrawDC(s_curSurf);
+    HDC dc = s_measureDC ? s_measureDC : (s_curSurf ? DrawDC(s_curSurf) : NULL);   /* 帧外 s_curSurf 可为 NULL, DrawDC 先解引用再判空曾反序 */
     if (!dc) return false;
     HFONT of = (HFONT)SelectObject(dc, L->fmt->font);
     UINT32 i = 0;

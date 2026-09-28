@@ -395,7 +395,7 @@ std::wstring FileResolveTargets(const Jv& v, std::vector<std::wstring>* out, int
 std::wstring FileOpPrepare(const Jv& v, AiFileOp* op);   /* 参数 → op; 错误 = 描述 */
 std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st);
           /* 执行 (worker 线程, 逐项 SHFileOperation; 结果进 st->res8/top; j 只用于 abort) */
-std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st);             /* read_file 实体 */
+std::wstring ReadFileToolExec(AiJob* j, const Jv& v, AiToolStep* st);   /* read_file 实体 (readCapKB 走作业快照) */
 std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st);  /* read_image 实体 (图片注入 j->injImgs) */
 
 /* ---- 资源管理器窗口枚举 (list_explorer_windows, 2.12.0, 实现收口 ai_file.cpp):
@@ -419,10 +419,11 @@ std::wstring ListExplorerWindowsExec(const Jv& v, AiToolStep* st);  /* list_expl
 std::wstring ExplorerWindowOpExec(const Jv& v, AiToolStep* st);     /* explorer_window_op 实体 (kind 18):
           activate/close/minimize/maximize/restore 按 hwnd 定向 (须仍在现枚举窗口集内) +
           open=path 开文件夹; 全部瞬时动作直执行 (任务类先例), 见 ai_file.cpp 实现头注释 */
-void AiOutHeadTail(size_t* head, size_t* tail);            /* 内容回传头尾上限 (头 80%+尾 20%, 总量
-                                                              = readCapKB; ai_file.cpp 收口) */
-std::string AiCapUtf8HeadTail(const std::string& content8);/* 内容封顶 (UTF-8 边界落刀 + 精确省略量
-                                                              标记; read_file 与 fetch_url 共用) */
+void AiOutHeadTail(int capKB, size_t* head, size_t* tail);  /* 内容回传头尾上限 (头 80%+尾 20%, 总量
+                                                              = readCapKB 作业快照; ai_file.cpp 收口;
+                                                              worker 禁裸读 g_cfg — 无锁全库镜像) */
+std::string AiCapUtf8HeadTail(const std::string& content8, int capKB);
+          /* 内容封顶 (UTF-8 边界落刀 + 精确省略量标记; read_file 与 fetch_url 共用) */
 std::wstring AiSpillText(const std::string& content8, const char* tag8);
           /* 大输出外溢落盘 (dsh spill 口径, 2026-09-27): %TEMP%\SnailQuickSearch-AI\
              溢存-<tag>-<序>.txt (UTF-8 BOM), 返回完整路径; 空/超 8MB/写失败 = 空 (调用方
@@ -505,6 +506,7 @@ struct AiJob {            /* 一次 agent 请求 (堆分配; 工作线程只摸�
     bool cfgReasoning = false, cfgWebSearch = true, cfgNotifyDone = true;
     int cfgSearchSample = 20, cfgMaxTurns = AI_AGENT_TURNS_DEF;
     int cfgCmdTimeoutSec = 120, cfgHttpTimeoutSec = 120;
+    int cfgReadCapKB = 30;     /* read_file/fetch_url 内容封顶快照 (worker 禁裸读 g_cfg) */
     INTERNET_PORT port = 443;
     bool secure = true;
     XjsWindowToken tok = 0;        /* 发起窗口 (open_file 走宿主 OpenFile 用) */

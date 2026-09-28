@@ -1121,7 +1121,9 @@ void XjsShowAppMenu() {
         nw.title = XjsT(L"菜单.创建新窗口");
         nw.sub = L"Ctrl+N";
         nw.children.push_back({ IDM_MENU_BASE + 46, XjsT(L"菜单.新建空白窗口"), L"Ctrl+N", false, false, false, false, false, XMI_NONE });
-        for (int k = 1; k < XjsUiProfileCount(); k++) {
+        /* 槽上限对齐分发段 (XjsOnPopupResult 只认 80..80+XJS_LAUNCHER_SLOT_MAX): 档案槽持久
+           只增, 超出上限的档案列出也点不动 = 死项, 构建侧截断 */
+        for (int k = 1; k < XjsUiProfileCount() && k < XJS_LAUNCHER_SLOT_MAX; k++) {
             XjsUiProfile* prof = XjsUiProfileAt(k);
             if (!prof) continue;
             XjsSearchWindow* w = XjsSearchWindow::AtSlot(k);

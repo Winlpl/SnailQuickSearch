@@ -551,8 +551,10 @@ static void PptxSlideText(const std::string& xml, std::string* out, size_t cap) 
     }
 }
 
-/* xlsx sharedStrings: 每个 si 的全部 t 文本相连 = 一个共享串 */
-static void XlsxSharedStrings(const std::string& xml, std::vector<std::string>* out, size_t cap) {
+/* xlsx sharedStrings: 每个 si 的全部 t 文本相连 = 一个共享串。
+   位置封顶已删 (2026-09-29): XML 本体读取已有上限, 扫描半途停 = 高序号共享串静默丢失
+   (大工作簿对应单元格在抽取结果里空白), 数量防御 (20 万条) 足够兜底 */
+static void XlsxSharedStrings(const std::string& xml, std::vector<std::string>* out) {
     size_t pos = 0;
     for (;;) {
         size_t cp, ce, af;
@@ -568,7 +570,6 @@ static void XlsxSharedStrings(const std::string& xml, std::vector<std::string>* 
         out->push_back(std::move(item));
         if (out->size() > 200000) break;   /* 防御: 共享串过多直接停 (正常远达不到) */
         pos = af;
-        if (pos > cap) break;
     }
 }
 
@@ -589,7 +590,10 @@ static void XlsxSheetText(const std::string& xml, const std::vector<std::string>
                 size_t lt = xml.rfind('<', c2p - 1);
                 if (lt != std::string::npos) openTag = xml.substr(lt, c2p - lt);
             }
-            bool isShared = openTag.find("t=\"s\"") != std::string::npos;
+            /* 共享串判定: 双引号/单引号两种属性写法都认 (Excel 本体恒双引号, 非主流生成器
+               有 t='s'; 漏判 = 序号被当数字原样输出) */
+            bool isShared = openTag.find("t=\"s\"") != std::string::npos ||
+                            openTag.find("t='s'") != std::string::npos;
             std::string cell;
             size_t vp = c2p;
             for (;;) {
@@ -700,7 +704,7 @@ static bool AiOfficeExtract(const std::wstring& path, const std::wstring& ext,
                 if (e.name == "xl/sharedStrings.xml") {
                     std::string xml;
                     if (!AiZipRead(raw, e, &xml, 48ull * 1024 * 1024, err)) return false;
-                    XlsxSharedStrings(xml, &shared, cap);
+                    XlsxSharedStrings(xml, &shared);
                     break;
                 }
             }
@@ -993,17 +997,18 @@ std::wstring FileOpExecute(AiJob* j, const AiFileOp& op, AiToolStep* st) {
 /* ==================== read_file ==================== */
 
 static const size_t RF_READ_CAP = 8ull * 1024 * 1024;        /* 文本读取上限 */
-/* 内容回传头尾: 总量 = Agent 设置 readCapKB (4..512, 缺省 30KB), 头 80% + 尾 20% (同旧 24+6 比例) */
-void AiOutHeadTail(size_t* head, size_t* tail) {
-    size_t total = (size_t)(g_cfg.readCapKB > 0 ? g_cfg.readCapKB : 30) * 1024;
+/* 内容回传头尾: 总量 = Agent 设置 readCapKB 的作业快照 (4..512, 缺省 30KB), 头 80% + 尾 20%
+ * (同旧 24+6 比例)。快照随 AiJob 走 — worker 线程禁裸读 g_cfg (无锁全库镜像) */
+void AiOutHeadTail(int capKB, size_t* head, size_t* tail) {
+    size_t total = (size_t)(capKB > 0 ? capKB : 30) * 1024;
     *head = total * 4 / 5;
     *tail = total - *head;
 }
 /* 内容封顶: 超 AiOutHeadTail 上限时头尾保留 + 中段带精确省略量标记 (省略数恒给精确值口径),
  * UTF-8 字符边界落刀; read_file 与 fetch_url (ai_net.cpp) 共用 */
-std::string AiCapUtf8HeadTail(const std::string& content8) {
+std::string AiCapUtf8HeadTail(const std::string& content8, int capKB) {
     size_t rfHead, rfTail;
-    AiOutHeadTail(&rfHead, &rfTail);
+    AiOutHeadTail(capKB, &rfHead, &rfTail);
     size_t cap = rfHead + rfTail;
     if (content8.size() <= cap) return content8;
     size_t headEnd = Utf8Floor(content8, rfHead);
@@ -1112,7 +1117,9 @@ std::string AiWindowLines(const std::string& content8, long long offset, long lo
                 if (out.empty()) {   /* 单行就超预算: 截该行 (行内续读不支持, dsh 同粒度; 落刀回退 UTF-8 边界,
                                         与 AiCapUtf8HeadTail 同口径) */
                     size_t take = budget > 0 ? budget - 1 : 0;
-                    take = Utf8Floor(content8, take);
+                    /* 落刀坐标按窗口起点平移: 曾用绝对 budget-1, 分页 (offset>1) 窗起点非 0 时
+                       刀落在本行多字节字符中间 = 窗尾一个乱码字符 */
+                    if (take > 0) take = Utf8Floor(content8, p + take) - p;
                     out.append(content8, p, take);
                     out += '\n';
                     endLine = line;
@@ -1139,7 +1146,7 @@ std::string AiWindowLines(const std::string& content8, long long offset, long lo
 }
 
 /* read_file 实体: 文本 (编码识别) / docx·pptx·xlsx (解包抽文字); 其它二进制明确报错 */
-std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
+std::wstring ReadFileToolExec(AiJob* j, const Jv& v, AiToolStep* st) {
     st->kind = 12;
     std::vector<std::wstring> list;
     std::wstring err = FileResolveTargets(v, &list, 1);
@@ -1193,10 +1200,11 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
     const Jv* lv = v.Get(L"limit");
     bool paged = (ov && ov->t == 2 && ov->num >= 1) || (lv && lv->t == 2 && lv->num >= 1);
     size_t rfHead = 0, rfTail = 0;
-    AiOutHeadTail(&rfHead, &rfTail);
+    AiOutHeadTail(j->cfgReadCapKB, &rfHead, &rfTail);
     if (paged) {
-        long long offset = (ov && ov->t == 2 && ov->num >= 1) ? (long long)ov->num : 1;
-        long long limit = (lv && lv->t == 2 && lv->num >= 1) ? (long long)lv->num : 2000;
+        /* 模型可控 double→整型: 上界钳取 (仅验 >=1 时 1e300 一类巨值是 UB, 同 ids 解析防线) */
+        long long offset = (ov && ov->t == 2 && ov->num >= 1 && ov->num <= 1e12) ? (long long)ov->num : 1;
+        long long limit = (lv && lv->t == 2 && lv->num >= 1 && lv->num <= 200000) ? (long long)lv->num : 2000;
         std::wstring note;
         std::string win8 = AiWindowLines(content8, offset, limit, rfHead + rfTail, &note);
         picojson::object o;
@@ -1211,7 +1219,7 @@ std::wstring ReadFileToolExec(const Jv& v, AiToolStep* st) {
     }
     /* 内容封顶: 头+尾+精确省略量 (与 fetch_url 共用收口); 中段外溢落盘给路径 */
     std::string full8 = content8;
-    content8 = AiCapUtf8HeadTail(content8);
+    content8 = AiCapUtf8HeadTail(content8, j->cfgReadCapKB);
     picojson::object o;
     o["path"] = JS(path);
     o["格式或编码"] = JS(kindName);
@@ -1318,7 +1326,7 @@ static bool WicShrinkToJpeg(const std::wstring& path, std::string* jpeg) {
 /* read_image 实体: 图片 → data URL 注入 j->injImgs (请求体构建时组 input_image) */
 std::wstring ReadImageToolExec(AiJob* j, const Jv& v, AiToolStep* st) {
     st->kind = 14;
-    if (!g_cfg.img)
+    if (!j->cfgImg)   /* 作业快照 (worker 禁裸读 g_cfg) */
         return L"当前模型档案未开启图片输入能力 (接口设置勾选「图片输入」), 无法看图 — 请如实告知用户";
     if (j->injImgs.size() >= AI_ATT_MAX)
         return L"一次任务最多注入 " + std::to_wstring(AI_ATT_MAX) + L" 张图片 (已达上限)";

@@ -466,6 +466,9 @@ void XjsPluginStartup() {
     for (int i = 0; i < (int)s_plugins.size(); i++) {
         XjsPluginEntry& e = s_plugins[i];
         if (!e.enabled || !e.mf.ok) continue;
+        /* 版本确认只在设置页启用开关路径强制 (首次启用/版本变化弹确认框) — 启动对已启用
+           插件照常加载: 用户点了启用就是持久授权, 升级插件后重启拒载会让插件无声消失
+           (2026-09-29 实锤: 配置里确认版本落后于清单版本的用户, 两个插件全部拒载) */
         std::wstring err;
         if (!PluginLoadOne(e, &err)) e.loadErr = err;   /* 失败不写回 enabled (设计稿 §2.2), 状态列显示原因 */
     }
@@ -488,10 +491,11 @@ void XjsPluginRescan() {
     if (!s_started) { XjsPluginStartup(); return; }
     XjsSetPhase(L"plugin-scan");
     PluginScan();
-    for (auto& e : s_plugins) {   /* 新发现且已启用的 (重启前手工放进目录的) 立即补载 */
+    for (int i = 0; i < (int)s_plugins.size(); i++) {   /* 新发现且已启用的 (重启前手工放进目录的) 立即补载 */
+        XjsPluginEntry& e = s_plugins[i];
         if (!e.enabled || !e.mf.ok || e.loaded) continue;
         std::wstring err;
-        if (!PluginLoadOne(e, &err)) e.loadErr = err;
+        if (!PluginLoadOne(e, &err)) e.loadErr = err;   /* 启动加载不做版本确认闸 (同 XjsPluginStartup 注) */
     }
     XjsPluginApiPruneOwners();   /* 重扫可能移除插件: 运行时模式的失效 owner 整条剪掉 */
     XjsPluginPanelValidateOwners();   /* 重扫可能移除/清空能力: owner 失效的接管会话立即结束 */
@@ -737,11 +741,22 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
     for (auto& a : args) cl += L" " + q(a);
     std::wstring cw = (cwd && *cwd) ? Utf8ToUtf16(cwd) : L"";
 
+    /* 作业对象收口整棵进程树: 孙进程继承管道写端时不杀它, 读线程 ReadFile 永不 EOF,
+       t1.join() 永久挂死 (插件在 UI 线程同步调用 = 全程序冻结)。
+       作业对象建不出 = 两条防挂死路径 (超时杀树/收尾终结) 全失效 → 干净拒绝执行, 不放行。
+       置于建管道之前: 此处失败直接返回, 无句柄可漏 */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (!job) return XJS_PLUGIN_ERR_FAIL;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl = {};
+    jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
+
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
     if (!CreatePipe(&outR, &outW, &sa, 0) || !CreatePipe(&errR, &errW, &sa, 0)) {
         if (outR) CloseHandle(outR); if (outW) CloseHandle(outW);
         if (errR) CloseHandle(errR); if (errW) CloseHandle(errW);
+        CloseHandle(job);
         return XJS_PLUGIN_ERR_IO;
     }
     SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);   /* 读端不继承, 否则读不到 EOF */
@@ -753,23 +768,15 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
     si.hStdOutput = outW; si.hStdError = errW;
     PROCESS_INFORMATION pi = {};
     std::vector<wchar_t> clBuf(cl.begin(), cl.end()); clBuf.push_back(L'\0');
-    /* 作业对象收口整棵进程树: 孙进程继承管道写端时不杀它, 读线程 ReadFile 永不 EOF,
-       t1.join() 永久挂死 (插件在 UI 线程同步调用 = 全程序冻结) */
-    HANDLE job = CreateJobObjectW(NULL, NULL);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl = {};
-        jl.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
-    }
     BOOL ok = CreateProcessW(NULL, clBuf.data(), NULL, NULL, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL,
                              cw.empty() ? NULL : cw.c_str(), &si, &pi);
     CloseHandle(outW); CloseHandle(errW);   /* 父端写端先关, 读端才能 EOF */
     if (!ok) {
         CloseHandle(outR); CloseHandle(errR);
-        if (job) CloseHandle(job);
+        CloseHandle(job);
         return XJS_PLUGIN_ERR_NOTFOUND;
     }
-    if (job) AssignProcessToJobObject(job, pi.hProcess);   /* 先入作业再放行 (挂起态防逃逸) */
+    AssignProcessToJobObject(job, pi.hProcess);   /* 先入作业再放行 (挂起态防逃逸) */
     ResumeThread(pi.hThread);
     const int XJS_EXEC_CAP = 4 * 1024 * 1024;
     auto reader = [&](HANDLE rd, std::string* s) {
@@ -782,18 +789,18 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
     bool timedOut = false;
     if (WaitForSingleObject(pi.hProcess, timeoutMs > 0 ? (DWORD)timeoutMs : INFINITE) == WAIT_TIMEOUT) {
         timedOut = true;
-        if (job) TerminateJobObject(job, (UINT)-1);   /* 杀整棵树 (孙进程一并), 管道写端随之关闭 */
-        else TerminateProcess(pi.hProcess, (UINT)-1);
+        TerminateJobObject(job, (UINT)-1);   /* 杀整棵树 (孙进程一并), 管道写端随之关闭;
+                                                作业对象恒存在 (建不出 = 上方已拒绝执行) */
         WaitForSingleObject(pi.hProcess, 5000);
     }
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     /* 子进程已退出仍可能有孙进程持有管道写端: 不收割则 join 挂死 — 终结作业放行 EOF。
        TerminateJobObject 对已退出成员无害, exit code 已在上方取出 */
-    if (job) TerminateJobObject(job, (UINT)code);
+    TerminateJobObject(job, (UINT)code);
     t1.join(); t2.join();
     CloseHandle(outR); CloseHandle(errR); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    if (job) CloseHandle(job);
+    CloseHandle(job);
     bool trunc = so.size() >= (size_t)XJS_EXEC_CAP || se.size() >= (size_t)XJS_EXEC_CAP;
     std::string j = "{\"exitCode\":";
     j += std::to_string((long long)(int)code);
@@ -1082,19 +1089,28 @@ static int FnPanelClose(XjsPluginCtx* ctx, XjsWindowToken window) {
 static int FnPanelGetInfo(XjsPluginCtx* ctx, XjsWindowToken window, long long* serial, int* w, int* h, float* scale) {
     XjsPluginEntry* p; int e;
     if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式渲染前取尺寸) */
+    /* 窗口解析必须落进面板锁内: DestroyAndFree 持锁跨 delete, 锁外拿指针后 UI 线程可在
+       "已解析、未进锁"的间隙拆窗 → 锁内解引用悬垂指针 (UAF)。锁内解析+调用同锁互斥拆窗
+       (Info/Deliver 内层 XjsPanelLock 同线程可重入); 拆窗先改注册表再进锁, 锁内解析看到
+       的必是压缩后的表 + 已递增的代号 → 旧令牌干净失配返回 */
+    XjsPreviewPanelLockEnter();
     XjsSearchWindow* win = PluginWindowOfToken(window);
     /* 归属校验在 XjsPreviewPanelInfo 的面板锁内做 (锁外读 plugPanelOn/PluginId = 与 UI 线程
        关会话/拆窗竞态); 不归属时 Info 输出零值并返回 false */
-    return XjsPreviewPanelInfo(win, p->mf.id.c_str(), serial, w, h, scale) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
+    bool ok = win && XjsPreviewPanelInfo(win, p->mf.id.c_str(), serial, w, h, scale);
+    XjsPreviewPanelLockLeave();
+    return ok ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 
 static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long long serial,
                                 int w, int h, const void* bgra, int stride) {
     XjsPluginEntry* p; int e;
     if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式交付) */
+    XjsPreviewPanelLockEnter();   /* 同 FnPanelGetInfo: 解析+交付与拆窗同锁互斥 (尺寸/字节校验在 Deliver 内) */
     XjsSearchWindow* win = PluginWindowOfToken(window);
-    if (!win) return XJS_PLUGIN_ERR_STATE;
-    return XjsPreviewPanelDeliver(win, p->mf.id.c_str(), serial, w, h, bgra, stride) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
+    bool ok = win && XjsPreviewPanelDeliver(win, p->mf.id.c_str(), serial, w, h, bgra, stride);
+    XjsPreviewPanelLockLeave();
+    return ok ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
 
 static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {

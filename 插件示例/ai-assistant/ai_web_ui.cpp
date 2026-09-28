@@ -1286,9 +1286,12 @@ function modelSetOpen(open){
 
 /* ==================== 接口设置面板 ==================== */
 function cfgToggle(open){
+  const wasOpen=S.cfgOpen;
   S.cfgOpen=open;
-  if(open){
-    /* 关闭面板 = 放弃未保存的编辑; 打开时从活动档案重填 */
+  if(open&&!wasOpen){
+    /* 关闭面板 = 放弃未保存的编辑; 打开时从活动档案重填。
+       已开时的重入 (renderAll 被 pal/status 等推送反复调) 不得走这里 —
+       重填+清 dirty 会静默抹掉正在敲的编辑 */
     S.profDirty=false;profDisarm();
     renderProfSelect();fillProfForm();
     fillAgentForm();setCfgTab(S.cfgTab||'api');
@@ -1569,7 +1572,7 @@ function renderThread(keepScroll){
   const stick=keepScroll?isNearBottom():true;
   const showEmpty=!S.msgs.length&&!S.sending;
   $('jumpbar').hidden=true;
-  if(showEmpty){ inner.innerHTML=EMPTY_HTML; updateJumpbar(); if(stick)scrollToEnd(); return; }
+  if(showEmpty){ inner.innerHTML=EMPTY_HTML; updateJumpbar(); updatePendAsk(); if(stick)scrollToEnd(); return; }   /* updatePendAsk: 空态也要收确认条 — 挂起裁决中切/删会话后残条 = 按钮无收件人的死条 */
   let html='';
   for(let i=0;i<S.msgs.length;){
     if(S.msgs[i].r===0){ html+=userRowHtml(S.msgs[i],i); i++; continue; }
@@ -1866,7 +1869,9 @@ function highlightCode(root){
     const lang=langEl.textContent.trim().toLowerCase();
     if(lang!=='lua'&&lang!=='luau'&&lang!=='sql')return;
     const code=box.querySelector('pre code');
-    const raw=decodeHtml(box.getAttribute('data-code')||'');
+    /* data-code 是 C++ HtmlEscape 后的属性: 浏览器解析时已解码一次, getAttribute 拿到的
+       即原文 — 再过 decodeHtml 会把代码里字面的 &lt; 之类实体样文本二次解码成标签字符 */
+    const raw=box.getAttribute('data-code')||'';
     if(code&&raw)hlApply(code,raw,lang==='sql'?'sql':'lua');
   });
 }
@@ -1898,7 +1903,9 @@ function linkifyPaths(root){
     const v=n.nodeValue;
     if(!v||v.length<4)return NodeFilter.FILTER_REJECT;
     const p=n.parentElement;
-    if(!p||p.closest('.ai-code,a,.ai-path,button,textarea,select,script,style'))return NodeFilter.FILTER_REJECT;
+    /* .ai-chip / .scmd (工具卡头查询串) 里的路径文本不链接化: 点击分发里 chip 分支与
+       卡头分支先于 .ai-path 命中, 链接化后路径子串会吞掉这两处自己的点击语义 */
+    if(!p||p.closest('.ai-code,a,.ai-path,button,textarea,select,script,style,.ai-chip,.scmd'))return NodeFilter.FILTER_REJECT;
     return v.match(PATH_RE)?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT;
   }});
   const nodes=[];let n;
@@ -2148,7 +2155,7 @@ function bindThread(){
     if(a){e.preventDefault();const href=a.getAttribute('href')||'';
       if(/^https?:/i.test(href))post({c:'openurl',href});return;}
     const cp=e.target.closest('.ai-code-copy');
-    if(cp){const box=cp.closest('.ai-code');const code=box?decodeHtml(box.getAttribute('data-code')||''):'';
+    if(cp){const box=cp.closest('.ai-code');const code=box?(box.getAttribute('data-code')||''):'';   /* 属性已解码一次, 不过 decodeHtml (同 highlightCode 口径) */
       post({c:'copy',text:code});
       cp.classList.add('ai-code-copied');cp.textContent='已复制';
       clearTimeout(S.copiedTimer);
@@ -2599,9 +2606,10 @@ function handle(m){
     case 'pal':S.pal=m.pal;applyPal(S.pal);renderAll();break;
     case 'cfg':
       S.cfg=m.cfg;
-      /* 面板开着且表单干净 → 从新活动档案重填; 有未保存编辑就不动 (不冲掉正在敲的内容)。
+      /* 面板开着且表单干净 → 从新活动档案重填 (接口+Agent 两页都要, 多窗广播下 Agent 页
+         不重填 = 输入框陈旧值整包写回覆盖别窗刚保存的设置); 有未保存编辑就不动 (不冲掉正在敲的内容)。
          面板不再随广播自动收起 (保存后停留展示 + toast 确认, 取消/✕ 才收) */
-      if(S.cfgOpen&&!S.profDirty)fillProfForm();
+      if(S.cfgOpen&&!S.profDirty){fillProfForm();fillAgentForm();}
       renderProfSelect();renderModelBtn();
       if(S.modelOpen)renderModelMenu();
       renderStatus();renderComposer();
@@ -2609,8 +2617,11 @@ function handle(m){
     case 'convs':S.convs=m.convs||[];renderSide();break;
     case 'pathcheck':applyPathCheck(m.r);break;
     case 'msgs':
-      if(m.cur!==undefined&&S.cur!==m.cur)S.reasonOpen={};   /* 会话切换: 裸消息下标键整体平移失效 */
-      else if(S.msgs.length>(m.msgs||[]).length)S.reasonOpen={};   /* 消息被删 (delturn/重试截断) 同理 */
+    if(m.cur!==undefined&&S.cur!==m.cur)S.reasonOpen={};   /* 会话切换: 裸消息下标键整体平移失效 */
+    else if(S.msgs.length>(m.msgs||[]).length){   /* 消息被删 (delturn/重试截断) 同理: 四张下标键表一并对齐清,
+        否则旧键漂移到别的卡片/回合组上 (开合态错位) */
+      S.reasonOpen={};S.openSteps={};S.toolGrp={};S.chgOpen={};
+    }
       if(m.cur!==undefined)S.cur=m.cur;
       S.msgs=m.msgs||[];
       if(m.st){S.sending=!!m.st.sending;S.net=m.st.net;S.phase=m.st.phase||0;S.note=m.st.note||'';}
@@ -2673,8 +2684,8 @@ function bind(){
   });
   /* 模型档案: 下拉切换 / 新建 / 复制 / 删除 (删除是两步确认); 保存成功/点外/Esc 均收起面板 */
   $('f-prof').addEventListener('change',()=>selectProf($('f-prof').value));
-  $('f-prof-add').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:0});});
-  $('f-prof-dup').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:1});});
+  $('f-prof-add').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:false});});
+  $('f-prof-dup').addEventListener('click',()=>{S.profDirty=false;post({c:'profNew',dup:true});});   /* 真布尔: C++ 侧只认 t==1 (曾发数字 1 恒判假 = 复制变新建空档案) */
   $('f-prof-del').addEventListener('click',()=>{
     if(!S.cfg.profs.length)return;
     if(!S.delArmed){   /* 首击进入待确认, 4s 内再击才删 (超时自动复位) */

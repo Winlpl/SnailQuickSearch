@@ -82,6 +82,8 @@
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
 #define ID_HOTKEY_SHOW      1     /* 全局快捷键注册基址: id = 本值+档案槽 (登记在主窗 hwnd) */
 #define ID_TRAY_ICON        2
+#define XJS_LAUNCHER_SLOT_MAX 64  /* ☰窗口启动器可及的档案槽上限 (菜单构建/结果分发/热键兜底卸载
+                                     三处共用此常量): 档案槽持久只增, 超出的启动器项曾是"看得见点不动" */
 
 #define WM_SCAN_PROGRESS    (WM_USER + 100)
 #define WM_SCAN_COMPLETE    (WM_USER + 101)

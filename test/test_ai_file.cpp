@@ -34,6 +34,7 @@ static void DumpCase(const char* name, const std::wstring& err, const std::wstri
 
 static std::wstring RunRead(const wchar_t* file, std::wstring* err) {
     AiToolStep st;
+    AiJob j;   /* 缺省快照 (cfgReadCapKB=30) 即可: 本测试只验读取/编码/封顶链路 */
     Jv v;
     v.t = 5;
     Jv pv;
@@ -44,7 +45,7 @@ static std::wstring RunRead(const wchar_t* file, std::wstring* err) {
     DWORD n = GetEnvironmentVariableW(L"TEMP", tmp, 1024);
     pv.str = std::wstring(tmp) + L"\\aft\\" + file;
     v.obj.push_back({ L"path", std::move(pv) });
-    *err = ReadFileToolExec(v, &st);
+    *err = ReadFileToolExec(&j, v, &st);
     return W8(st.res8.c_str());
 }
 static Jv Res8(const std::wstring& json) {

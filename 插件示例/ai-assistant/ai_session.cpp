@@ -242,6 +242,7 @@ void SendCurrent(AiSess* s, const std::wstring& textIn, const std::vector<AiAtta
     j->cfgMaxTurns = g_cfg.maxTurns;
     j->cfgCmdTimeoutSec = g_cfg.cmdTimeoutSec;
     j->cfgHttpTimeoutSec = g_cfg.httpTimeoutSec;
+    j->cfgReadCapKB = g_cfg.readCapKB;
     /* 对话快照 (2026-09-27 用户口径"会话上下文不允许任何丢失"): role==2 工具卡片一并进
      * hist — AgentBuildBody 把步骤重建为 function_call/output 对跨轮完整重发, 模型始终
      * 记得此前做过什么、拿到过什么 (只发文字历史时模型对"第一轮搜了几次"全靠编造,
@@ -304,6 +305,85 @@ static void PumpStreams() {
         stepsVer = j->stepsVersion;
         if (stepsVer != s.lastStepsVer) steps = j->steps;   /* 有变化才拷 (少一次全量复制) */
         LeaveCriticalSection(&j->cs);
+        /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
+         * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
+         * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。
+         * 恒在 state 分支之前执行 (2026-09-29 修复): worker 侧"最终步骤完成发布"与"state 置位"
+         * 是两个临界区先后发 — 泵若先见到收尾态, 收尾分支曾只清扫不镜像, 最后一张工具卡被
+         * 翻成"已中止"、res8 永不落库 (重开回放缺 function_call/output 对)。 */
+        if (!steps.empty()) {
+            int have = 0;
+            for (int i = s.stepBase; i < (int)s.msgs.size(); i++)
+                if (s.msgs[i].role == 2) have++;
+            /* 挂新卡片前摘掉尾部空文本气泡 (模型无文字直出工具的轮次留下的占位泡) */
+            if (!s.msgs.empty() && s.msgs.back().role == 1 &&
+                s.msgs.back().text.empty() && s.msgs.back().reason.empty()) {
+                s.msgs.pop_back();
+                WebTouch(&s);
+            }
+            while (have < (int)steps.size()) {
+                AiMsg cm;
+                cm.role = 2;
+                s.msgs.push_back(cm);
+                have++;
+                WebTouch(&s);
+            }
+            int seen = 0;
+            for (int i = s.stepBase; i < (int)s.msgs.size(); i++) {
+                AiMsg& m = s.msgs[i];
+                if (m.role != 2 || seen >= (int)steps.size()) continue;
+                bool uiResolved = (m.steps.size() == 1 && m.steps[0].state == 3 &&
+                                   steps[seen].state == 4);   /* 确认卡已允许/拒绝: 保持 UI 态 */
+                bool changed = (int)m.steps.size() != 1 ||
+                               m.steps[0].state != steps[seen].state ||
+                               m.steps[0].count != steps[seen].count ||
+                               m.steps[0].err != steps[seen].err ||
+                               m.steps[0].top != steps[seen].top ||
+                               m.steps[0].wrote != steps[seen].wrote ||
+                               m.steps[0].chg != steps[seen].chg ||
+                               m.steps[0].name != steps[seen].name ||
+                               m.steps[0].mode != steps[seen].mode ||
+                               m.steps[0].query != steps[seen].query ||
+                               m.steps[0].filter != steps[seen].filter ||
+                               m.steps[0].req != steps[seen].req ||
+                               m.steps[0].arg != steps[seen].arg ||
+                               m.steps[0].cid != steps[seen].cid ||
+                               m.steps[0].res8 != steps[seen].res8;
+                if (changed && !uiResolved) {
+                    m.steps.assign(1, steps[seen]);
+                    WebTouch(&s);
+                }
+                seen++;
+            }
+            s.lastStepsVer = stepsVer;
+        }
+        /* 用量累计: 每轮 response.completed 的 usage 取一次 (对齐参考实现:
+           累计=计费量; 上下文占用/速度只认最近一轮)。
+           恒在 state 分支之外取 (2026-09-29 修复): state==0 门内取 = 末轮 usage 在
+           "worker 置收尾态先于本拍泵"时整段漏计 */
+        bool takeUsage = false;
+        AiJob::TurnUsage tu;
+        ULONGLONG outMs = 0;
+        EnterCriticalSection(&j->cs);
+        if (j->turnUsage.has && !j->turnUsageTaken) {
+            j->turnUsageTaken = true;
+            tu = j->turnUsage;
+            outMs = j->turnOutMs;
+            takeUsage = true;
+        }
+        LeaveCriticalSection(&j->cs);
+        if (takeUsage) {
+            s.uPrompt += tu.prompt;
+            s.uCompletion += tu.completion;
+            s.uTotal += tu.total ? tu.total : (tu.prompt + tu.completion);
+            s.uCacheHit += tu.cacheHit;
+            s.uLastPrompt = tu.prompt;
+            s.uLastCompletion = tu.completion;
+            s.uLastCacheHit = tu.cacheHit;
+            s.uTokPerSec = (outMs > 200 && tu.completion > 0)
+                ? (double)tu.completion / ((double)outMs / 1000.0) : 0.0;
+            s.usageHas = s.usageHas || tu.prompt > 0 || tu.completion > 0;
+        }
         if (state == 0) {
             if (gen != s.syncGen) {
                 /* 世代变化 = worker 丢弃半截流重新生成 (传输中断/空响应重试/超限自愈):
@@ -318,80 +398,6 @@ static void PumpStreams() {
                         WebTouch(&s);
                     }
                 }
-            }
-            /* 用量累计: 每轮 response.completed 的 usage 取一次 (对齐参考实现:
-               累计=计费量; 上下文占用/速度只认最近一轮) */
-            bool takeUsage = false;
-            AiJob::TurnUsage tu;
-            ULONGLONG outMs = 0;
-            EnterCriticalSection(&j->cs);
-            if (j->turnUsage.has && !j->turnUsageTaken) {
-                j->turnUsageTaken = true;
-                tu = j->turnUsage;
-                outMs = j->turnOutMs;
-                takeUsage = true;
-            }
-            LeaveCriticalSection(&j->cs);
-            if (takeUsage) {
-                s.uPrompt += tu.prompt;
-                s.uCompletion += tu.completion;
-                s.uTotal += tu.total ? tu.total : (tu.prompt + tu.completion);
-                s.uCacheHit += tu.cacheHit;
-                s.uLastPrompt = tu.prompt;
-                s.uLastCompletion = tu.completion;
-                s.uLastCacheHit = tu.cacheHit;
-                s.uTokPerSec = (outMs > 200 && tu.completion > 0)
-                    ? (double)tu.completion / ((double)outMs / 1000.0) : 0.0;
-                s.usageHas = s.usageHas || tu.prompt > 0 || tu.completion > 0;
-            }
-            /* 工具卡片同步: steps 镜像 → 本作业 (stepBase 起) 的 role==2 消息 (追加只增;
-             * 内容按版本对齐; 用户已点过确认卡的 (state 4→3) 不回写 — UI 裁决优先)。
-             * 历史恢复的 role==2 卡片在 stepBase 之前, 不得被新作业的步骤误配覆盖。 */
-            if (!steps.empty()) {
-                int have = 0;
-                for (int i = s.stepBase; i < (int)s.msgs.size(); i++)
-                    if (s.msgs[i].role == 2) have++;
-                /* 挂新卡片前摘掉尾部空文本气泡 (模型无文字直出工具的轮次留下的占位泡) */
-                if (!s.msgs.empty() && s.msgs.back().role == 1 &&
-                    s.msgs.back().text.empty() && s.msgs.back().reason.empty()) {
-                    s.msgs.pop_back();
-                    WebTouch(&s);
-                }
-                while (have < (int)steps.size()) {
-                    AiMsg cm;
-                    cm.role = 2;
-                    s.msgs.push_back(cm);
-                    have++;
-                    WebTouch(&s);
-                }
-                int seen = 0;
-                for (int i = s.stepBase; i < (int)s.msgs.size(); i++) {
-                    AiMsg& m = s.msgs[i];
-                    if (m.role != 2 || seen >= (int)steps.size()) continue;
-                    bool uiResolved = (m.steps.size() == 1 && m.steps[0].state == 3 &&
-                                       steps[seen].state == 4);   /* 确认卡已允许/拒绝: 保持 UI 态 */
-                    bool changed = (int)m.steps.size() != 1 ||
-                                   m.steps[0].state != steps[seen].state ||
-                                   m.steps[0].count != steps[seen].count ||
-                                   m.steps[0].err != steps[seen].err ||
-                                   m.steps[0].top != steps[seen].top ||
-                                   m.steps[0].wrote != steps[seen].wrote ||
-                                   m.steps[0].chg != steps[seen].chg ||
-                                   m.steps[0].name != steps[seen].name ||
-                                   m.steps[0].mode != steps[seen].mode ||
-                                   m.steps[0].query != steps[seen].query ||
-                                   m.steps[0].filter != steps[seen].filter ||
-                                   m.steps[0].req != steps[seen].req ||
-                                   m.steps[0].arg != steps[seen].arg ||
-                                   m.steps[0].cid != steps[seen].cid ||
-                                   m.steps[0].res8 != steps[seen].res8;
-                    if (changed && !uiResolved) {
-                        m.steps.assign(1, steps[seen]);
-                        WebTouch(&s);
-                    }
-                    seen++;
-                }
-                s.lastStepsVer = stepsVer;
             }
             /* 工具执行期: 冻结文本气泡; 若尾部挂着空文本气泡 (本轮无文字输出) 摘掉 */
             if (phase == 1) {

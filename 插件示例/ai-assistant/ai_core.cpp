@@ -319,12 +319,13 @@ void CfgSave() {
     std::string u8 = picojson::value(root).serialize();
     g_host->StorageSet(g_ctx, "cfg", u8.c_str(), (int)u8.size());
 }
-/* 密钥解密 ("enc:1:<b64>"; 换机解出乱码 = 视为未配置 — GUID 密码不出本机) */
+/* 密钥解密 ("enc:1:<b64>"; 换机解出乱码 = 视为未配置 — GUID 密码不出本机)。
+   嵌入 NUL 拒收: NUL 是合法 UTF-8, c_str() 会在首个 NUL 截断出残串而非判空 */
 static std::wstring DecryptKeyStr(const std::wstring& encv) {
     if (encv.rfind(L"enc:1:", 0) != 0) return L"";
     std::string raw = B64Dec(U8(encv.substr(6)));
     std::string plain = XorSecret(raw, U8(MachineKeyStr()));
-    return ValidUtf8(plain) ? W8(plain.c_str()) : L"";
+    return (ValidUtf8(plain) && plain.find('\0') == std::string::npos) ? W8(plain.c_str()) : L"";
 }
 /* token 长度夹取 (前端已验格式; 这里只防越界值: 0=未指定, 上限 1e8 与前端同值) */
 long long CfgClampTok(double v) {
@@ -428,6 +429,7 @@ void CfgLoad() {
             if (ps && ps->t == 4) {
                 for (auto& pv : ps->arr) {
                     if (pv.t != 5) continue;
+                    if ((int)g_cfg.profiles.size() >= AiProfileMax) break;   /* 上限只在 UI 新建侧曾生效, 手改存储注入也照夹 */
                     AiProfile p;
                     p.id = pv.S(L"id");
                     if (p.id.empty()) continue;   /* 无 id 不可寻址, 丢弃 */

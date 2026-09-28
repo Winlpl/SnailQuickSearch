@@ -595,7 +595,9 @@ static void XjsRenderListTail() {
         XjsRect mr = g_marqueeRect;
         if (mr.top < L.list.top) mr.top = L.list.top;
         if (mr.bottom > L.list.bottom) mr.bottom = L.list.bottom;
-        if (mr.bottom > mr.top) {
+        if (mr.left < L.list.left) mr.left = L.list.left;    /* 横向同样夹回: 捕获期客户坐标可越界, */
+        if (mr.right > L.list.right) mr.right = L.list.right;   /* 拖出列表右/左缘曾画进预览面板带 */
+        if (mr.bottom > mr.top && mr.right > mr.left) {
             XjsRoundedRect rr = XjsRoundedRectF(mr, XSF(2), XSF(2));
             g_rt->FillRoundedRectangle(rr, XjsTempBrush(fill));
             g_rt->DrawRoundedRectangle(rr, g_br[XTH_ACCENT], 1.0f);
@@ -883,11 +885,11 @@ void XjsListRender() {
     int last = XjsRowAtY(g_scrollTop + XjsListViewHeight());
     if (last < 0) last = XjsPaintCount() - 1;
     /* scrollTop 越界 (缩放下调/跨屏 DPI 降低改行高后未钳制的偏移) 时 XjsRowAtY 返回 -1:
-       不钳则循环从 -1 跑到 count-1, 负下标先传进引擎, 且视口外每行照常取数 = 大结果集整帧卡死 */
-    if (first < 0) first = 0;
-    /* 正向越界同理: first/last 双 -1 兜底后 first=0/last=count-1 = 全量循环, 450 万行逐行
-       取数每帧秒级 (XjsSyncViewport 的 DPI 自愈分支不经过 WM_SIZE 的钳制路径)。钳到末行 =
-       行矩形按巨大 scrollTop 平移到视口外, 裁剪框内整帧空白, 不再逐行取数 */
+       不钳则循环从 -1 跑到 count-1, 负下标先传进引擎, 且视口外每行照常取数 = 大结果集整帧卡死。
+       -1 分不出方向 — 按 scrollTop 与滚动上限比较: 越过内容末尾 = 钳到末行 (行矩形平移出视口,
+       裁剪框内整帧空白不再逐行取数), 其余 = 回到首行 */
+    if (first < 0) first = (g_scrollTop > XjsMaxScroll()) ? XjsPaintCount() - 1 : 0;
+    /* 窄竞态兜底 (防抖解除使 paintCount 骤减): first 落在表外时钳到末行 */
     if (first >= XjsPaintCount()) { first = XjsPaintCount() - 1; last = first; }
     /* 可见区间回写: ICON_ASK 闸门据此放行"正在显示的表项" (图标线程只读) */
     g_visFirst = first;
@@ -1036,7 +1038,9 @@ void XjsAutoFitColumn(int handleIdx) {
     int first = XjsRowAtY(g_scrollTop);
     int last = XjsRowAtY(g_scrollTop + XjsListViewHeight());
     if (last < 0) last = g_resultCount - 1;
-    if (first < 0) first = 0;
+    /* 同渲染循环的正向越界口径: -1 分不出方向, 按滚动上限判 (越过末尾 = 只量末行) */
+    if (first < 0) first = (g_scrollTop > XjsMaxScroll()) ? g_resultCount - 1 : 0;
+    if (first >= g_resultCount) { first = g_resultCount - 1; last = first; }
     for (int idx = first; idx <= last && idx < g_resultCount; idx++) {
         XjsRowData* rd = XjsEnsureRowData(idx);
         if (!rd) continue;
@@ -1318,7 +1322,7 @@ bool XjsListMouseDown(POINT pt, WPARAM flags) {
     /* 行内重命名编辑框: 点击定位光标/起拖选字, 不透传给行选择 */
     if (XjsRenameActive()) {
         if (XjsPtIn(XjsRenameEditRect(), pt)) { XjsRenameMouseDown(pt); SetCapture(g_hWnd); return true; }
-        XjsRenameFinish(false);   /* 点编辑框外=失焦提交 (源样式口径) */
+        XjsRenameFinish(false);   /* 点编辑框外=取消编辑 (false=不提交; 行为同 Explorer 失焦取消, 别按注释改参数) */
     }
     /* 行选择 / 框选 / 拖出 */
     double yInList = (double)pt.y - g_layout.list.top + g_scrollTop;
@@ -1704,9 +1708,11 @@ bool XjsListKey(WPARAM vk) {
             return true;
         }
         case VK_APPS: {
-            /* 菜单键: 在焦点行弹出右键菜单 (源样式同款) */
+            /* 菜单键: 在焦点行弹出右键菜单 (源样式同款)。
+               焦点下标须在合法域内 (USN 同步收缩后 g_focusIdx 可能 ≥ 结果数 — 引擎不该喂越界值) */
             int idx = g_focusIdx;
             if (idx < 0) idx = XjsSelPrimaryIdx();
+            if (idx >= g_resultCount) idx = -1;
             if (idx >= 0) {
                 if (!XjsSelIsSelected(idx)) XjsSelectOnly(idx);
                 XjsEnsureVisible(idx);
@@ -1721,6 +1727,7 @@ bool XjsListKey(WPARAM vk) {
         default:
             if (vk == VK_F10 && shift) { /* Shift+F10 同菜单键 */
                 int idx = g_focusIdx >= 0 ? g_focusIdx : XjsSelPrimaryIdx();
+                if (idx >= g_resultCount) idx = -1;   /* 同 VK_APPS: 收缩后焦点越界钳回 */
                 if (idx >= 0) {
                     if (!XjsSelIsSelected(idx)) XjsSelectOnly(idx);
                     double rowHd = XjsRowHd();

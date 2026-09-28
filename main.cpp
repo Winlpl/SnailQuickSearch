@@ -308,10 +308,14 @@ void XjsSearchWindow::ApplyCreateSetup() {
    一律失败。⇒ GPU 全离屏管线在本架构不可行 (除非引入 DXGI 交换链, 已被口径否决), 钟罩模糊
    只能走 CPU; 但 SetTarget 到 TARGET 位图上"画"是可用的, EndDraw 失败自愈网仍保留在 WM_PAINT。 */
 static XjsBitmap* s_bdSmall = NULL;   /* 1/2 模糊小图 (hwndRT 域) */
+static HWND s_bdOwner = NULL;         /* 底图归属窗: 位图绑定建它那一刻窗的 RT, 跨窗复用 = WRONG_RESOURCE_DOMAIN 丢帧 */
+static XjsRt* s_bdRt = NULL;          /* 同上: 设备撕毁/重建后 RT 变, 旧位图作废须重抓 */
 static int s_endDrawFailStreak = 0;     /* EndDraw 连续失败计数 (自愈网, 见 WM_PAINT) */
 
 static void XjsBackdropDiscard() {
     if (s_bdSmall) { s_bdSmall->Release(); s_bdSmall = NULL; }
+    s_bdOwner = NULL;
+    s_bdRt = NULL;
 }
 
 /* 盒模糊一趟 (水平+垂直, RGB); 单趟 r=2 在 1/2 尺度上 ≈ σ2.3px 全尺度 */
@@ -380,20 +384,23 @@ static bool XjsBackdropBuild(HWND hwnd, const RECT& cr) {
     /* 内存字节 = B8G8R8A8 (alpha 忽略; PrintWindow 抓屏产物), 后端各自成图 */
     g_rt->CreateBitmapFromMemory((UINT32)sw, (UINT32)sh, (UINT32)sw * 4, smlBuf.data(), &s_bdSmall);
     if (!s_bdSmall || !s_bdSmall->h) {
+        s_bdOwner = NULL; s_bdRt = NULL;
         return false;
     }
+    s_bdOwner = hwnd;
+    s_bdRt = g_rt;   /* 记归属: 复用前校验 (见 XjsBackdropBegin), 防跨窗/跨 RT 用位图 */
     return true;
 }
 
 static bool XjsBackdropBegin(HWND hwnd, const RECT& cr) {
-    if (!XjsModalOverlayFor(g_hWnd)) {
+    /* 会话已结束 (框已关/归属窗已销毁): 任何窗的下一帧顺手清场 */
+    if (s_bdSmall && (!s_bdOwner || !IsWindow(s_bdOwner) || !XjsModalOverlayFor(s_bdOwner)))
         XjsBackdropDiscard();
-        return false;
-    }
-    if (s_bdSmall) return true;   /* 已有: 内容取自弹窗前画面, 主窗在弹窗期几乎不再重绘 */
-    if (XjsBackdropBuild(hwnd, cr)) {
-        return true;
-    }
+    /* 只消费"本窗+本 RT"的底图; 别窗不消费也【不丢】— 曾走"非蒙层窗=丢弃"分支,
+       A 窗缓存被别的窗重绘扔掉, A 下帧重抓 PrintWindow 抓到的已是画过暗罩的帧
+       → 扫描期多窗+模态框背景逐帧加深 */
+    if (s_bdSmall) return (s_bdOwner == hwnd && s_bdRt == g_rt);
+    if (XjsModalOverlayFor(hwnd)) return XjsBackdropBuild(hwnd, cr);   /* 只有蒙层归属窗自己才抓底图 */
     return false;
 }
 static void XjsBackdropEndBlur(XjsRt* rt, const RECT& cr) {
@@ -406,6 +413,10 @@ static void XjsBackdropEndBlur(XjsRt* rt, const RECT& cr) {
 }
 
 void XjsOnPopupResult(int id) {
+    /* 作用域钉扎: 多选打开/定位的确认框是同步泵, 泵内派发别的窗口消息会把 Cur 重绑到
+       别的窗且不恢复 — 泵返回后 XjsItemPath 等仍按入口窗的选中集/结果对象解释行号
+       (错窗打开文件)。入口钉住, 全函数的 g_* 宏恒解析到发起菜单的窗 */
+    XjsWindowScope scope(XjsSearchWindow::Cur());
     if (id >= IDM_MODE_BASE && id < IDM_MODE_BASE + 5) {
         g_mode = id - IDM_MODE_BASE;
         XjsSaveConfig();
@@ -522,7 +533,7 @@ void XjsOnPopupResult(int id) {
         XjsPluginOnMenuTicket(id - IDM_PLUGIN_BASE);
     } else if (id >= IDM_MENU_BASE) {
         /* 重建索引(原 case 1)已移入设置窗口 (ACT_REBUILD) */
-        if (id >= IDM_MENU_BASE + 80 && id < IDM_MENU_BASE + 144) {
+        if (id >= IDM_MENU_BASE + 80 && id < IDM_MENU_BASE + 80 + XJS_LAUNCHER_SLOT_MAX) {
             /* 创建新窗口·子菜单 = 窗口启动器: 该档案槽已有存活窗口 → 激活 (借前台线程,
                默认无焦点口径同托盘唤起); 未打开 → 按槽位档案重建窗口 (菜单点击不收起窗口, toggle=false) */
             XjsSummonSlot(id - (IDM_MENU_BASE + 80), false);
@@ -1720,13 +1731,12 @@ static HWND XjsFindInstanceWindow(const wchar_t* cls) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int nCmdShow) {
-    AddVectoredExceptionHandler(1, XjsVecStackLogger);   /* 排最前: 抢在任何处理器之前拿到崩溃栈 */
-    /* xjs_EnableException 临时禁用 (2026-09-27 用户口径; 恢复时还原下一行调用并保持 wWinMain 首二句位置):
-    xjs_EnableException(TRUE, NULL);   == DLL 的 VEH (2026-09-24 按口径恢复: DLL 侧 87cf4a4+2f884be
-       已重构异常流程 — 旧版处理器在异常分发时做哈希表/写文件/弹框, 与驱动线程并发破坏堆致白屏
-       闪退, 曾临时禁用; enableTry=TRUE 才真正启用内部 try-catch 保护, 回调 NULL=内置默认处理,
-       抓全部线程首轮异常写 xunjieso_捕获崩溃N.txt)
-    */
+    AddVectoredExceptionHandler(1, XjsVecStackLogger);   /* 恒第一句: 抢在任何处理器 (含 DLL VEH) 之前拿到崩溃栈 */
+    /* 第二句: xjs_EnableException(TRUE, NULL) — DLL 的 VEH, 2026-09-29 用户口径恢复 (2026-09-27 曾暂禁):
+       enableTry=TRUE 启用内部 try-catch 保护 ("try要捕获"), 回调 NULL=内置默认处理, 抓全部线程
+       (含引擎异步回调线程) 首轮异常写 xunjieso_捕获崩溃N.txt。两句位次不得对调或后挪;
+       若白屏闪退复发, 先查历史教训: 旧 DLL 处理器在异常分发时做堆操作, 与引擎线程并发破坏堆 */
+    xjs_EnableException(TRUE, NULL);
 
     /* 单实例守卫: 已有实例(含托盘隐藏中)时唤起它并退出 —— 双进程并发初始化引擎、
        抢 xjs_db.dat、重复托盘图标与双击 Ctrl 钩子 = 启动期堆破坏, 白屏闪退 (初始化冲突)
@@ -1810,10 +1820,11 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     /* 计划任务自启动 (--autostart): 以隐藏方式创建 (仅托盘, 经托盘/双击 Ctrl 唤起) */
     bool autoStart = lpCmdLine && wcsstr(lpCmdLine, L"--autostart") != NULL;
     XjsCreateMainWindow(hInstance, autoStart ? SW_HIDE : nCmdShow);
-    if (!XjsSearchWindow::MainHwnd()) {
+    if (!XjsSearchWindow::MainHwnd() || !g_engine) {
         /* 主窗创建失败 (引擎创建失败/系统资源不足): PostQuitMessage 已投, 直接退出 —
-           不判空则空 g_engine 继续流入插件加载与 xjs_db_Load;
-           插件/数据库都尚未初始化 (顺序在下方), 无需任何收尾 */
+           不拦则空 g_engine 继续流入插件加载与 xjs_db_Load。
+           引擎空必须单判: WM_CREATE 失败回滚销毁后, 创建早期消息 (WM_NCCREATE) 已把
+           hWnd/s_hWndMain 回填成陈旧句柄, 只判 MainHwnd 拦不住引擎失败路径 */
         return 0;
     }
     XjsDoubleCtrlApply();   /* 双击 Ctrl 目标载入后按有效性实时装卸钩子 (禁用/名称失效 = 零钩子) */

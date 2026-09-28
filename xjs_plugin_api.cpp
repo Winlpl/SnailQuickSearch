@@ -154,8 +154,13 @@ static int ApiSettingsGet(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, i
     return PluginBufOut(buf, cap, j);
 }
 
-/* 皮肤应用 = 设置页换肤同一落点 (写窗字段 + 全局镜像 + 载入 + 应用 + 落盘 + 插件换肤事件) */
+/* 皮肤应用 = 设置页换肤同一落点 (写窗字段 + 全局镜像 + 载入 + 应用 + 落盘 + 插件换肤事件)。
+   重入闸: EVT_SKIN 同步派发, 订阅者在处理器里回写 "皮肤" = ApplySkin 无限递归爆栈
+   (msg.* 有 s_msgDepth 深度闸、输入拦截有 s_interceptDepth, 本环同口径; 仅 UI 线程, 裸 static 即可) */
 static void ApplySkin(XjsSearchWindow* w, const std::wstring& name) {
+    static int s_skinDepth = 0;
+    if (s_skinDepth > 0) return;   /* 事件处理器内的嵌套换肤请求忽略 (防环) */
+    s_skinDepth++;
     w->skinName = name;
     g_skinName = name;
     XjsSkinLoad(g_skinName.c_str());
@@ -163,6 +168,7 @@ static void ApplySkin(XjsSearchWindow* w, const std::wstring& name) {
     XjsSaveConfig();
     XjsPluginOnSkinChanged(XjsPluginApiTokenOf(w));
     w->Invalidate();
+    s_skinDepth--;
 }
 
 /* 预览开关 = XjsPreviewToggle 的定向版 (藏面板先结束接管会话; 开启回填当前选中) */
@@ -496,9 +502,13 @@ static int ApiModesAdd(XjsPluginCtx* ctx, XjsWindowToken window, const char* def
         if (m.key == L"名称") { if (!MemberStr(m, &v)) return XJS_PLUGIN_ERR_ARG; d.name = v; }
         else if (m.key == L"简介") { if (!MemberStr(m, &v)) return XJS_PLUGIN_ERR_ARG; d.desc = v; }
         else if (m.key == L"类型") {
-            if (!MemberStr(m, &v) || KeyModeIndexFromUtf8(v) < 0) return XJS_PLUGIN_ERR_ARG;
+            /* 只收模板型 4 类 (wildcard|regex|sql|lua, 与 SDK 文档同口径): lua-exec 是清单
+               接管型专用 (无模板、菜单点击直执行), 运行时段接不进托管标签链也进不了执行收集
+               = 加进去只是 modes.list 里看得见却永远无法执行的死模式, 显式拒绝 */
+            if (!MemberStr(m, &v) || v == L"lua-exec" || KeyModeIndexFromUtf8(v) < 0) return XJS_PLUGIN_ERR_ARG;
             d.type = v;
-        } else if (m.key == L"模板") { if (!MemberStr(m, &v)) return XJS_PLUGIN_ERR_ARG; d.tplUtf8 = Utf16ToUtf8(v.c_str()); }
+        }
+        else if (m.key == L"模板") { if (!MemberStr(m, &v)) return XJS_PLUGIN_ERR_ARG; d.tplUtf8 = Utf16ToUtf8(v.c_str()); }
         else return XJS_PLUGIN_ERR_ARG;
     }
     if (d.name.empty() || d.name.size() > 64) return XJS_PLUGIN_ERR_ARG;

@@ -718,8 +718,24 @@ bool XjsPreviewMouseUp(POINT pt) {
 /* ==================== 插件预览交付 (preview 能力, P2) ====================
  * 插件经宿主表 PreviewDeliverBitmap/Text 异步交付; requestId 必须等于当前世代,
  * 过期请求静默丢弃 (同搜索指纹丢过期查询口径), 命中才落地面并只失效预览区 */
+/* 交付寻窗: SDK 的 PreviewDeliver 不带窗口令牌, 世代比对只能按"当前窗"字段 — 多窗下
+ * 交付晚于窗口切换会失配丢帧 (接管会话还开着, 预览停在旧图)。当前窗不匹配时扫描全部
+ * 存活实例找世代匹配的接管会话, 找到 = 切到那扇窗作用域完成落地面 (UI 线程)。 */
+static XjsSearchWindow* XjsPreviewPlugTarget(int requestId) {
+    XjsSearchWindow* cur = XjsSearchWindow::Cur();
+    if (cur && cur->previewPlugReq == requestId && cur->previewPlugFileId >= 0) return cur;
+    for (int i = 0; i < XjsSearchWindow::Count(); i++) {
+        XjsSearchWindow* w = XjsSearchWindow::At(i);
+        if (w && w != cur && w->previewPlugReq == requestId && w->previewPlugFileId >= 0) return w;
+    }
+    return NULL;
+}
+
 bool XjsPreviewPluginDeliverBitmap(int requestId, int w, int h, const void* bgra, int stride) {
-    if (requestId != s_pvPlugReq || s_pvPlugFileId < 0) return false;   /* 过期世代 / 未接管 */
+    XjsSearchWindow* target = XjsPreviewPlugTarget(requestId);
+    if (!target) return false;   /* 过期世代 / 未接管 */
+    XjsWindowScope scope(target);   /* s_pvPlug* 宏按 target 解析 */
+    if (s_pvPlugFileId < 0) return false;
     if (!bgra || w <= 0 || h <= 0 || w > 32768 || h > 32768 || stride < w * 4) return false;
     /* 上限同加 (同 FnPrevBitmap 口径): 异常交付不得让 assign 抛 bad_alloc 终止进程,
        也不得按虚高 stride 越界读插件来源缓冲 (stride 只验过下限曾是大洞) */
@@ -727,25 +743,27 @@ bool XjsPreviewPluginDeliverBitmap(int requestId, int w, int h, const void* bgra
     s_pvPlugBmp.assign((const uint8_t*)bgra, (const uint8_t*)bgra + (size_t)stride * h);
     s_pvPlugW = w; s_pvPlugH = h; s_pvPlugStride = stride;
     if (s_pvPlugCache) { s_pvPlugCache->Release(); s_pvPlugCache = NULL; }   /* 旧缓存作废, 渲染时懒重建 */
-    if (g_hWnd) {   /* 只失效预览区 */
-        XjsRect b = g_layout.preview;
+    if (target->hWnd) {   /* 只失效预览区 (target 自己的布局, 不读 Cur 的 g_layout) */
+        XjsRect b = target->layout.preview;
         RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
-        InvalidateRect(g_hWnd, &r, FALSE);
+        InvalidateRect(target->hWnd, &r, FALSE);
     }
     return true;
 }
 bool XjsPreviewPluginDeliverText(int requestId, const char* utf8) {
-    if (requestId != s_pvPlugReq || s_pvPlugFileId < 0 || !utf8) return false;
+    XjsSearchWindow* target = XjsPreviewPlugTarget(requestId);
+    if (!target || !utf8) return false;   /* 过期世代 / 未接管 */
+    XjsWindowScope scope(target);   /* s_pvPlug* 宏按 target 解析 */
     /* 文本走既有文本管线 (s_textLines 渲染/滚动全复用); 文件过大口径同内置 (5MB) */
     std::wstring text = Utf8ToUtf16(utf8);
     if (text.size() > 5u * 1024 * 1024) return false;
     s_textLines = XjsSplitLines(text);
     s_textFileId = s_pvPlugFileId;
     s_textScroll = 0;
-    if (g_hWnd) {
-        XjsRect b = g_layout.preview;
+    if (target->hWnd) {
+        XjsRect b = target->layout.preview;
         RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
-        InvalidateRect(g_hWnd, &r, FALSE);
+        InvalidateRect(target->hWnd, &r, FALSE);
     }
     return true;
 }
@@ -925,8 +943,10 @@ bool XjsPreviewPanelDeliver(XjsSearchWindow* w, const wchar_t* pluginId, long lo
         w->plugPanelBmpH = h;
         w->plugPanelBmpStride = stride;
         w->plugPanelRev++;
-        if (w->hWnd) {   /* 只失效预览区 (插件整块交付含头部带); 失效也在锁内: 出锁后不再碰本对象 */
-            XjsRect b = w == XjsSearchWindow::Cur() ? g_layout.preview : XjsRectF(0, 0, 0, 0);
+        if (w->hWnd) {   /* 只失效预览区 (插件整块交付含头部带); 失效也在锁内: 出锁后不再碰本对象。
+                            用 w 自己的布局 (worker 线程禁读 Cur()/g_layout 宏): 当前窗时二者同值,
+                            非当前窗取其上一帧布局 = 同样只失效它自己的面板区 */
+            XjsRect b = w->layout.preview;
             if (b.right > b.left) {
                 RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
                 InvalidateRect(w->hWnd, &r, FALSE);

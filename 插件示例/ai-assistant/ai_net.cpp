@@ -979,7 +979,9 @@ std::wstring WebSearchExec(AiJob* j, const Jv& v, AiToolStep* st) {
     picojson::array rs;
     for (const auto& h : hits) {
         picojson::object r;
-        r["title"] = JS(h.title);
+        /* 标题封顶 (snippet 已有 800 封顶): RSS/HTML 的 <title> 内容不限长, 对抗性/损坏条目
+           可把 res8 撑到兆级 (全量落库+回喂, 白白烧一轮 400 自愈) */
+        r["title"] = JS(h.title.size() > 300 ? h.title.substr(0, 300) + L"…" : h.title);
         r["url"] = JS(h.url);
         if (!h.snippet.empty()) r["snippet"] = JS(h.snippet);
         rs.push_back(picojson::value(r));
@@ -1022,7 +1024,7 @@ std::wstring FetchUrlExec(AiJob* j, const Jv& v, AiToolStep* st) {
     if (text8.empty())
         return L"网页没有可提取的正文 (可能整页由脚本渲染, 本工具拿不到) — 如实告知用户";
     std::string full8 = text8;
-    text8 = AiCapUtf8HeadTail(text8);   /* 头 80%+尾 20% 封顶 (与 read_file 同 readCapKB 口径) */
+    text8 = AiCapUtf8HeadTail(text8, j->cfgReadCapKB);   /* 头 80%+尾 20% 封顶 (与 read_file 同 readCapKB 口径, 作业快照) */
     picojson::object o;
     o["url"] = JS(url);
     o["格式或编码"] = JS(enc + L" 网页正文");
@@ -1032,7 +1034,7 @@ std::wstring FetchUrlExec(AiJob* j, const Jv& v, AiToolStep* st) {
         /* 外溢 (dsh spill 口径): 正文被封顶过 = 中段不在回执里 → 完整正文落盘给路径,
          * 模型用 read_file(path, offset, limit) 行窗口取回 (2026-09-27) */
         size_t h = 0, t = 0;
-        AiOutHeadTail(&h, &t);
+        AiOutHeadTail(j->cfgReadCapKB, &h, &t);
         if (full8.size() > h + t) {
             std::wstring spill = AiSpillText(full8, "web");
             if (!spill.empty()) {

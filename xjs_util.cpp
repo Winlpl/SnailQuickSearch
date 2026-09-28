@@ -448,7 +448,13 @@ static HGLOBAL XjsBuildHDropGlobal(const std::vector<std::wstring>& paths) {
 }
 
 static void XjsSetClipboardFiles(const std::vector<std::wstring>& paths, bool cut) {
-    if (paths.empty() || !g_hWnd || !OpenClipboard(g_hWnd)) return;
+    if (paths.empty() || !g_hWnd) return;
+    /* 同 XjsCopyClipboard 口径: 剪贴板被云剪贴板/输入法短暂持有时单发失败 = Ctrl+C 静默没反应,
+       小间隔重试一小段再放弃 (文本路径早就是这个口径, 文件路径是更常用的那个) */
+    HWND hw = g_hWnd;
+    BOOL opened = FALSE;
+    for (int i = 0; i < 10 && !(opened = OpenClipboard(hw)); i++) Sleep(20);
+    if (!opened) return;
     EmptyClipboard();
     HGLOBAL hDrop = XjsBuildHDropGlobal(paths);
     HGLOBAL hFx = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
@@ -855,7 +861,9 @@ static int XjsRunSchtasks(const std::wstring& args) {
        命令行仍带裸名, 供 schtasks 自身回显/子进程语义照旧 */
     wchar_t sysDir[MAX_PATH];
     UINT sysLen = GetWindowsDirectoryW(sysDir, MAX_PATH);
-    if (sysLen == 0 || sysLen >= MAX_PATH - 16) return -1;
+    /* 余量按追加串实长算: "\System32\schtasks.exe" = 22 字符 + NUL = 23 (曾按 -16 放行到 243,
+       243+23=266 > 260 = 长 Windows 目录下 lstrcatW 栈越界) */
+    if (sysLen == 0 || sysLen >= MAX_PATH - 24) return -1;
     lstrcatW(sysDir, L"\\System32\\schtasks.exe");
     /* 注意: 字面量先转 std::wstring 再拼接, 避免 const wchar_t* + const wchar_t* 双指针相加 */
     std::wstring cmd = std::wstring(L"schtasks.exe ") + args;
@@ -871,11 +879,19 @@ static int XjsRunSchtasks(const std::wstring& args) {
     return (int)code;
 }
 
+/* 会话级查询缓存: 通用设置页每次行模型重建 (切分类/改任意设置/WM_SIZE) 都同步拉起
+   schtasks.exe 并在 UI 线程等 (被安全软件拦截时可卡数秒) — 收口成"每会话一次",
+   唯一写入口 XjsSetAutoStart 失效缓存; 外部经任务计划程序改任务到重开会话才可见 */
+static int s_autoStartQuery = -1;   /* -1 = 未查, 否则 = 最近一次 /query 的退出码 */
+
 BOOL XjsIsAutoStartEnabled() {
-    return XjsRunSchtasks(std::wstring(L"/query /tn \"") + XJS_AUTOSTART_TASK + L"\"") == 0;
+    if (s_autoStartQuery < 0)
+        s_autoStartQuery = XjsRunSchtasks(std::wstring(L"/query /tn \"") + XJS_AUTOSTART_TASK + L"\"");
+    return s_autoStartQuery == 0;
 }
 
 BOOL XjsSetAutoStart(BOOL enable) {
+    s_autoStartQuery = -1;   /* 写入口失效缓存: 设置页开关后的立即回查必须真执行 */
     if (!enable) {
         /* 删除不存在任务返回非0属正常, 不提示 (源样式口径) */
         XjsRunSchtasks(std::wstring(L"/delete /tn \"") + XJS_AUTOSTART_TASK + L"\" /f");

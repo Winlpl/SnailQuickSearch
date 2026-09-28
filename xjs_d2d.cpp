@@ -392,6 +392,8 @@ bool XjsD2DInit() {
     HRESULT r3 = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory), (void**)&g_wic);
     if (FAILED(r1) || FAILED(r2) || FAILED(r3) || !g_d2d || !dwRaw || !g_wic) {
         if (dwRaw) dwRaw->Release();
+        if (g_d2d) { g_d2d->Release(); g_d2d = NULL; }   /* 部分成功组合 (r3 成而 r1/r2 败) 曾漏释放已建工厂 */
+        if (g_wic) { g_wic->Release(); g_wic = NULL; }
         return false;
     }
     g_dw = new XjsDwFactory(dwRaw);
@@ -753,10 +755,12 @@ static void ApiFillGeoIntersectRect(XjsRt* rt, XjsGeo* geo, const XjsRect& r, Xj
     ID2D1GeometrySink* sink = NULL;
     if (SUCCEEDED(g_d2d->CreatePathGeometry(&cut)) && cut &&
         SUCCEEDED(cut->Open(&sink)) && sink) {
+        /* fail-closed: 求交/Close 任一失败都跳过 Fill — sink 未闭合的几何处于非法态,
+           FillGeometry 报错被丢 (toast 色条消失一帧) 且 sink 带未闭状态被释放 */
         if (SUCCEEDED(((ID2D1RoundedRectangleGeometry*)geo->h)->CombineWithGeometry(
-                rectGeo, D2D1_COMBINE_MODE_INTERSECT, NULL, sink)))
-            sink->Close();
-        D2(rt)->FillGeometry(cut, D2(b));
+                rectGeo, D2D1_COMBINE_MODE_INTERSECT, NULL, sink)) &&
+            SUCCEEDED(sink->Close()))
+            D2(rt)->FillGeometry(cut, D2(b));
     }
     if (sink) sink->Release();
     if (cut) cut->Release();

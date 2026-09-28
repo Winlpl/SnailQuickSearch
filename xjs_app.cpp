@@ -351,6 +351,9 @@ XjsSearchWindow::~XjsSearchWindow() {
 
 /* 窗口销毁后从注册表摘除并释放上下文 */
 void XjsSearchWindow::DestroyAndFree() {
+    /* 待建上下文 (创建中途失败, hWnd 恒 NULL) 也会经这里拆毁: 先摘 s_pendingWin —
+       Enter 每条窗口消息都解引用它, 悬垂 = 持续读已释放内存 */
+    if (s_pendingWin == this) s_pendingWin = NULL;
     for (int i = 0; i < s_winCount; i++) {
         if (s_wins[i] == this) {
             for (int j = i; j < s_winCount - 1; j++) s_wins[j] = s_wins[j + 1];
@@ -481,12 +484,15 @@ bool XjsPostUiOwnedString(XjsSearchWindow* w, UINT msg, LPARAM lp, std::string* 
         std::lock_guard<std::mutex> lk(s_ownedMu);
         s_ownedStrings.push_back({ w->hWnd, payload });
     }
+    /* 先记每窗账再投递, 失败回冲 (与 XjsPostToUiFor 同序同口径): post 返回后、fetch_add
+       前被抢占 → UI 线程派发 Done 减空转 → 之后 fetch_add 永久多记 1 */
+    w->uiPostPending.fetch_add(1, std::memory_order_relaxed);
     if (!XjsPostToUi(w->hWnd, msg, (WPARAM)payload, lp)) {
+        w->uiPostPending.fetch_sub(1, std::memory_order_relaxed);
         XjsUiOwnedStringTake(payload);   /* post 失败 = 消息未进队列, 永无消费点, 就地回收 */
         delete payload;
         return false;
     }
-    w->uiPostPending.fetch_add(1, std::memory_order_relaxed);   /* 每窗账与 XjsPostToUiFor 同口径 */
     return true;
 }
 

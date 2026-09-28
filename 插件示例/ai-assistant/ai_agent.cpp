@@ -136,12 +136,18 @@ static int AgentLuaPrint(void* L) {
         const char* s = xjs_lua_ToString(L, i);
         if (s) { line += s; continue; }
         int need = xjs_lua_ToJson(L, i, NULL, 0);
-        if (need > 1 && need <= 8192) {
-            std::string buf((size_t)need, 0);
-            if (xjs_lua_ToJson(L, i, &buf[0], need) > 0) {
-                line += buf.c_str();   /* c_str 吃掉结尾 '\0' */
-                continue;
+        if (need > 1) {
+            if (need <= 8192) {
+                std::string buf((size_t)need, 0);
+                if (xjs_lua_ToJson(L, i, &buf[0], need) > 0) {
+                    line += buf.c_str();   /* c_str 吃掉结尾 '\0' */
+                    continue;
+                }
             }
+            /* 超上限不退化为 "nil" — 模型会把 nil 当"值为空"得出错误结论;
+               精确省略量口径: 报实际字节数, 模型自行拆小重输出 */
+            line += "(表序列化 " + std::to_string(need) + " 字节, 超过 8KB 输出上限被丢弃 — 把统计拆小后重输出)";
+            continue;
         }
         line += xjs_lua_ToBoolean(L, i) ? "true" : "nil";
     }
@@ -777,10 +783,13 @@ void AgentUiDispatch(AiUiJob* jb) {   /* UI 线程 (g_msgwnd XJS_AI_UIJOB 分派
     if (orphan) {   /* worker 已放弃: 摘出在飞表并由本线程代删 (不再 SetEvent, 句柄已被关) */
         for (size_t i = 0; i < s_inflight.size(); i++)
             if (s_inflight[i] == jb) { s_inflight.erase(s_inflight.begin() + i); break; }
+    } else {
+        /* SetEvent 必须在锁内: worker 的仲裁 (doneSignaled 判定) 与本置位同锁串行 —
+           曾在锁外置位, worker 见 doneSignaled=1 后 delete jb, 本线程再解引用 jb->done = UAF */
+        SetEvent(jb->done);
     }
     LeaveCriticalSection(&s_uiCs);
     if (orphan) delete jb;
-    else SetEvent(jb->done);
 }
 
 std::wstring AgentUiCall(AiJob* j, AiUiJob* jb, std::string* out8) {
@@ -1341,9 +1350,11 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
     }
     /* 结果同步布防 (2026-09-26 用户口径: 完成事件里推送, 不经 UI 编组/不另起线程):
      * 勾选开启且目标窗结果可得 → 置 g_syncArm, AgentOnSearchComplete (引擎搜索线程)
-     * 在本次完成未被覆盖 (discarded=FALSE) 时把 ID 全集 ResetFileId 进目标窗。 */
-    if (InterlockedCompareExchange(&j->syncRes, 0, 0) && j->syncWin) {
-        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, j->syncWin);
+     * 在本次完成未被覆盖 (discarded=FALSE) 时把 ID 全集 ResetFileId 进目标窗。
+     * syncWin 原子读: UI 线程 "sync" 命令会即时换指针 (InterlockedExchangePointer) */
+    xjs_result* syncTarget = (xjs_result*)InterlockedCompareExchangePointer((volatile PVOID*)&j->syncWin, NULL, NULL);
+    if (InterlockedCompareExchange(&j->syncRes, 0, 0) && syncTarget) {
+        InterlockedExchangePointer((volatile PVOID*)&g_syncWin, syncTarget);
         InterlockedExchange(&g_syncArm, 1);
     } else {
         InterlockedExchange(&g_syncArm, 0);
@@ -1421,11 +1432,21 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
             missNote += ROW_MISS_NAME[f];
         }
         if (!g_rowBuf.empty() || g_rowCut || !missNote.empty()) {
+            /* 元素逐个落位、逗号只加在元素之间 — 条件拼法曾可产出 "提示\",] 尾逗号
+               (miss 有而行空且未截) 的非法 JSON, picojson 解析失败 = 提示连带行全丢 */
             std::string wrapped = "[";
-            if (!missNote.empty()) wrapped += "\"(索引未开启字段, 已省略: " + missNote + ")\",";
-            wrapped += g_rowBuf;
+            bool firstEl = true;
+            if (!missNote.empty()) {
+                wrapped += "\"(索引未开启字段, 已省略: " + missNote + ")\"";
+                firstEl = false;
+            }
+            if (!g_rowBuf.empty()) {
+                if (!firstEl) wrapped += ',';
+                wrapped += g_rowBuf;
+                firstEl = false;
+            }
             if (g_rowCut) {
-                if (!g_rowBuf.empty()) wrapped += ',';
+                if (!firstEl) wrapped += ',';
                 wrapped += "\"(行数过多, 后续已截断";
                 if (rowDrop > 0) wrapped += ", 丢弃 " + std::to_string(rowDrop) + " 行";
                 wrapped += ")\"";
@@ -2218,7 +2239,7 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
     }
     if (name8 == "read_file") {
         st->kind = 12;
-        return ReadFileToolExec(v, st);
+        return ReadFileToolExec(j, v, st);
     }
     if (name8 == "read_image") {
         st->kind = 14;
@@ -3430,7 +3451,9 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                     else if (d)
                         slot->args += (d->t == 3 ? U8(d->str) : std::string());
                 } else if (type == L"response.completed") {
-                    /* 用量统计 (对齐参考实现): input=计费输入, cached=前缀缓存命中 */
+                    /* 用量统计 (对齐参考实现): input=计费输入, cached=前缀缓存命中。
+                       取用旗标在此重置 (写入即待取): 泵据此把"本轮"用量累计一次 —
+                       曾在轮末一律复位, 瞬态断流重试的窗口期泵会把上一轮已累计的 usage 再计一次 */
                     const Jv* rsp = ev.Get(L"response");
                     const Jv* us = (rsp && rsp->t == 5) ? rsp->Get(L"usage") : NULL;
                     if (us && us->t == 5) {
@@ -3442,6 +3465,7 @@ static bool AgentRunTurn(AiJob* j, HINTERNET hc, const std::vector<AiCall>& accC
                         const Jv* dt = us->Get(L"input_tokens_details");
                         if (dt && dt->t == 5 && (x = dt->Get(L"cached_tokens")) && x->t == 2)
                             j->turnUsage.cacheHit = (long long)x->num;
+                        j->turnUsageTaken = false;
                     }
                 } else if (type == L"response.failed") {
                     const Jv* rsp = ev.Get(L"response");
@@ -3965,7 +3989,8 @@ static void AgentCompactHistory(AiJob* j, HINTERNET hc, bool* aborted) {
             repNote.clear();   /* 已随请求消费 */
             EnterCriticalSection(&j->cs);
             j->turnOutMs = GetTickCount64() - turnT0;   /* 速度 = 本轮输出 / 本轮耗时 (含首 token 等待) */
-            j->turnUsageTaken = false;   /* 每轮用量各取一次: 不复位 = 泵只累计第一轮, 后续轮 usage 全丢 */
+            /* turnUsageTaken 不在此复位 (2026-09-29 改 completed 事件内"写入即待取"):
+               轮末复位会让重试窗口期把上一轮已累计的 usage 再计一次 */
             LeaveCriticalSection(&j->cs);
             if (!okTurn) failed = true;
             if (aborted) break;

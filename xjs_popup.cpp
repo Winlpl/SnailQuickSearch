@@ -418,6 +418,8 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     switch (msg) {
         case WM_PAINT: {
             /* 弹窗是独立 hwnd: 作用域已在入口钉住 owner (XSF 尺度); 颜色一律读打开时刻的 skin 快照 */
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);   /* 先校验无效区: RT 建不出也要让消息落定, 不然成每条消息重入的忙等风暴 (同询问框口径) */
             if (!p->rt) {
                 RECT rc; GetClientRect(hwnd, &rc);
                 g_gfx->CreateWindowRt(hwnd, ximax(rc.right, 1), ximax(rc.bottom, 1), &p->rt);
@@ -458,9 +460,7 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     g_gfx->RoundStroke(&p->ssRound);
                 }
             }
-            if (!p->rt) break;
-            PAINTSTRUCT ps;
-            BeginPaint(hwnd, &ps);
+            if (!p->rt) { EndPaint(hwnd, &ps); break; }
             p->rt->BeginDraw();
             {
                 XjsColor mb = p->skin.menuBg;
@@ -1468,14 +1468,18 @@ bool XjsLineEdit::ImeResult(HWND hwnd, LPARAM lParam) {
         if (size > 0) {
             std::wstring result((size_t)size / sizeof(wchar_t), L'\0');
             ImmGetCompositionStringW(himc, GCS_RESULTSTR, &result[0], size);
-            vx = -1;
-            SnapshotUndo();
-            int a, b; SelRange(&a, &b);
-            if (a != b) { text.erase(a, b - a); caret = a; }
-            text.insert((size_t)caret, result);
-            caret += (int)result.length();
-            anchor = -1;
-            dirty = true;
+            /* MSDN: 返回尺寸含结尾 NUL — 不剥则 \u0000 进文本 (光标停在不可见位/别名落进配置) */
+            while (!result.empty() && result.back() == L'\0') result.pop_back();
+            if (!result.empty()) {
+                vx = -1;
+                SnapshotUndo();
+                int a, b; SelRange(&a, &b);
+                if (a != b) { text.erase(a, b - a); caret = a; }
+                text.insert((size_t)caret, result);
+                caret += (int)result.length();
+                anchor = -1;
+                dirty = true;
+            }
         }
         ImmReleaseContext(hwnd, himc);
     }
@@ -1875,7 +1879,8 @@ static void XjsInputFinish(bool ok) {
     HWND h = s.hwnd;
     s.hwnd = NULL;   /* 同询问框: 销毁期 WM_ACTIVATE(WA_INACTIVE) 会重入本函数 (见 XjsAskFinish 注) */
     DestroyWindow(h);   /* WM_DESTROY 清 rt */
-    PostMessageW(owner, WM_INPUT_DONE, (WPARAM)rid, (LPARAM)out);
+    if (!PostMessageW(owner, WM_INPUT_DONE, (WPARAM)rid, (LPARAM)out))
+        delete out;   /* owner 已销毁 (别名框开着关所属窗再点确定) = 投递失败, 堆载而无消费点 = 泄漏 */
 }
 
 static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1884,6 +1889,8 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         case WM_PAINT: {
             /* 独立 hwnd 不过 Enter 绑定: 绑 owner 修 XSF 尺度; 颜色读打开时刻快照 */
             XjsWindowScope scope(XjsSearchWindow::Alive(s.ownerCtx) ? s.ownerCtx : XjsSearchWindow::Cur());
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);   /* 先校验无效区 (RT 建不出也落定消息, 同弹窗/询问框口径) */
             if (!s.rt) {
                 RECT rc; GetClientRect(hwnd, &rc);
                 g_gfx->CreateWindowRt(hwnd, ximax(rc.right, 1), ximax(rc.bottom, 1), &s.rt);
@@ -1898,9 +1905,7 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     s.rt->CreateSolidColorBrush(s.skin.accentSoft, &s.brSelection);
                 }
             }
-            if (!s.rt) break;
-            PAINTSTRUCT ps;
-            BeginPaint(hwnd, &ps);
+            if (!s.rt) { EndPaint(hwnd, &ps); break; }
             XjsSizeU sz = s.rt->GetPixelSize();
             float w = (float)sz.width, h = (float)sz.height;
             s.rt->BeginDraw();
@@ -2064,7 +2069,13 @@ static LRESULT CALLBACK Xjs_InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 void XjsShowInputDialog(HWND owner, const wchar_t* title, const wchar_t* desc, const std::wstring& initial, int resultId) {
     if (!owner) owner = g_hWnd;   /* 无 owner 兜底主窗 (宏 Cur() 为空时 g_hWnd=NULL) */
-    if (s_input.hwnd) { DestroyWindow(s_input.hwnd); s_input.hwnd = NULL; }
+    if (s_input.hwnd) {
+        /* 先摘句柄再销毁: DestroyWindow 期 WA_INACTIVE 重入 XjsInputFinish 曾对旧框补发
+           "取消" 语义的 WM_INPUT_DONE 并递归 DestroyWindow (同 XjsAskFinish 防护口径) */
+        HWND oldH = s_input.hwnd;
+        s_input.hwnd = NULL;
+        DestroyWindow(oldH);
+    }
     /* 弹输入框前先让搜索框失焦: 否则搜索框仍持焦点, 会继续画自己的光标并跑闪烁计时器,
        表现为"焦点/输入在弹窗, 可见光标却留在搜索框"(关闭后主窗重新激活会自行聚焦搜索框) */
     XjsSearchFocus(false);
@@ -2141,7 +2152,7 @@ void XjsShowInputDialog(HWND owner, const wchar_t* title, const wchar_t* desc, c
     SetFocus(s.hwnd);
     s.ed.UpdateImeAnchor(s.hwnd, s.editText, g_tfRow);
     InvalidateRect(s.hwnd, NULL, FALSE);
-    InvalidateRect(owner, NULL, FALSE);   /* owner 背景切钟罩虚化 (XjsModalBackdrop 下帧生效) */
+    XjsInvalidateOverlayOwner(owner);   /* owner 背景切钟罩虚化 (统一失效入口, 禁直调 InvalidateRect) */
 }
 
 /* ==================== 通用模态询问框 (JSON 按钮数组; 删除确认/多选打开/定位 等一切"询问"点共用) ====================
@@ -2321,6 +2332,10 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 }
 
 int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, const char* buttonsJson) {
+    /* 同步泵重入闸: 泵内消息处理 (定时器/插件事件) 再开询问框会共用 s_ask/s.open —
+       外层泵随新框关闭一起退出并返回"别人对话框"的结果; 已有同步泵在跑 = 干净返回取消 */
+    static int s_pumpDepth = 0;
+    if (s_pumpDepth > 0) return -1;
     if (s_ask.hwnd) XjsAskFinish(-1);
     XjsAskState& s = s_ask;
     /* JSON 按钮数组解析收口在 XjsParseDialogButtons (xjs_engine.cpp); 失败回退单"确定"已含在实现内 */
@@ -2425,13 +2440,14 @@ int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, cons
     ShowWindow(s.hwnd, SW_SHOW);
     SetForegroundWindow(s.hwnd);
     SetFocus(s.hwnd);
-    InvalidateRect(owner, NULL, FALSE);   /* owner 背景切钟罩虚化 */
+    XjsInvalidateOverlayOwner(owner);   /* owner 背景切钟罩虚化 (统一失效入口) */
     InvalidateRect(s.hwnd, NULL, FALSE);
     /* 同步泵: 阻塞到关闭, 返回被点按钮下标 (点蒙层/Esc 由 WM_ACTIVATE/KEYDOWN 收尾)。
        泵派发的是全线程消息 — 其它搜索窗的定时器/重绘会经 WndProc 入口 Enter 把 Cur
        重绑到那些窗且不恢复, 泵返回后调用方的 g_* 宏就会解析到别的窗 (拿别窗结果集
        同下标路径打开文件)。作用域钉住入口窗, 泵毕恢复 */
     XjsWindowScope scope(XjsSearchWindow::Cur());
+    s_pumpDepth++;   /* 泵运行标志 (入口重入闸判定); 中途无提前返回路径 */
     MSG m;
     while (s.open) {
         /* 标准模态泵口径: WM_QUIT 必须回投给外层循环 (泵里吞掉 = 主循环永远收不到退出,
@@ -2445,5 +2461,6 @@ int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, cons
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    s_pumpDepth--;
     return s.result;
 }

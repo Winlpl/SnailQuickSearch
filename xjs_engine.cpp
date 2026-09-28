@@ -14,8 +14,13 @@
    → 全局闸门计数按每窗账在窗口销毁时返还 (XjsPostToUiDropWindow), 否则配额慢性泄漏 */
 static bool XjsPostToUiFor(XjsSearchWindow* w, UINT msg, WPARAM wp, LPARAM lp) {
     if (!w || !w->hWnd) return false;
-    if (!XjsPostToUi(w->hWnd, msg, wp, lp)) return false;
+    /* 先记每窗账再投递, 失败回冲: post 返回后、fetch_add 前被抢占时, UI 线程派发 → Done
+       把窗账减空转, 之后的 fetch_add = 永久多记 1 (窗口销毁按多记的账向全局多返还) */
     w->uiPostPending.fetch_add(1, std::memory_order_relaxed);
+    if (!XjsPostToUi(w->hWnd, msg, wp, lp)) {
+        w->uiPostPending.fetch_sub(1, std::memory_order_relaxed);
+        return false;
+    }
     return true;
 }
 
@@ -2411,7 +2416,7 @@ BOOL XjsHotkeysRegisterAll() {
 void XjsHotkeysUnregisterAll() {
     HWND mainH = XjsSearchWindow::MainHwnd();
     if (!mainH) return;
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < XJS_LAUNCHER_SLOT_MAX; i++)
         UnregisterHotKey(mainH, ID_HOTKEY_SHOW + i);   /* 未注册的槽位卸载失败无害 */
 }
 

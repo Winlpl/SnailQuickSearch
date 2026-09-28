@@ -438,6 +438,8 @@ static void XjsSetSwitchCat(HWND hwnd, int cat) {
     if (s_set.cat == cat) return;
     s_set.cat = cat; s_set.scroll = 0; s_set.hoverRow = -1; s_set.rowsDirty = true;
     memset(s_mdPending, 0, sizeof(s_mdPending));
+    s_set.recHotkey = false;   /* 离开热键行所在分类 = 取消录制: 残留会吞全部键盘输入,
+                                  焦点进别的输入框时 Ctrl+V 被注册成全局热键 */
     s_set.pathEd.SetFocused(hwnd, false);
     for (auto& f : s_filterEds) f->SetFocused(hwnd, false);
     for (auto& f : s_aliasEds) f->SetFocused(hwnd, false);
@@ -469,6 +471,8 @@ static void XjsSetAppendMdPage(int pageIdx, const wchar_t* cardTitle, const wcha
     } else {   /* RT 未就绪 (行模型先于首帧被鼠标消息触发): 占位行, 首帧经 s_mdPending 重建 */
         r.md = XjsSetMdPageDoc(pageIdx);
         r.h = SS(200);
+        s_mdPending[pageIdx] = true;   /* 挂起重排旗标: 不置位 = XjsSetPaint 的 anyPending 恒假,
+                                          文档页钉死在 200u 占位高 (重建机制整个落空) */
     }
     s_set.cards.back().rows.push_back(r);
 }
@@ -1562,6 +1566,8 @@ static void XjsSetConfirmRebuild(HWND hwnd) {
     json += L"]";
     bool fields[7];
     for (int i = 0; i < 7; i++) fields[i] = s_set.dlgField[i];
+    XjsSaveConfig();   /* 重建记忆 (g_rbFields/g_rbDrives/g_rbSaved) 即时落盘 — 只等扫描完成链路的
+                          下一次任意保存, 期间退出进程记忆就丢 (设置修改点即时落盘审计口径) */
     XjsSetCloseRebuildDialog(hwnd);
     XjsEngineRebuildEx(fields, json);
 }
@@ -2201,10 +2207,12 @@ static bool XjsSetLinkRowHit(HWND hwnd, POINT pt) {
     return false;
 }
 
-/* 设置窗标题跟随 owner 窗口名称 (重命名/删除档案后同步刷新); 无 owner 回落主窗固定名 */
+/* 设置窗标题跟随 owner 窗口名称 (重命名/删除档案后同步刷新); 无 owner 回落主窗固定名。
+   swprintf 而非 _snwprintf: 截断时后者不写终止符 — 英文标题(34 字符)+GUID 窗口名(36) ≥ 64
+   会把未终止的栈缓冲直传 SetWindowTextW/CreateWindowExW (越界读出乱码标题) */
 static void XjsSetBuildTitle(wchar_t* out, int cap) {
-    _snwprintf(out, cap, XjsT(L"应用.设置窗口标题"),
-               s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);
+    swprintf(out, (size_t)cap, XjsT(L"应用.设置窗口标题"),
+             s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);
 }
 
 /* 设置窗正打开且作用于该搜索窗 (主窗"失焦关闭"豁免判定): 设置窗抢走焦点不该把
@@ -3318,7 +3326,7 @@ void XjsSettingsShow(int cat) {
     s_filterReload = s_aliasReload = true;   /* 打开即重拉: 表格回显引擎当前生效配置 (正式版同款) */
     if (s_set.hwnd) {
         wchar_t t[64];
-        _snwprintf(t, 64, XjsT(L"应用.设置窗口标题"), s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);
+        swprintf(t, 64, XjsT(L"应用.设置窗口标题"), s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);   /* swprintf: 截断恒补 NUL (见 XjsSetBuildTitle 注) */
         SetWindowTextW(s_set.hwnd, t);
         s_set.rowsDirty = true;   /* 行勾选态按新 owner 重建 */
         if (cat >= 0) XjsSetSwitchCat(s_set.hwnd, cat);   /* 直达指定分类页 (同分类 = 无操作) */
@@ -3350,7 +3358,7 @@ void XjsSettingsShow(int cat) {
     if (x < 8) x = 8;
     if (y < 8) y = 8;
     wchar_t title[64];
-    _snwprintf(title, 64, XjsT(L"应用.设置窗口标题"), s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);
+    swprintf(title, 64, XjsT(L"应用.设置窗口标题"), s_setOwner ? s_setOwner->name.c_str() : XJS_MAIN_WIN_NAME);   /* swprintf: 截断恒补 NUL (见 XjsSetBuildTitle 注) */
     HWND hwnd = CreateWindowExW(0, L"XJS_SettingsWnd", title,
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, x, y, w, h, g_hWnd, NULL, GetModuleHandleW(NULL), NULL);
     if (!hwnd) return;

@@ -2214,7 +2214,10 @@ void WebCommand(AiSess* s, const Jv& msg) {
             CfgSave();
             if (s->job) {
                 InterlockedExchange(&s->job->syncRes, g_cfg.syncResults ? 1 : 0);
-                s->job->syncWin = g_cfg.syncResults ? AgentWindowResultOf(s->tok) : NULL;
+                /* 指针也要原子换: worker 完成事件裸读该指针, 普通写与同值全局布防的
+                   InterlockedExchangePointer 口径对齐 */
+                InterlockedExchangePointer((volatile PVOID*)&s->job->syncWin,
+                                           g_cfg.syncResults ? (PVOID)AgentWindowResultOf(s->tok) : NULL);
             }
             CfgBroadcast();
         }
