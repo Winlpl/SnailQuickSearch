@@ -1225,6 +1225,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                          (GetKeyState(VK_MENU) & 0x8000 ? 4 : 0));
             /* 面板接管: 预览面板上滚轮整体转发插件 (Ctrl/普通都转, 插件自决语义) */
             if (XjsPreviewPanelWheel(pt, delta, wflags)) return 0;
+            /* 媒体预览: 滚轮 = 音量 (±5%/格, 浮标回显; 图片缩放判定之前) */
+            if (g_previewVisible && XjsPtIn(g_layout.preview, pt) && XjsPreviewIsMedia()) {
+                w->MediaAdjustVolume(delta > 0 ? 1 : -1);
+                return 0;
+            }
             /* 图片预览上滚轮 = 缩放 (普通滚轮与 Ctrl+滚轮同义, 2026-09-29 用户口径);
                文本预览仍走下方滚内容分支, 非图片非文本落列表 */
             if (g_previewVisible && XjsPtIn(g_layout.preview, pt) && XjsPreviewIsImage()) {
@@ -1389,6 +1394,9 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return 0;
             } else if (wParam == ID_TIMER_SBTRACK) {
                 if (!XjsListTrackTick()) KillTimer(hwnd, ID_TIMER_SBTRACK);   /* 滚动条轨道按住连发翻页 */
+                return 0;
+            } else if (wParam == ID_TIMER_MEDIA) {
+                w->MediaTick();   /* 媒体预览泵: 状态推进/帧搬运 (无活动自摘表) */
                 return 0;
             } else if (wParam == ID_TIMER_ANIM) {
                 /* 忙旋灯只转在状态栏: 仅失效状态栏 (初始扫描的进度条在空状态区, 才全窗)。
@@ -1595,6 +1603,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd, ID_TIMER_TOAST);
             KillTimer(hwnd, ID_TIMER_SYNCWATCH);
             KillTimer(hwnd, ID_TIMER_HOVERFADE);
+            KillTimer(hwnd, ID_TIMER_MEDIA);   /* 媒体预览泵 (引擎随窗析构释放) */
             /* 组件统一退登记: 输入字段登记 (路由层命中/聚焦表) + 光标闪烁驱动器 + Toast 条目/画刷。
                必须在 XjsDeviceDiscardCtx 之前 (Toast 画刷需随其所属 RT 一起释放) */
             XjsWindowComponentsDetach(hwnd);
@@ -1608,6 +1617,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 XjsSaveWindowRect();
                 XjsSaveConfig();
                 XjsPluginShutdown();   /* 插件逆序通知 (引擎销毁前的最后回调; DLL 不卸载) */
+                XjsMediaGlobalShutdown();   /* MFShutdown 配对 (各窗媒体引擎已随窗析构释放) */
                 XjsEngineShutdown(true);
                 if (g_result) { xjs_result_Destroy(g_result); g_result = NULL; }
                 XjsClearRenderCaches();

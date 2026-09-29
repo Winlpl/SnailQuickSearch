@@ -559,6 +559,8 @@ static const char* const K_SKIN = "皮肤";
 static const char* const K_VIEW = "视图";             /* 值: list/details/medium/large */
 static const char* const K_PREVIEW = "预览";
 static const char* const K_PREVW = "预览宽度";
+static const char* const K_MEDIAVOL = "预览音量";     /* % 0..100 (媒体预览) */
+static const char* const K_MEDIAMUTE = "预览静音";    /* 媒体预览 */
 static const char* const K_OPENELE = "打开提权";
 static const char* const K_OPENASY = "异步打开";
 static const char* const K_OPENHIDE = "打开后隐藏";
@@ -1316,6 +1318,8 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.mode = w->mode;         /* 搜索模式 (每窗, 2026-09-18 每窗化) */
     p.previewVisible = w->previewVisible;
     p.previewWidth = w->previewWidth;
+    p.mediaVolPct = (int)(w->mediaVol * 100.0f + 0.5f);   /* 预览音量/静音 (媒体预览) */
+    p.mediaMute = w->mediaMute;
     p.openElevated = w->openElevated;
     p.openAsync = w->openAsync;
     p.openHideWindow = w->openHideWindow;
@@ -1910,6 +1914,10 @@ void XjsLoadConfig() {
             p.previewWidth = XjsConfig::Int(o, K_PREVW, 400);
             if (p.previewWidth < 280) p.previewWidth = 280;
             if (p.previewWidth > 800) p.previewWidth = 800;
+            p.mediaVolPct = XjsConfig::Int(o, K_MEDIAVOL, 100);
+            if (p.mediaVolPct < 0) p.mediaVolPct = 0;
+            if (p.mediaVolPct > 100) p.mediaVolPct = 100;
+            p.mediaMute = XjsConfig::Bool(o, K_MEDIAMUTE, false);
             p.openElevated = XjsConfig::Bool(o, K_OPENELE, false);
             p.openAsync = XjsConfig::Bool(o, K_OPENASY, true);
             p.openHideWindow = XjsConfig::Bool(o, K_OPENHIDE, false);
@@ -2114,6 +2122,8 @@ void XjsSaveConfig() {
         o[K_SEARCHMODE] = picojson::value(Utf16ToUtf8(g_modeIni[p->mode]));
         o[K_PREVIEW] = picojson::value(p->previewVisible);
         o[K_PREVW] = picojson::value((double)p->previewWidth);
+        o[K_MEDIAVOL] = picojson::value((double)p->mediaVolPct);
+        o[K_MEDIAMUTE] = picojson::value(p->mediaMute);
         o[K_OPENELE] = picojson::value(p->openElevated);
         o[K_OPENASY] = picojson::value(p->openAsync);
         o[K_OPENHIDE] = picojson::value(p->openHideWindow);

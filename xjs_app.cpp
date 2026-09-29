@@ -222,6 +222,8 @@ void XjsSearchWindow::ApplyUiProfile() {
         mode = p->mode;   /* 搜索模式 (每窗, 2026-09-18 每窗化: 曾顶层共享 + 新窗强制跟随主窗) */
         previewVisible = p->previewVisible;
         previewWidth = p->previewWidth;
+        mediaVol = p->mediaVolPct / 100.0f;   /* 预览音量/静音 (媒体预览, 每窗档案) */
+        mediaMute = p->mediaMute;
         colsDetails = p->colsDetails;
         colsList = p->colsList;
         skinName = p->skin;
@@ -259,6 +261,8 @@ void XjsSearchWindow::ApplyUiProfile() {
         viewMode = m->viewMode;
         previewVisible = m->previewVisible;
         previewWidth = m->previewWidth;
+        mediaVol = m->mediaVol;   /* 预览音量/静音跟随主窗 (媒体预览) */
+        mediaMute = m->mediaMute;
         colsDetails = m->colsDetails;
         colsList = m->colsList;
         skinName = m->skinName;
@@ -329,6 +333,7 @@ bool XjsSearchWindow::CloseRequest() {
 /* RT 绑定资源统一释放 (设备丢弃 / 窗口销毁共用) */
 XjsSearchWindow::~XjsSearchWindow() {
     if (hFontEdit) { DeleteObject(hFontEdit); hFontEdit = NULL; }
+    if (media) { XjsMediaFree(media); media = NULL; }   /* 媒体引擎 Shutdown+释放 (先于本域位图资源) */
     for (auto& kv : brushCache) { if (kv.second) kv.second->Release(); }
     brushCache.clear();
     if (previewPvScaled) { previewPvScaled->Release(); previewPvScaled = NULL; }   /* 预览图片异步装载缓存持 RT 引用, 随窗释放 */

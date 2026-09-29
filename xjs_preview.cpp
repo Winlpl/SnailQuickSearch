@@ -78,6 +78,21 @@ static bool XjsIsTextExt(const std::wstring& name) {
     return false;
 }
 
+static bool XjsIsMediaExt(const std::wstring& name) {
+    size_t dot = name.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = name.substr(dot + 1);
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    /* 视频在列但不保证可解 (rmvb/ape 等系统缺解码器 → 错误占位卡, 打开按钮仍可用) */
+    static const wchar_t* exts[] = {
+        L"mp4", L"m4v", L"mkv", L"webm", L"avi", L"mov", L"wmv", L"flv", L"mpg", L"mpeg",
+        L"m2ts", L"ts", L"vob", L"3gp", L"ogv", L"rmvb", L"rm", L"asf", L"divx", L"f4v",
+        L"mp3", L"wav", L"wma", L"aac", L"flac", L"m4a", L"ogg", L"oga", L"opus", L"ape",
+        L"mka", L"aiff", L"aif", L"amr", L"m4b", L"caf" };
+    for (auto* e : exts) if (ext == e) return true;
+    return false;
+}
+
 /* 同步取大图标 (itemIndex=-1 不触发异步回调); dome 不做位图缓存, 返回值归调用方所有用完 Release */
 static XjsBitmap* XjsPreviewIcon(int fileId) {
     if (!g_result) return NULL;
@@ -621,6 +636,7 @@ void XjsPreviewUpdateSelection() {
     s_textScroll = 0;
     s_textPending = false;
     s_textHasMore = false;   /* 文本流式状态随目标复位 (下方 Ask 重新置 pending) */
+    XjsSearchWindow::Cur()->MediaStop();   /* 媒体随目标停播卸载 (新目标仍是媒体则下方重装载) */
     if (fileId >= 0 && g_engine && g_previewVisible) {   /* 面板未开启只记 ID 不读文件 (隐藏期读图/读文本纯属浪费) */
         std::wstring name = Utf8ToUtf16(xjs_db_GetName(g_engine, fileId));
         std::wstring path = Utf8ToUtf16(xjs_db_GetPath(g_engine, fileId));
@@ -640,6 +656,9 @@ void XjsPreviewUpdateSelection() {
             /* 文本文件: 异步流式装载 (首块 256KB 到货即显, 快到底自动续载 — 大文件可
                滚动预览, UI 线程零读取零解码, 2026-09-29) */
             XjsPreviewTextAsk(fileId, path, xjs_db_GetFileSize(g_engine, fileId), true);
+        } else if (XjsIsMediaExt(name)) {
+            /* 视频/音频: Media Engine 异步装载 (元数据/首帧就绪即画, 播放用户点播 — xjs_media.cpp) */
+            XjsSearchWindow::Cur()->MediaSetFile(fileId, path);
         }
     }
     XjsSearchWindow::Cur()->Invalidate();
@@ -666,6 +685,16 @@ bool XjsPreviewIsImage() {
     return g_previewImgW > 0;   /* 内置图: 选目标时已只读头取到尺寸 */
 }
 
+bool XjsPreviewIsMedia() {
+    if (!g_previewVisible || g_previewFileId < 0 || !g_result) return false;
+    XjsMediaCtx* mc = XjsSearchWindow::Cur()->media;
+    if (XjsMediaIsTarget(mc, g_previewFileId)) return true;   /* 会话已在装/在放 */
+    int idx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
+    if (idx < 0) return false;
+    XjsRowData* rd = XjsEnsureRowData(idx);
+    return rd && !rd->isDrive && XjsIsMediaExt(rd->name);
+}
+
 /* 文本预览普通滚轮滚动 (每格 3 行) */
 void XjsPreviewScrollLines(int dir) {
     s_textScroll += dir * 3;
@@ -679,6 +708,7 @@ void XjsPreviewToggle() {
     if (!g_previewVisible) {
         s_lightbox = false;   /* 藏面板随手收灯箱 (防下次开启吃到残留态) */
         XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
+        XjsSearchWindow::Cur()->MediaStop();   /* 媒体随面板停播 (音频不出"看不见的声") */
     }
     if (g_previewVisible) {
         /* 开启即回填当前选中: 隐藏期间 UpdateSelection 只记 ID 未读文件,
@@ -800,6 +830,181 @@ static void XjsPvTextBtn(const XjsRect& r, const wchar_t* text, bool hover) {
         g_br[hover ? XTH_TEXT : XTH_TEXT_DIM]);
 }
 
+/* ==================== 媒体卡 (视频/音频, 后端 xjs_media.cpp) ====================
+ * 画面 = Media Engine TransferVideoFrame 产物 (BGRA 字节懒转本 RT 域, 同插件交付口径;
+ * 引擎内缩放+信箱黑边, UI 线程零解码); 视频 = 等比适配暗底画面, 音频 = 音符占位卡。
+ * 控制条 = 播放/暂停 + 进度条(拖动寻位) + 时间 + 静音; 面板内滚轮 = 音量 (main 路由)。
+ * 命中命令号: 10=播放暂停(画面/播放钮) 11=静音; 进度条走 s_pvScrub 拖动, 不经命令号。 */
+static void XjsMediaFmtTime(double sec, wchar_t* buf, size_t cap) {
+    if (sec < 0 || sec != sec) sec = 0;
+    long long s = (long long)(sec + 0.5);
+    long long h = s / 3600;
+    s %= 3600;
+    int m = (int)(s / 60);
+    s %= 60;
+    if (h > 0) _snwprintf(buf, cap, L"%lld:%02d:%02lld", h, m, s);
+    else _snwprintf(buf, cap, L"%d:%02lld", m, s);
+    if (cap > 0) buf[cap - 1] = 0;
+}
+
+/* 圆形播放钮 (播放=双竖条 / 暂停与结束=三角, 结束态描边提亮示意"重播") */
+static void XjsPvMediaPlayBtn(const XjsRect& r, bool playing, bool ended, bool hover) {
+    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    float rr = XSF(14);
+    XjsEllipse e = XjsEllipseF(XjsPoint2F(cx, cy), rr, rr);
+    g_rt->FillEllipse(e, g_br[hover ? XTH_ROW_HOVER : XTH_PANEL2]);
+    g_rt->DrawEllipse(e, g_br[hover || ended ? XTH_ACCENT : XTH_BORDER], 1.0f);
+    XjsBrush* bc = (XjsBrush*)g_br[XTH_ACCENT];
+    if (playing) {
+        g_rt->FillRectangle(XjsRectF(cx - XSF(4.5f), cy - XSF(5.5f), cx - XSF(1.5f), cy + XSF(5.5f)), bc);
+        g_rt->FillRectangle(XjsRectF(cx + XSF(1.5f), cy - XSF(5.5f), cx + XSF(4.5f), cy + XSF(5.5f)), bc);
+    } else {
+        g_rt->DrawLine(XjsPoint2F(cx - XSF(3.5f), cy - XSF(6)), XjsPoint2F(cx + XSF(6), cy), bc, 1.8f);
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(6), cy), XjsPoint2F(cx - XSF(3.5f), cy + XSF(6)), bc, 1.8f);
+        g_rt->DrawLine(XjsPoint2F(cx - XSF(3.5f), cy + XSF(6)), XjsPoint2F(cx - XSF(3.5f), cy - XSF(6)), bc, 1.8f);
+    }
+}
+
+/* 静音钮 (喇叭矢量; 静音=叉, 有声=两道声波) */
+static void XjsPvMediaMuteBtn(const XjsRect& r, bool muted, bool hover) {
+    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    XjsBrush* bc = (XjsBrush*)g_br[hover ? XTH_TEXT : XTH_TEXT_DIM];
+    g_rt->FillRectangle(XjsRectF(cx - XSF(9), cy - XSF(3), cx - XSF(5.5f), cy + XSF(3)), bc);
+    g_rt->DrawLine(XjsPoint2F(cx - XSF(5.5f), cy - XSF(3)), XjsPoint2F(cx - XSF(1), cy - XSF(6.5f)), bc, 1.2f);
+    g_rt->DrawLine(XjsPoint2F(cx - XSF(5.5f), cy + XSF(3)), XjsPoint2F(cx - XSF(1), cy + XSF(6.5f)), bc, 1.2f);
+    g_rt->DrawLine(XjsPoint2F(cx - XSF(1), cy - XSF(6.5f)), XjsPoint2F(cx - XSF(1), cy + XSF(6.5f)), bc, 1.2f);
+    if (muted) {
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(2), cy - XSF(4)), XjsPoint2F(cx + XSF(8), cy + XSF(4)), bc, 1.4f);
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(8), cy - XSF(4)), XjsPoint2F(cx + XSF(2), cy + XSF(4)), bc, 1.4f);
+    } else {
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(2.5f), cy - XSF(3.5f)), XjsPoint2F(cx + XSF(4.5f), cy), bc, 1.3f);
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(4.5f), cy), XjsPoint2F(cx + XSF(2.5f), cy + XSF(3.5f)), bc, 1.3f);
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(6), cy - XSF(6)), XjsPoint2F(cx + XSF(8.5f), cy), bc, 1.3f);
+        g_rt->DrawLine(XjsPoint2F(cx + XSF(8.5f), cy), XjsPoint2F(cx + XSF(6), cy + XSF(6)), bc, 1.3f);
+    }
+}
+
+/* 媒体卡整卡 (调用方已保证 media 会话在且目标是本卡文件) */
+static void XjsPvRenderMedia(XjsSearchWindow* w, float px, float pw, float cy, const XjsRect& body) {
+    XjsLayout& L = g_layout;
+    XjsMediaCtx* mc = w->media;
+    if (!mc) return;
+    float fbY = L.statusbar.top - XSF(44);   /* 与底部 定位/打开 按钮带对齐 */
+    float ctrlH = XSF(36);
+    float ctrlY = fbY - ctrlH - XSF(6);
+    float areaW = pw - XSF(14);              /* 左右内边距镜像 (同图片口径) */
+    float availH = xf_max(ctrlY - XSF(8) - cy, XSF(60));
+
+    /* ===== 画面区 (视频=等比适配, 音频=音符占位卡) ===== */
+    XjsRect vr;
+    bool hasVid = XjsMediaHasVideo(mc);
+    bool failed = XjsMediaFailed(mc);
+    if (hasVid && !failed) {
+        float iw = (float)ximax(1, XjsMediaVidW(mc)), ih = (float)ximax(1, XjsMediaVidH(mc));
+        float base = xf_min(areaW / iw, availH / ih);
+        if (base > 4) base = 4;
+        float dw = iw * base, dh = ih * base;
+        float vx = px + (areaW - dw) / 2, vy = cy + (availH - dh) / 2;
+        vr = XjsRectF(vx, vy, vx + dw, vy + dh);
+    } else {
+        float aw = xf_min(areaW, XSF(300)), ah = xf_min(availH, XSF(150));
+        float vx = px + (areaW - aw) / 2, vy = cy + (availH - ah) / 2;
+        vr = XjsRectF(vx, vy, vx + aw, vy + ah);
+    }
+    s_hits.mediaVideo = failed ? XjsRect{} : vr;   /* 失败态画面不可点 (无播放可言) */
+    XjsMediaSetFrameTarget(mc, (int)(vr.right - vr.left + 0.5f), (int)(vr.bottom - vr.top + 0.5f));   /* 帧搬运目标尺寸 */
+
+    g_rt->PushAxisAlignedClip(body, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_rt->FillRoundedRectangle(XjsRoundedRectF(vr, XSF(8), XSF(8)), g_br[XTH_PANEL2]);
+    g_rt->DrawRoundedRectangle(XjsRoundedRectF(vr, XSF(8), XSF(8)), g_br[XTH_BORDER], 1.0f);
+    float mcx = (vr.left + vr.right) / 2, mcy = (vr.top + vr.bottom) / 2;
+    if (failed) {
+        std::wstring msg = XjsT(L"预览.媒体不支持");
+        g_rt->DrawText(msg.c_str(), (UINT32)msg.length(), g_tfTiny,
+            XjsRectF(vr.left + XSF(12), mcy - XSF(9), vr.right - XSF(12), mcy + XSF(9)), g_br[XTH_TEXT_FAINT]);
+    } else if (hasVid) {
+        g_rt->FillRectangle(vr, XjsTempBrush(XjsCol(0x000000, 0.45f)));
+        XjsBitmap* fb = XjsMediaFrameBitmap(mc);
+        if (fb) {
+            g_rt->DrawBitmap(fb, vr, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else if (XjsMediaLoading(mc)) {
+            XjsDrawSpinner(XjsPoint2F(mcx, mcy), XSF(9), (float)((GetTickCount64() % 900) / 900.0));
+            std::wstring lh = XjsT(L"预览.媒体载入");
+            g_rt->DrawText(lh.c_str(), (UINT32)lh.length(), g_tfTiny,
+                XjsRectF(vr.left, mcy + XSF(14), vr.right, mcy + XSF(32)), g_br[XTH_TEXT_FAINT]);
+        }
+    } else {
+        /* 音频占位: 音符 (符头 + 符杆 + 符尾) */
+        XjsBrush* ac = (XjsBrush*)g_br[XTH_ACCENT];
+        float nx = mcx - XSF(8), ny = mcy + XSF(6);
+        g_rt->FillEllipse(XjsEllipseF(XjsPoint2F(nx, ny), XSF(6), XSF(4.5f)), ac);
+        g_rt->DrawLine(XjsPoint2F(nx + XSF(5.6f), ny - XSF(1.5f)), XjsPoint2F(nx + XSF(5.6f), ny - XSF(24)), ac, 2.0f);
+        g_rt->DrawLine(XjsPoint2F(nx + XSF(5.6f), ny - XSF(24)), XjsPoint2F(nx + XSF(15), ny - XSF(18)), ac, 2.0f);
+        if (XjsMediaLoading(mc)) {
+            std::wstring lh = XjsT(L"预览.媒体载入");
+            g_rt->DrawText(lh.c_str(), (UINT32)lh.length(), g_tfTiny,
+                XjsRectF(vr.left, mcy + XSF(18), vr.right, mcy + XSF(36)), g_br[XTH_TEXT_FAINT]);
+        }
+    }
+    g_rt->PopAxisAlignedClip();
+
+    /* ===== 控制条 ===== */
+    bool playing = XjsMediaPlaying(mc), ended = XjsMediaEnded(mc);
+    float bs = XSF(30);
+    s_hits.mediaPlay = XjsRectF(px, ctrlY, px + bs, ctrlY + bs);
+    XjsPvMediaPlayBtn(s_hits.mediaPlay, playing, ended, XjsPvHover(10));
+    float timeW = XSF(86);
+    float muteW = XSF(26);
+    float seekL = px + bs + XSF(12);
+    float seekR = body.right - XSF(16) - muteW - timeW;
+    double dur = XjsMediaDur(mc), pos = XjsMediaPos(mc);
+    if (seekR > seekL + XSF(40)) {
+        s_hits.mediaSeek = XjsRectF(seekL, ctrlY + XSF(12), seekR, ctrlY + XSF(24));   /* 命中带高于视觉轨道 */
+        float trackY = ctrlY + XSF(17), trackH = XSF(5);
+        XjsRect track = XjsRectF(seekL, trackY, seekR, trackY + trackH);
+        g_rt->FillRoundedRectangle(XjsRoundedRectF(track, XSF(2.5f), XSF(2.5f)), XjsTempBrush(g_skin.driveTrack));
+        if (dur > 0) {
+            double frac = pos / dur;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+            float fillW = (float)((track.right - track.left) * frac);
+            if (fillW > XSF(1)) {
+                XjsRect fill = XjsRectF(track.left, trackY, track.left + fillW, trackY + trackH);
+                g_rt->FillRoundedRectangle(XjsRoundedRectF(fill, XSF(2.5f), XSF(2.5f)), g_br[XTH_ACCENT]);
+                g_rt->FillEllipse(XjsEllipseF(XjsPoint2F(track.left + fillW, trackY + trackH / 2), XSF(4.5f), XSF(4.5f)),
+                                  g_br[XTH_ACCENT]);
+            }
+        }
+    } else {
+        s_hits.mediaSeek = {};
+    }
+    wchar_t tb[16], db[16];
+    XjsMediaFmtTime(pos, tb, 16);
+    XjsMediaFmtTime(dur, db, 16);
+    std::wstring tt = std::wstring(tb) + L" / " + db;
+    float tw = XjsMeasureText(tt.c_str(), g_tfTiny);
+    g_rt->DrawText(tt.c_str(), (UINT32)tt.length(), g_tfTiny,
+        XjsRectF(body.right - XSF(16) - muteW - timeW, ctrlY + XSF(9),
+                 body.right - XSF(16) - muteW - XSF(4), ctrlY + XSF(27)),
+        g_br[XTH_TEXT_FAINT]);
+    s_hits.mediaMute = XjsRectF(body.right - XSF(16) - muteW, ctrlY + XSF(5),
+                                body.right - XSF(16), ctrlY + XSF(5) + muteW);
+    XjsPvMediaMuteBtn(s_hits.mediaMute, XjsMediaMuted(mc), XjsPvHover(11));
+    /* 音量/静音浮标 (调完 1.2s 内显示) */
+    float badge = XjsMediaVolumeBadge(mc);
+    if (badge >= 0) {
+        wchar_t vb[8];
+        _snwprintf(vb, 8, L"%d%%", (int)(badge * 100.0f + 0.5f));
+        float bw = XjsMeasureText(vb, g_tfTiny);
+        XjsRect br2 = XjsRectF(s_hits.mediaMute.right - bw - XSF(10), ctrlY - XSF(18),
+                               s_hits.mediaMute.right + XSF(10), ctrlY - XSF(2));
+        g_rt->FillRoundedRectangle(XjsRoundedRectF(br2, XSF(4), XSF(4)), g_br[XTH_PANEL2]);
+        g_rt->DrawText(vb, (UINT32)wcslen(vb), g_tfTiny,
+            XjsRectF(br2.left + XSF(5), br2.top + XSF(1), br2.right - XSF(5), br2.bottom - XSF(1)),
+            g_br[XTH_TEXT_DIM]);
+    }
+}
+
 void XjsPreviewRender() {
     if (!g_previewVisible) return;
     XjsLayout& L = g_layout;
@@ -817,6 +1022,7 @@ void XjsPreviewRender() {
     s_hits.copySerial = s_hits.bigDirs = s_hits.bigFiles = {};
     s_hits.locate = s_hits.open = {};
     s_hits.image = {};
+    s_hits.mediaVideo = s_hits.mediaSeek = s_hits.mediaPlay = s_hits.mediaMute = {};
     /* 面板接管中: 整块面板体 (含原头部带) 交给插件位图, 宿主头部 (标题/锁/宽窄/✕) 不画 —
        关闭入口 = 插件头部自绘 ✕ (SDK PanelClose, 按打开前状态恢复预览); 头部按钮命中矩形按帧清零 */
     if (g_plugPanelOn) {
@@ -972,11 +1178,18 @@ void XjsPreviewRender() {
         bool builtin = (contentImg == NULL) && g_previewImgW > 0;
         bool isImage = (contentImg != NULL) || builtin;
         bool isText = XjsPreviewIsText();
+        /* 媒体卡 (视频/音频): 会话在且装载目标是本卡文件才画, 否则落通用图标卡 */
+        XjsMediaCtx* mc = XjsSearchWindow::Cur()->media;
+        bool mediaLive = XjsMediaIsTarget(mc, rd->fileId) && !rd->isDrive &&
+                         (XjsMediaHasVideo(mc) || XjsMediaLoading(mc) || XjsMediaFailed(mc) ||
+                          XjsMediaPlaying(mc) || XjsIsMediaExt(rd->name));
         /* 图片可用区 = 头部以下到预留行之间整块 (面板多高图就多大 — 用户口径 "面板这么
            宽高图片还这么小不合理", 2026-09-29); 预留 = 信息五行120 + 图下间距12 (名称/路径
            行已删 — 与头部标题重复, 空间让给内容, 同日用户口径)。下限 120u: 矮窗口不把图挤没 */
         float imgAvailH = xf_max(contentBottom - cy - XSF(24 * 5 + 12), XSF(120));
-        if (isImage) {
+        if (mediaLive) {
+            XjsPvRenderMedia(XjsSearchWindow::Cur(), px, pw, cy, body);
+        } else if (isImage) {
             /* 图片内容预览 (等比适配可用区, 上限 4 倍; 滚轮/Ctrl+滚轮缩放, 超出面板裁剪)。
                s_imgZoom: 0=适应窗口哨兵, >0=相对原图的绝对比例 (0.05~4)。内置图旋转走
                WIC FlipRotator (异步装载链内, 无损); 装载在途垫显旧缓存, 到货即换。
@@ -1072,8 +1285,8 @@ void XjsPreviewRender() {
                         XjsRectF(px, listBottom + XSF(2), body.right - XSF(10), listBottom + XSF(18)),
                         g_br[XTH_TEXT_FAINT]);
             }
-        } else {
-            /* 信息行 */
+        } else if (!mediaLive) {
+            /* 信息行 (媒体卡自带播放控制条, 不再叠加信息行) */
             if (!rd->isDrive) {
                 cy = XjsInfoRow(cy, XjsT(L"列.大小"), Utf8ToUtf16(xjs_util_FormatFileSize(rd->size)), px);
                 cy = XjsInfoRow(cy, XjsT(L"列.修改时间"), XjsTimeText(rd->mtime), px);
@@ -1113,7 +1326,8 @@ bool XjsPreviewResizerHit(POINT pt) {
 }
 
 /* 面板按钮命令编码 (按下待定/松开触发两处同源): 1=关闭 2=宽窄切换 3=锁定 4=复制序列号
-   5=大目录 6=大文件 7=定位 8=打开 9=图片放大层 (灯箱工具条命令在 XjsLightboxHitCmd) */
+   5=大目录 6=大文件 7=定位 8=打开 9=图片放大层 10=媒体播放暂停 11=媒体静音
+   (灯箱工具条命令在 XjsLightboxHitCmd) */
 static int s_pvPress = 0;
 
 static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
@@ -1125,9 +1339,26 @@ static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
     else if (XjsPtIn(s_hits.bigFiles, pt)) *cmdOut = 6;
     else if (XjsPtIn(s_hits.locate, pt)) *cmdOut = 7;
     else if (XjsPtIn(s_hits.open, pt)) *cmdOut = 8;
+    else if (XjsPtIn(s_hits.mediaPlay, pt)) *cmdOut = 10;   /* 媒体钮优先于画面 (视觉层序同) */
+    else if (XjsPtIn(s_hits.mediaMute, pt)) *cmdOut = 11;
+    else if (XjsPtIn(s_hits.mediaVideo, pt)) *cmdOut = 10;
     else if (XjsPtIn(s_hits.image, pt)) *cmdOut = 9;   /* 最后判: 图片放大超出面板时按钮优先 (视觉层序同) */
     else return false;
     return true;
+}
+
+/* 媒体进度条拖动中 (鼠标交互瞬态, 文件级 static 口径): 点下即寻位, 拖动连续寻位 */
+static bool s_pvScrub = false;
+
+/* 进度条点位 → 0..1 (按渲染帧落键的命中带) */
+static double XjsPvScrubFrac(POINT pt) {
+    const XjsRect& t = s_hits.mediaSeek;
+    float w = t.right - t.left;
+    if (w <= 1) return 0;
+    double f = (double)(pt.x - t.left) / w;
+    if (f < 0) f = 0;
+    if (f > 1) f = 1;
+    return f;
 }
 
 void XjsPreviewHoverUpdate(POINT pt) {
@@ -1155,6 +1386,12 @@ bool XjsPreviewMouseDown(POINT pt) {
         return true;
     }
     if (!XjsPtIn(L.preview, pt)) return false;
+    /* 媒体进度条: 点中即寻位并进入拖动 (不经 press 命令; 拖离面板持续跟手) */
+    if (XjsPtIn(s_hits.mediaSeek, pt)) {
+        s_pvScrub = true;
+        SetCapture(g_hWnd);
+        XjsSearchWindow::Cur()->MediaSeekFrac(XjsPvScrubFrac(pt));
+    }
     /* 命令按钮: 按下只记待定 (松开触发口径), 松开仍命中同一按钮才执行 */
     int cmd = 0;
     if (XjsPreviewHitCmd(pt, &cmd)) s_pvPress = cmd;
@@ -1173,6 +1410,7 @@ static void XjsPreviewRunCmd(int cmd) {
         g_previewVisible = false;
         s_lightbox = false;
         XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
+        XjsSearchWindow::Cur()->MediaStop();   /* 藏面板媒体停播 */
         XjsSaveConfig();
         XjsClampScroll();
     } else if (cmd == 2) {
@@ -1215,12 +1453,19 @@ static void XjsPreviewRunCmd(int cmd) {
         s_lbZoom = 0;
         s_lbPress = 0;
         s_lbPanX = s_lbPanY = 0;
+    } else if (cmd == 10) {
+        XjsSearchWindow::Cur()->MediaTogglePlay();   /* 媒体播放/暂停 (画面点击与播放钮同令) */
+    } else if (cmd == 11) {
+        XjsSearchWindow::Cur()->MediaToggleMute();
     }
     XjsSearchWindow::Cur()->Invalidate();
 }
 
 bool XjsPreviewMouseMove(POINT pt) {
-    (void)pt;
+    if (s_pvScrub) {   /* 媒体进度条拖动寻位 (优先于面板宽拖) */
+        XjsSearchWindow::Cur()->MediaSeekFrac(XjsPvScrubFrac(pt));
+        return true;
+    }
     if (!g_previewDrag) return false;
     float newW = (float)g_layout.w - pt.x - XSF(6);
     g_previewWidth = ximax(280, ximin(800, (int)newW));
@@ -1229,6 +1474,7 @@ bool XjsPreviewMouseMove(POINT pt) {
 }
 
 bool XjsPreviewMouseUp(POINT pt) {
+    if (s_pvScrub) { s_pvScrub = false; ReleaseCapture(); return true; }
     if (g_previewDrag) { g_previewDrag = false; XjsSaveConfig(); XjsPreviewPanelSyncSize(true); return true; }
     if (XjsPreviewPanelMouseUp(pt)) return true;   /* 面板捕获中: 转发 LUP (拖离面板也算) */
     int cmd = s_pvPress;
@@ -1624,6 +1870,7 @@ bool XjsPreviewPanelOpen(XjsSearchWindow* w, unsigned long long window, const wc
     if (fresh) {
         if (w->plugPanelOn)   /* 换插件接管: 旧会话先收尾 (不回写预览状态) */
             XjsPreviewPanelClose(w, window, false);
+        w->MediaStop();   /* 面板整块交给插件: 内置媒体停播 (恢复后由选中重装载) */
         w->plugPanelWasVisible = w->previewVisible;
         w->plugPanelOn = true;
         w->plugPanelPluginId = pluginId;

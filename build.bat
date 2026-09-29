@@ -105,7 +105,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "SRCS=xjs_app.cpp xjs_util.cpp xjs_d2d.cpp xjs_gdiplus.cpp xjs_engine.cpp xjs_popup.cpp xjs_chrome.cpp xjs_toast.cpp xjs_list.cpp xjs_preview.cpp xjs_settings.cpp xjs_md.cpp xjs_plugin.cpp xjs_plugin_api.cpp md4c\md4c.c main.cpp"
+set "SRCS=xjs_app.cpp xjs_util.cpp xjs_d2d.cpp xjs_gdiplus.cpp xjs_engine.cpp xjs_popup.cpp xjs_chrome.cpp xjs_toast.cpp xjs_list.cpp xjs_preview.cpp xjs_media.cpp xjs_settings.cpp xjs_md.cpp xjs_plugin.cpp xjs_plugin_api.cpp md4c\md4c.c main.cpp"
 echo Compiling all sources /MP parallel...
 cl /MP /EHsc /std:c++20 /O2 /GL /utf-8 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /c %SRCS% /Fo%INT_DIR%\ /Fd%INT_DIR%\
 if errorlevel 1 (
@@ -116,7 +116,7 @@ if errorlevel 1 (
 )
 
 echo Linking SnailQuickSearch.exe ...
-link /OUT:SnailQuickSearch.exe /MACHINE:X64 /SUBSYSTEM:WINDOWS,6.01 /LTCG /DEBUG /OPT:REF /OPT:ICF /MANIFEST:EMBED "%INT_DIR%\*.obj" "%INT_DIR%\main.res" xunjieso.lib comctl32.lib user32.lib gdi32.lib shell32.lib ole32.lib advapi32.lib d2d1.lib dwrite.lib windowscodecs.lib dwmapi.lib imm32.lib oleaut32.lib shlwapi.lib uuid.lib
+link /OUT:SnailQuickSearch.exe /MACHINE:X64 /SUBSYSTEM:WINDOWS,6.01 /LTCG /DEBUG /OPT:REF /OPT:ICF /MANIFEST:EMBED "%INT_DIR%\*.obj" "%INT_DIR%\main.res" xunjieso.lib comctl32.lib user32.lib gdi32.lib shell32.lib ole32.lib advapi32.lib d2d1.lib dwrite.lib windowscodecs.lib mfplat.lib mfuuid.lib dwmapi.lib imm32.lib oleaut32.lib shlwapi.lib uuid.lib
 if errorlevel 1 (
     echo.
     echo Build failed!

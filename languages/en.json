@@ -91,6 +91,8 @@
  "预览.定位文件": "Locate File",
  "预览.适应": "Fit",
  "预览.文本加载中": "Loading…",
+ "预览.媒体载入": "Loading…",
+ "预览.媒体不支持": "Cannot preview this format - a system decoder may be missing",
  "预览.继续滚动": "More below - keep scrolling to load",
  "预览.打开文件": "Open file",
  "预览.子项数量": "Item count",

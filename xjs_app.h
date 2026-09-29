@@ -10,7 +10,8 @@
  *   xjs_popup   自绘弹出菜单 (LL 钩子点外关闭) + 共享输入框组件 XjsLineEdit/输入框/询问框
  *   xjs_chrome  标题栏: 图标/☰菜单/搜索框(模式按钮+清空+历史)/筛选下拉/窗口按钮/状态栏
  *   xjs_list    列表: 表头/行(驱动器行+时间徽章+容量条)/滚动条/选择/框选/行内重命名
- *   xjs_preview 预览面板: 驱动器信息卡/文件信息/图片预览/查找大目录大文件
+ *   xjs_preview 预览面板: 驱动器信息卡/文件信息/图片预览/媒体(视频/音频)预览卡/查找大目录大文件
+ *   xjs_media  媒体预览后端 (Media Foundation Media Engine 帧服务器: 播放控制/视频帧搬运)
  *   xjs_md      Markdown 引擎 (md4c 解析 + 后端排版绘制, 设置内置文档页与 .md 预览共用)
  *   xjs_toast   Toast 通知组件 (按宿主 HWND 挂载, 搜索窗/设置窗各自独立栈)
  *   xjs_settings 设置窗口 (独立顶层窗, 左侧两层分类树 + 右侧行模型)
@@ -77,6 +78,7 @@
 #define ID_TIMER_HOSTEDSRC  9   /* 多来源标签悬停 180ms 后弹"切换搜索来源"菜单 (一次性) */
 #define ID_TIMER_SETLIVE    10  /* 设置窗 内存/性能分析页 实时数据 1s 刷新 (仅这两分类重建行模型, 其余分类空转) */
 #define ID_TIMER_SBTRACK    11  /* 滚动条轨道按住连发翻页 (首延 400ms, 之后 150ms/步; thumb 到指针即停) */
+#define ID_TIMER_MEDIA      12  /* 媒体预览泵 40ms (装载期/播放期帧搬运/音量浮标; 无媒体活动即摘) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
@@ -781,6 +783,8 @@ struct XjsModeDlg {
     XjsEditField nameEd, descEd, tplEd;
 };
 
+struct XjsMediaCtx;   /* 媒体预览会话 (实现收口 xjs_media.cpp; 本头不见 MF/D3D 类型) */
+
 /* 预览面板内命中区域 (渲染时填写, 命中测试读取; 每窗一份) */
 struct XjsPreviewHits {
     XjsRect lockBtn{}, maxBtn{}, closeBtn{};
@@ -788,6 +792,7 @@ struct XjsPreviewHits {
     XjsRect bigDirs{}, bigFiles{};
     XjsRect locate{}, open{};
     XjsRect image{};                        /* 图片内容矩形 (渲染填写; 点击 = 打开放大层) */
+    XjsRect mediaVideo{}, mediaSeek{}, mediaPlay{}, mediaMute{};   /* 媒体卡 (画面/进度/播放/静音) */
     bool valid = false;
 };
 
@@ -927,6 +932,8 @@ struct XjsUiProfile {
     int mode = XMODE_WILDCARD;            /* 搜索模式 (每窗, 条目"搜索模式"; 曾为顶层共享键, 2026-09-18 每窗化) */
     bool previewVisible = true;
     int previewWidth = 400;
+    int mediaVolPct = 100;                /* 预览音量 % 0..100 (媒体预览) */
+    bool mediaMute = false;               /* 预览静音 (媒体预览) */
     bool openElevated = false;            /* 打开文件: 继承管理员权限 (runas), 默认关 */
     bool openAsync = true;                /* 打开文件: 异步线程执行 (防卡主线程), 默认开 */
     bool openHideWindow = false;          /* 打开文件后隐藏窗口到托盘, 默认关 */
@@ -1159,6 +1166,12 @@ public:
     bool previewPvPending = false;          /* 作业在途 (渲染帧不重复投) */
     bool previewPvFailed = false;           /* 上次装载失败 (不逐帧重投; 换文件复位) */
 
+    /* 媒体预览会话 (视频/音频; 实现收口 xjs_media.cpp, 本类只见不透明指针。
+       懒建于首次媒体预览, 随窗析构释放; 音量/静音随档案持久化) */
+    XjsMediaCtx* media = NULL;
+    float mediaVol = 1.0f;                  /* 预览音量 0..1 (档案 "预览音量" %) */
+    bool mediaMute = false;                 /* 预览静音 (档案 "预览静音") */
+
     /* 插件预览接管 (preview 能力, P2; 实现收口 xjs_preview.cpp "插件预览接管"节)。
        会话状态必须住窗口类 (可维护性红线 — 曾为文件级 static: 双窗口各自预览互相
        踢掉对方的接管世代, 且"第二个窗口随时会有") */
@@ -1228,6 +1241,15 @@ public:
     void ClearDebounceSnapshot() {                    /* 防抖快照清理唯一入口 (完成/失败回调/渲染缓存作废/重采样前) */
         debounceIds.clear(); debounceSel.clear(); debounceFirst = 0; debounceCount = 0;
     }
+
+    /* ---- 媒体预览 (视频/音频; 实现 xjs_media.cpp, 全部 UI 线程) ---- */
+    void MediaSetFile(int fileId, const std::wstring& path);   /* 选中媒体文件 → 装载 (同文件幂等不打断播放) */
+    void MediaTogglePlay();           /* 播放/暂停 (结束态=重播; 开始播放时暂停其它窗口的媒体) */
+    void MediaToggleMute();           /* 静音切换 (写档案+落盘) */
+    void MediaAdjustVolume(int dir);  /* 滚轮调音量 (dir=±1 → ±5%; 写档案+落盘+浮标回显) */
+    void MediaSeekFrac(double frac);  /* 进度条寻位 0..1 (拖动中连续调; 暂停态自动补抓帧) */
+    void MediaTick();                 /* ID_TIMER_MEDIA 泵: 状态推进/帧搬运 + 计时器自管理 */
+    void MediaStop();                 /* 停播并卸载 (换选中/藏面板/插件面板接管) */
 };
 
 /* 作用域内把"当前窗"临时切到指定窗口 (设置窗等 owner 绑定场景); 析构自动恢复 */
@@ -1777,6 +1799,7 @@ void XjsPreviewWheel(int dir);                    // Ctrl+滚轮缩放预览图�
 void XjsPreviewScrollLines(int dir);              // 文本预览普通滚轮滚动 (dir=±1)
 bool XjsPreviewIsText();                          // 当前预览目标是文本内容
 bool XjsPreviewIsImage();                         // 当前预览目标是图片内容 (滚轮缩放判定)
+bool XjsPreviewIsMedia();                         // 当前预览目标是视频/音频内容 (滚轮调音量判定)
 void XjsPreviewImgAdopt(HWND hwnd, long long gen);   /* WM_PV_IMG_READY: 异步装载结果转本域入缓存 */
 void XjsPreviewTextAdopt(HWND hwnd, long long gen);  /* WM_PV_TXT_READY: 流式文本块追加进行集 */
 
@@ -1953,3 +1976,25 @@ void XjsPluginPanelDispatch(unsigned long long window, int type, long long seria
                             int w, int h, float scale, int x, int y, int delta,
                             unsigned flags, unsigned ch);   /* 按会话 owner 插件派发 OnPanelEvent (纯 C 形参打包 SDK 事件) */
 void XjsPluginPanelValidateOwners();              /* 插件禁用/重扫后校验: owner 失效的会话一律结束 (restore=true) */
+
+/* ---- xjs_media (媒体预览后端; 绘制取用接口, 全部 UI 线程。
+   会话 = XjsSearchWindow::media, 引擎对象懒建; 视频帧经 TransferVideoFrame 搬进 WIC 位图
+   再 CPU 拷贝成 BGRA 字节, 绘制端经 XjsMediaFrameBitmap 懒转本 RT 域 — 同插件交付口径) ---- */
+XjsMediaCtx* XjsMediaCreate(HWND hwnd);
+void XjsMediaFree(XjsMediaCtx* c);                /* 窗口析构: 引擎 Shutdown + 资源释放 (UI 线程) */
+void XjsMediaGlobalShutdown();                    /* 主窗销毁收尾: MFShutdown 配对 MFStartup */
+XjsBitmap* XjsMediaFrameBitmap(XjsMediaCtx* c);   /* 当前视频帧位图 (无帧/未就绪 = NULL) */
+bool   XjsMediaHasVideo(XjsMediaCtx* c);
+bool   XjsMediaIsTarget(XjsMediaCtx* c, int fileId);   /* 会话是否装载着该文件 (绘制/滚轮路由判定) */
+void   XjsMediaSetFrameTarget(XjsMediaCtx* c, int w, int h);   /* 绘制端回写画面矩形 (泵取帧目标尺寸) */
+int    XjsMediaVidW(XjsMediaCtx* c);              /* 原生视频宽高 (元数据就绪前 0) */
+int    XjsMediaVidH(XjsMediaCtx* c);
+bool   XjsMediaLoading(XjsMediaCtx* c);           /* 源已提交, 等元数据/首帧 */
+bool   XjsMediaFailed(XjsMediaCtx* c);            /* 引擎报错/流打不开 (系统缺解码器等) */
+bool   XjsMediaPlaying(XjsMediaCtx* c);
+bool   XjsMediaEnded(XjsMediaCtx* c);
+double XjsMediaPos(XjsMediaCtx* c);               /* 当前位置 (秒; UI 泵缓存) */
+double XjsMediaDur(XjsMediaCtx* c);               /* 时长 (秒; 元数据就绪前 0) */
+float  XjsMediaVolume(XjsMediaCtx* c);
+bool   XjsMediaMuted(XjsMediaCtx* c);
+float  XjsMediaVolumeBadge(XjsMediaCtx* c);       /* <0 = 无浮标; >=0 = 浮标显示的音量 (调音量后 1.2s) */
