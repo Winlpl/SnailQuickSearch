@@ -645,6 +645,27 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 default: break;
             }
         }
+        /* ===== 图片放大层 (灯箱) 总闸: 预览图点击后的整窗模态 — 输入全吞 (点任意处/Esc 关,
+           XjsLightboxMsg 只负责关闭副作用), 同上方模态层总闸口径; 光标恒箭头防列表面漏 ===== */
+        if (XjsLightboxActive()) {
+            if (msg == WM_SETCURSOR) {
+                if (LOWORD(lParam) == HTCLIENT) SetCursor(LoadCursorW(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            switch (msg) {
+                case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+                case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+                case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+                case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_MOUSELEAVE: case WM_CONTEXTMENU:
+                case WM_SYSCOMMAND:
+                case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP:
+                case WM_CHAR: case WM_UNICHAR: case WM_IME_CHAR: case WM_IME_STARTCOMPOSITION:
+                case WM_IME_COMPOSITION: case WM_IME_NOTIFY:
+                    XjsLightboxMsg(hwnd, msg, wParam, lParam);
+                    return 0;
+                default: break;
+            }
+        }
         if (XjsModeDlgActive()) {
             if (msg == WM_SETCURSOR) {
                 if (LOWORD(lParam) == HTCLIENT) {
@@ -790,6 +811,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (bandHit(L.listHead.top, L.list.bottom)) XjsListRender();
                 if (L.preview.bottom > L.preview.top && bandHit(L.preview.top, L.preview.bottom)) XjsPreviewRender();
                 if (bandHit(L.statusbar.top, L.statusbar.bottom)) XjsRenderStatusbar();
+                XjsLightboxRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 图片放大层: 钟罩+大图 (输入由上方总闸接管) */
                 g_rt->PopAxisAlignedClip();
                 if (backdrop) XjsBackdropEndBlur(g_rt, cr);   /* 虚化底整面盖住 + 暗罩 */
                 XjsModeDlgRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 模态对话框 (遮罩置顶) */
@@ -1015,6 +1037,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_LBUTTONDBLCLK: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (XjsLightboxJustClosedAt(pt)) return 0;   /* 灯箱刚被本次连击的首击按下关闭: 第二击吞掉 (防穿透误开文件) */
             if (pt.y < XSF(40) && XjsPtIn(g_layout.searchBox, pt)) { XjsSearchDoubleClick(pt); return 0; }
             /* 面板接管: 内容区双击归插件 (不能落到列表的"双击打开文件") */
             if (XjsPreviewPanelWantsPt(pt)) { XjsPreviewPanelMouse(XJS_HPANEL_DBLCLK, pt); return 0; }
@@ -1118,6 +1141,16 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             return 0;
         }
+        case WM_PV_IMG_READY: {
+            /* 预览图片异步装载完成 (工作线程 → UI 线程; 代号/归属/选中三重校验后入缓存) */
+            XjsPreviewImgAdopt(hwnd, (long long)lParam);
+            return 0;
+        }
+        case WM_PV_TXT_READY: {
+            /* 预览文本流式块到达 (工作线程 → UI 线程; 代号/归属/选中校验后追加行集) */
+            XjsPreviewTextAdopt(hwnd, (long long)lParam);
+            return 0;
+        }
         case WM_ACTIVATE: {
             /* 默认无焦点口径: 激活不再自动聚焦搜索框 (聚焦是窗内持久状态, 靠鼠标点击取得);
                广播给所有输入光标驱动器: 窗口失活(切到别的程序) 一律熄光标并停表 —
@@ -1192,6 +1225,12 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                          (GetKeyState(VK_MENU) & 0x8000 ? 4 : 0));
             /* 面板接管: 预览面板上滚轮整体转发插件 (Ctrl/普通都转, 插件自决语义) */
             if (XjsPreviewPanelWheel(pt, delta, wflags)) return 0;
+            /* 图片预览上滚轮 = 缩放 (普通滚轮与 Ctrl+滚轮同义, 2026-09-29 用户口径);
+               文本预览仍走下方滚内容分支, 非图片非文本落列表 */
+            if (g_previewVisible && XjsPtIn(g_layout.preview, pt) && XjsPreviewIsImage()) {
+                XjsPreviewWheel(delta > 0 ? 1 : -1);
+                return 0;
+            }
             if (GetKeyState(VK_CONTROL) & 0x8000) {
                 int dir = delta > 0 ? 1 : -1;
                 /* 正式版口径: 预览面板上缩放预览内容, 列表上切换视图模式 (向上滚=放大) */

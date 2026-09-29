@@ -10,6 +10,40 @@
 #define s_textLines     (XjsSearchWindow::Cur()->previewTextLines)
 #define s_textFileId    (XjsSearchWindow::Cur()->previewTextFileId)
 #define s_textScroll    (XjsSearchWindow::Cur()->previewTextScroll)
+#define s_textPending   (XjsSearchWindow::Cur()->previewTextPending)
+#define s_textHasMore   (XjsSearchWindow::Cur()->previewTextHasMore)
+#define s_lightbox      (XjsSearchWindow::Cur()->previewLightbox)
+#define s_lbBmp         (XjsSearchWindow::Cur()->previewLbBmp)
+#define s_lbKeyFile     (XjsSearchWindow::Cur()->previewLbKeyFile)
+#define s_lbKeyW        (XjsSearchWindow::Cur()->previewLbKeyW)
+#define s_lbKeyH        (XjsSearchWindow::Cur()->previewLbKeyH)
+#define s_lbKeyRot      (XjsSearchWindow::Cur()->previewLbKeyRot)
+#define s_lbPending     (XjsSearchWindow::Cur()->previewLbPending)
+#define s_lbFailed      (XjsSearchWindow::Cur()->previewLbFailed)
+#define s_lbRotL        (XjsSearchWindow::Cur()->previewLbRotL)
+#define s_lbRotR        (XjsSearchWindow::Cur()->previewLbRotR)
+#define s_lbOne         (XjsSearchWindow::Cur()->previewLbOne)
+#define s_lbFit         (XjsSearchWindow::Cur()->previewLbFit)
+#define s_lbPress       (XjsSearchWindow::Cur()->previewLbPress)
+#define s_lbBase        (XjsSearchWindow::Cur()->previewLbBase)
+#define s_lbZoom        (XjsSearchWindow::Cur()->previewLbZoom)
+#define s_lbPanX        (XjsSearchWindow::Cur()->previewLbPanX)
+#define s_lbPanY        (XjsSearchWindow::Cur()->previewLbPanY)
+#define s_lbDrag        (XjsSearchWindow::Cur()->previewLbDrag)
+#define s_lbDragPt      (XjsSearchWindow::Cur()->previewLbDragPt)
+#define s_lbDragPanX    (XjsSearchWindow::Cur()->previewLbDragPanX)
+#define s_lbDragPanY    (XjsSearchWindow::Cur()->previewLbDragPanY)
+#define s_lbImg         (XjsSearchWindow::Cur()->previewLbImg)
+#define s_lbPannable    (XjsSearchWindow::Cur()->previewLbPannable)
+#define s_pvScaled      (XjsSearchWindow::Cur()->previewPvScaled)
+#define s_pvKeyFile     (XjsSearchWindow::Cur()->previewPvKeyFile)
+#define s_pvKeyW        (XjsSearchWindow::Cur()->previewPvKeyW)
+#define s_pvKeyH        (XjsSearchWindow::Cur()->previewPvKeyH)
+#define s_pvKeyRot      (XjsSearchWindow::Cur()->previewPvKeyRot)
+#define s_pvPending     (XjsSearchWindow::Cur()->previewPvPending)
+#define s_pvFailed      (XjsSearchWindow::Cur()->previewPvFailed)
+#define s_rot           (XjsSearchWindow::Cur()->previewImgRot)
+#define s_imgBase       (XjsSearchWindow::Cur()->previewImgBase)
 /* 插件预览接管会话状态: 同为每窗 (2026-09-28 迁入 — 曾为文件级 static, 双窗口互相
    踢掉对方的接管世代, 违反"窗口级状态一律是类字段"红线) */
 #define s_pvPlugReq     (XjsSearchWindow::Cur()->previewPlugReq)
@@ -44,71 +78,6 @@ static bool XjsIsTextExt(const std::wstring& name) {
     return false;
 }
 
-/* 字节 → 宽文本: BOM(UTF-16/UTF-8) → 严格 UTF-8 → GBK 兜底 (源样式同识别顺序) */
-static std::wstring XjsDecodeTextBytes(const std::string& raw) {
-    auto utf16le = [&](const char* p, size_t bytes) {
-        std::wstring w(bytes / 2, L'\0');
-        memcpy(&w[0], p, bytes / 2 * sizeof(wchar_t));
-        return w;
-    };
-    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE)
-        return utf16le(raw.data() + 2, raw.size() - 2);
-    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFE && (unsigned char)raw[1] == 0xFF) {
-        std::string be(raw.data() + 2, raw.size() - 2);
-        for (size_t i = 0; i + 1 < be.size(); i += 2) std::swap(be[i], be[i + 1]);
-        return utf16le(be.data(), be.size());
-    }
-    const char* p = raw.data();
-    size_t n = raw.size();
-    if (n >= 3 && (unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) {
-        p += 3;
-        n -= 3;
-    }
-    int wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, (int)n, NULL, 0);
-    if (wl > 0) {
-        std::wstring w(wl, L'\0');
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, (int)n, &w[0], wl);
-        return w;
-    }
-    int gl = MultiByteToWideChar(936, 0, p, (int)n, NULL, 0);
-    if (gl > 0) {
-        std::wstring w(gl, L'\0');
-        MultiByteToWideChar(936, 0, p, (int)n, &w[0], gl);
-        return w;
-    }
-    return L"";
-}
-
-static void XjsLoadPreviewText(int fileId, const std::wstring& path, long long size) {
-    s_textLines.clear();
-    s_textFileId = -1;
-    s_textScroll = 0;
-    if (size > 5LL * 1024 * 1024) {
-        s_textLines.push_back(XjsT(L"预览.文件过大"));
-        s_textFileId = fileId;
-        return;
-    }
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::string raw;
-    char buf[65536];
-    DWORD rd = 0;
-    while (raw.size() < 5u * 1024 * 1024 && ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd)
-        raw.append(buf, rd);
-    CloseHandle(h);
-    bool binary = false;
-    for (size_t i = 0; i < raw.size() && i < 4096; i++)
-        if (raw[i] == '\0') { binary = true; break; }
-    if (binary) {   /* 二进制文件不预览 (保留信息卡) */
-        return;
-    }
-    std::wstring text = XjsDecodeTextBytes(raw);
-    if (text.empty()) return;
-    s_textLines = XjsSplitLines(text);
-    s_textFileId = fileId;
-}
-
 /* 同步取大图标 (itemIndex=-1 不触发异步回调); dome 不做位图缓存, 返回值归调用方所有用完 Release */
 static XjsBitmap* XjsPreviewIcon(int fileId) {
     if (!g_result) return NULL;
@@ -129,8 +98,33 @@ static void XjsPreviewPlugDropCacheOf(XjsSearchWindow* w) {
     w->previewPlugCacheRt = NULL;
 }
 
+/* 灯箱图异步装载缓存清理 (RT 域换/内容换/收层; 键一并归零 = 下次重新投作业) */
+static void XjsLightboxDropCacheOf(XjsSearchWindow* w) {
+    if (w->previewLbBmp) { w->previewLbBmp->Release(); w->previewLbBmp = NULL; }
+    w->previewLbKeyFile = -1;
+    w->previewLbKeyW = w->previewLbKeyH = w->previewLbKeyRot = 0;
+    w->previewLbPending = false;
+    w->previewLbFailed = false;
+}
+
+/* 预览面板图异步装载缓存清理 (同灯箱口径) */
+static void XjsPreviewScaledDropCacheOf(XjsSearchWindow* w) {
+    if (w->previewPvScaled) { w->previewPvScaled->Release(); w->previewPvScaled = NULL; }
+    w->previewPvKeyFile = -1;
+    w->previewPvKeyW = w->previewPvKeyH = w->previewPvKeyRot = 0;
+    w->previewPvPending = false;
+    w->previewPvFailed = false;
+}
+
+/* 两处预采样缓存一并清 (内容换/收层/设备重建共用) */
+static void XjsPreviewImageCacheDropAll(XjsSearchWindow* w) {
+    XjsLightboxDropCacheOf(w);
+    XjsPreviewScaledDropCacheOf(w);
+}
+
 void XjsPreviewPlugCacheInvalidate() {
     XjsSearchWindow::ForEach(&XjsPreviewPlugDropCacheOf);   /* 设备重建 = 全部窗的 RT 域都换 */
+    XjsSearchWindow::ForEach(&XjsPreviewImageCacheDropAll); /* 预采样位图同样绑 RT 域 */
 }
 
 static void XjsPreviewPluginDrop() {
@@ -165,6 +159,432 @@ static XjsBitmap* XjsPreviewPluginBitmap(int fileId) {
     return s_pvPlugCache;
 }
 
+/* ==================== 图片异步装载 (2026-09-29) ====================
+ * 几十 M 的图在 UI 线程同步解码 = 每次选中/滚轮冻结数百毫秒 (用户对比 Everything 实锤)。
+ * 统一改异步: 渲染帧发现缓存缺口 → 落键置 pending → 投作业; 单工作线程 解码+Fant缩放
+ * +旋转 → PBGRA 字节 → PostMessage 回 UI 线程转本域位图入缓存。UI 线程从此零解码,
+ * 装载期间垫显旧缓存 (同源) 或暗底占位, 到货即换。双槽 [0]=面板 [1]=灯箱, 新请求覆盖
+ * 同槽 = 取代旧作业; 结果单槽被新结果覆盖 = 代号校验丢弃, 下一帧重投自愈。 */
+static struct XjsImgJobCs { CRITICAL_SECTION cs; XjsImgJobCs() { InitializeCriticalSectionAndSpinCount(&cs, 100); } } s_imgJobCs;
+static HANDLE s_imgThread = NULL, s_imgWake = NULL;
+
+struct XjsImgJob {
+    bool pending = false;
+    long long gen = 0;
+    int ctx = 0;            /* 0=面板预采样 1=灯箱 */
+    HWND hwnd = NULL;
+    int fileId = -1;
+    std::wstring path;
+    int tw = 0, th = 0, rot = 0;
+};
+static XjsImgJob s_imgSlot[2];
+static long long s_imgGen = 0;   /* 作业代号 (请求递增; 结果按代号对账) */
+
+static DWORD WINAPI XjsImgThreadProc(LPVOID);
+
+struct XjsImgDone {
+    long long gen = 0;
+    int ctx = 0;
+    HWND hwnd = NULL;
+    int fileId = -1;
+    int w = 0, h = 0;
+    bool failed = false;
+    std::vector<uint8_t> bgra;
+};
+static XjsImgDone s_imgDone;   /* 单结果槽 (UI 消费前被覆盖 = 代号校验丢弃, 重投自愈) */
+
+/* 渲染帧缓存缺口 → 记键置 pending 投异步作业 (UI 线程零解码; 仅查引擎取路径)。
+   键在请求时落: 命中判定 (sameSrc/band) 与在途判定全靠它; 新请求覆盖同槽 = 取代旧作业 */
+static void XjsPreviewImgAsk(int ctx, int fileId, int tw, int th, int rot) {
+    std::wstring path = (g_engine && fileId >= 0) ? Utf8ToUtf16(xjs_db_GetPath(g_engine, fileId)) : std::wstring();
+    if (path.empty()) return;
+    XjsImgJobCs lk;
+    XjsImgJob& j = s_imgSlot[ctx];
+    j.pending = true;
+    j.gen = ++s_imgGen;
+    j.ctx = ctx;
+    j.hwnd = g_hWnd;
+    j.fileId = fileId;
+    j.path = path;
+    j.tw = tw;
+    j.th = th;
+    j.rot = rot;
+    if (ctx == 1) {
+        s_lbKeyFile = fileId;
+        s_lbKeyW = tw;
+        s_lbKeyH = th;
+        s_lbKeyRot = rot;
+        s_lbPending = true;
+        s_lbFailed = false;
+    } else {
+        s_pvKeyFile = fileId;
+        s_pvKeyW = tw;
+        s_pvKeyH = th;
+        s_pvKeyRot = rot;
+        s_pvPending = true;
+        s_pvFailed = false;
+    }
+    if (!s_imgWake) {
+        s_imgWake = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (s_imgWake) s_imgThread = CreateThread(NULL, 0, XjsImgThreadProc, NULL, 0, NULL);
+    }
+    if (s_imgWake) SetEvent(s_imgWake);
+}
+
+static DWORD WINAPI XjsImgThreadProc(LPVOID) {
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);   /* WIC 工厂自由线程, MTA 直用 */
+    for (;;) {
+        WaitForSingleObject(s_imgWake, INFINITE);
+        for (;;) {   /* 排空两槽: 自动复位事件不计数, 面板+灯箱先后投递只醒一次 */
+            XjsImgJob job;
+            int ctx = -1;
+            {
+                XjsImgJobCs lk;
+                ctx = s_imgSlot[0].pending ? 0 : (s_imgSlot[1].pending ? 1 : -1);
+                if (ctx >= 0) {
+                    job = s_imgSlot[ctx];
+                    s_imgSlot[ctx].pending = false;
+                }
+            }
+            if (ctx < 0) break;
+            XjsImgDone done;
+            done.gen = job.gen;
+            done.ctx = ctx;
+            done.hwnd = job.hwnd;
+            done.fileId = job.fileId;
+            done.w = job.tw;
+            done.h = job.th;
+            if (IsWindow(job.hwnd)) {
+                int stride = 0;
+                std::vector<uint8_t> bgra;
+                if (XjsDecodeFileImagePixels(job.path, job.tw, job.th, job.rot, &bgra, &stride)) {
+                    done.bgra = std::move(bgra);
+                } else {
+                    done.failed = true;
+                }
+            } else {
+                done.failed = true;   /* 归属窗已没: 结果照回, UI 侧选中校验兜底丢弃 */
+            }
+            {
+                XjsImgJobCs lk;
+                s_imgDone = std::move(done);
+            }
+            PostMessage(job.hwnd, WM_PV_IMG_READY, 0, (LPARAM)job.gen);
+        }
+    }
+    return 0;
+}
+
+/* WM_PV_IMG_READY 落点 (窗口过程调, Cur 已绑本窗): 代号/归属/选中校验后转本域位图入缓存 */
+void XjsPreviewImgAdopt(HWND hwnd, long long gen) {
+    XjsBitmap* nb = NULL;
+    int ctx = -1, fileId = -1;
+    {
+        XjsImgJobCs lk;
+        if (s_imgDone.gen != gen || s_imgDone.hwnd != hwnd) return;   /* 槽已被更新结果覆盖 */
+        ctx = s_imgDone.ctx;
+        fileId = s_imgDone.fileId;
+        if (!s_imgDone.failed && s_imgDone.w > 0)
+            nb = XjsBitmapFromBgra(s_imgDone.bgra.data(), s_imgDone.w, s_imgDone.h, s_imgDone.w * 4);
+        s_imgDone.bgra.clear();
+        s_imgDone.bgra.shrink_to_fit();
+    }
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || w->hWnd != hwnd || w->previewFileId != fileId) {   /* 期间已换窗/换选中 */
+        if (nb) nb->Release();
+        return;
+    }
+    if (ctx == 1) {
+        if (s_lbBmp) s_lbBmp->Release();
+        s_lbBmp = nb;
+        s_lbPending = false;
+        s_lbFailed = (nb == NULL);
+        w->Invalidate();
+    } else {
+        if (s_pvScaled) s_pvScaled->Release();
+        s_pvScaled = nb;
+        s_pvPending = false;
+        s_pvFailed = (nb == NULL);
+        if (w->hWnd) {   /* 只失效预览区 (同插件交付口径) */
+            XjsRect b = w->layout.preview;
+            RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
+            InvalidateRect(w->hWnd, &r, FALSE);
+        } else {
+            w->Invalidate();
+        }
+    }
+}
+
+/* ==================== 文本异步装载 (流式分块, 2026-09-29) ====================
+ * 旧实现 = UI 线程同步读 ≤5MB + 解码 + 全量分行 (大文本选中卡顿; >5MB 直接拒览)。
+ * 现全异步流式: UI 只投作业; 单 worker 256KB 一块 读→BOM/严格UTF-8/GBK 定编码→解码→
+ * 分行 (跨块残字节/残行留 session, 编码只探一次), 行集回 UI 追加进 s_textLines;
+ * 渲染帧快到底 (300 行内) 自动续投下一块 — 任意大小文本可滚动预览 (单文件加载上限
+ * 64MB 原始字节, 到顶不再续载)。超长残行 (>512K 字符) 强制出行封内存。 */
+static const int XJS_TEXT_CHUNK = 256 * 1024;
+static const long long XJS_TEXT_LOAD_MAX = 64LL * 1024 * 1024;
+static const size_t XJS_TEXT_WLINE_CAP = 512 * 1024;
+
+static struct XjsTxtJobCs { CRITICAL_SECTION cs; XjsTxtJobCs() { InitializeCriticalSectionAndSpinCount(&cs, 100); } } s_txtJobCs;
+static HANDLE s_txtThread = NULL, s_txtWake = NULL;
+static long long s_txtGen = 0;
+
+struct XjsTxtReq {
+    bool pending = false;
+    long long gen = 0;
+    HWND hwnd = NULL;
+    int fileId = -1;
+    std::wstring path;      /* first 才带 */
+    long long size = 0;     /* first 才带 */
+    bool first = false;
+};
+static XjsTxtReq s_txtReq;
+
+struct XjsTxtDone {
+    long long gen = 0;
+    HWND hwnd = NULL;
+    int fileId = -1;
+    bool first = false;
+    std::vector<std::wstring> lines;   /* 本块完整行 (跨块残行留 worker session) */
+    bool hasMore = false;
+    long long total = 0, loaded = 0;
+};
+static XjsTxtDone s_txtDone;
+
+/* worker 专属串行 session (仅 worker 线程触碰): 编码/残字节/残行/进度 */
+struct XjsTxtSess {
+    int fileId = -1;
+    std::wstring path;
+    long long size = 0, nextOff = 0, consumed = 0;
+    int enc = 0;                     /* 0=未定 1=UTF-8 2=GBK 3=UTF-16LE 4=UTF-16BE */
+    std::vector<uint8_t> rawCarry;   /* 不完整多字节序列 (≤4 字节, 块尾) */
+    std::wstring wcarry;             /* 跨块残行 */
+};
+static XjsTxtSess s_txtSess;
+
+static DWORD WINAPI XjsTxtThreadProc(LPVOID);
+
+/* UI 线程投作业 (first=从文件头开会话; 续块只带 fileId, 路径/大小 session 自持) */
+static void XjsPreviewTextAsk(int fileId, const std::wstring& path, long long size, bool first) {
+    s_textPending = true;   /* 在途闸: 渲染帧/选中变化不重复投 (adopt 复位) */
+    XjsTxtJobCs lk;
+    s_txtReq.pending = true;
+    s_txtReq.gen = ++s_txtGen;
+    s_txtReq.hwnd = g_hWnd;
+    s_txtReq.fileId = fileId;
+    if (first) {
+        s_txtReq.path = path;
+        s_txtReq.size = size;
+    }
+    s_txtReq.first = first;
+    if (!s_txtWake) {
+        s_txtWake = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (s_txtWake) s_txtThread = CreateThread(NULL, 0, XjsTxtThreadProc, NULL, 0, NULL);
+    }
+    if (s_txtWake) SetEvent(s_txtWake);
+}
+
+/* 块尾不完整序列 → carry (UTF-8 按前导字节应有续字节计; GBK 尾字节是双字节前导;
+   UTF-16 奇数字节)。enc==0 先按 UTF-8 形状试剥 (探测在其后, 误剥的原样随 carry 回来) */
+static void TxtStripTail(std::vector<uint8_t>& buf, int enc, std::vector<uint8_t>& carry) {
+    size_t n = buf.size();
+    if (!n) return;
+    size_t keep = 0;
+    if (enc == 3 || enc == 4) {
+        if (n & 1) keep = 1;
+    } else if (enc == 2) {
+        uint8_t b = buf[n - 1];
+        if (b >= 0x81 && b <= 0xFE) keep = 1;
+    } else {
+        size_t i = n, conts = 0;
+        while (i > 0 && (buf[i - 1] & 0xC0) == 0x80) { i--; conts++; if (conts >= 4) break; }
+        if (i > 0 && conts < 4) {
+            uint8_t lead = buf[i - 1];
+            int need = (lead & 0x80) == 0 ? 0
+                     : (lead & 0xE0) == 0xC0 ? 1
+                     : (lead & 0xF0) == 0xE0 ? 2
+                     : (lead & 0xF8) == 0xF0 ? 3 : -1;
+            if (need > (int)conts) keep = conts + 1;
+        }
+    }
+    if (keep) {
+        carry.assign(buf.end() - keep, buf.end());
+        buf.resize(n - keep);
+    }
+}
+
+/* 只分行 (调用方保证 text 以 \n 结尾或为空; 无 20000 行截断 — 流式追加无上限) */
+static void TxtSplitComplete(const std::wstring& text, std::vector<std::wstring>& lines) {
+    size_t start = 0;
+    for (;;) {
+        size_t nl = text.find(L'\n', start);
+        if (nl == std::wstring::npos) break;
+        std::wstring line = text.substr(start, nl - start);
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        lines.push_back(std::move(line));
+        start = nl + 1;
+    }
+}
+
+static DWORD WINAPI XjsTxtThreadProc(LPVOID) {
+    for (;;) {
+        WaitForSingleObject(s_txtWake, INFINITE);
+        for (;;) {
+            XjsTxtReq req;
+            {
+                XjsTxtJobCs lk;
+                if (!s_txtReq.pending) break;
+                req = s_txtReq;
+                s_txtReq.pending = false;
+            }
+            if (!IsWindow(req.hwnd)) continue;   /* 归属窗已没: 弃 (窗口重建自有新会话) */
+            if (req.first || s_txtSess.fileId != req.fileId) {
+                s_txtSess = XjsTxtSess{};
+                s_txtSess.fileId = req.fileId;
+                s_txtSess.path = req.path;
+                s_txtSess.size = req.size;
+            } else if (s_txtSess.path.empty()) {
+                continue;   /* 续块但会话没头 (不该发生): 弃 */
+            }
+            XjsTxtDone done;
+            done.gen = req.gen;
+            done.hwnd = req.hwnd;
+            done.fileId = req.fileId;
+            done.first = req.first;
+            done.total = s_txtSess.size;
+            bool stop = false;
+            HANDLE h = CreateFileW(s_txtSess.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h == INVALID_HANDLE_VALUE) {
+                stop = true;   /* 文件没了/被占: 结束会话 */
+            } else {
+                LARGE_INTEGER li;
+                li.QuadPart = s_txtSess.nextOff;
+                SetFilePointerEx(h, li, NULL, FILE_BEGIN);
+                std::vector<uint8_t> chunk((size_t)XJS_TEXT_CHUNK);
+                DWORD rd = 0;
+                BOOL ok = ReadFile(h, chunk.data(), XJS_TEXT_CHUNK, &rd, NULL);
+                CloseHandle(h);
+                if (!ok || rd == 0) {
+                    stop = true;
+                } else {
+                    chunk.resize(rd);
+                    std::vector<uint8_t> buf = std::move(s_txtSess.rawCarry);
+                    s_txtSess.rawCarry.clear();
+                    buf.insert(buf.end(), chunk.begin(), chunk.end());
+                    /* 首块: BOM 定编码 + 二进制判 (BOM 剥后查 NUL — UTF-16 文本不再误判二进制) */
+                    bool binary = false;
+                    if (s_txtSess.enc == 0 && buf.size() >= 2) {
+                        if ((unsigned char)buf[0] == 0xFF && (unsigned char)buf[1] == 0xFE) { s_txtSess.enc = 3; buf.erase(buf.begin(), buf.begin() + 2); }
+                        else if ((unsigned char)buf[0] == 0xFE && (unsigned char)buf[1] == 0xFF) { s_txtSess.enc = 4; buf.erase(buf.begin(), buf.begin() + 2); }
+                        else if (buf.size() >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) { s_txtSess.enc = 1; buf.erase(buf.begin(), buf.begin() + 3); }
+                        size_t scan = buf.size() < 4096 ? buf.size() : 4096;
+                        for (size_t i = 0; i < scan; i++)
+                            if (buf[i] == 0) { binary = true; break; }
+                    }
+                    if (binary) {
+                        stop = true;   /* 二进制不预览 (信息卡兜底), 会话终止 */
+                    } else {
+                        std::vector<uint8_t> tail;
+                        TxtStripTail(buf, s_txtSess.enc, tail);
+                        s_txtSess.rawCarry = std::move(tail);
+                        /* 编码探测: 严格 UTF-8 过 = UTF-8, 否则 GBK (BOM 已剥, 误剥的原样随 carry 回流) */
+                        if (s_txtSess.enc == 0) {
+                            int wl = buf.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)buf.data(), (int)buf.size(), NULL, 0);
+                            s_txtSess.enc = (wl > 0 || buf.empty()) ? 1 : 2;
+                        }
+                        std::wstring text;
+                        if (s_txtSess.enc == 3 || s_txtSess.enc == 4) {
+                            if (s_txtSess.enc == 4)
+                                for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+                            text.resize(buf.size() / 2);
+                            if (!text.empty()) memcpy(&text[0], buf.data(), text.size() * 2);
+                        } else if (s_txtSess.enc == 2 || buf.empty()) {
+                            int gl = buf.empty() ? 0 : MultiByteToWideChar(936, 0, (LPCCH)buf.data(), (int)buf.size(), NULL, 0);
+                            if (gl > 0) { text.resize(gl); MultiByteToWideChar(936, 0, (LPCCH)buf.data(), (int)buf.size(), &text[0], gl); }
+                        } else {
+                            int wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)buf.data(), (int)buf.size(), NULL, 0);
+                            if (wl <= 0) {   /* 中段损坏: 本块按 GBK 尽力解 */
+                                int gl = MultiByteToWideChar(936, 0, (LPCCH)buf.data(), (int)buf.size(), NULL, 0);
+                                if (gl > 0) { text.resize(gl); MultiByteToWideChar(936, 0, (LPCCH)buf.data(), (int)buf.size(), &text[0], gl); }
+                            } else {
+                                text.resize(wl);
+                                MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)buf.data(), (int)buf.size(), &text[0], wl);
+                            }
+                        }
+                        /* 跨块残行拼合: 最后一个 \n 之前出行, 之后留 wcarry */
+                        std::wstring combined;
+                        combined.swap(s_txtSess.wcarry);
+                        combined.append(text);
+                        size_t lastNl = combined.find_last_of(L'\n');
+                        if (lastNl == std::wstring::npos) {
+                            s_txtSess.wcarry = std::move(combined);
+                            if (s_txtSess.wcarry.size() > XJS_TEXT_WLINE_CAP) {   /* 超长残行强制出行 (显示端本就省略) */
+                                done.lines.push_back(std::move(s_txtSess.wcarry));
+                                s_txtSess.wcarry.clear();
+                            }
+                        } else {
+                            s_txtSess.wcarry = combined.substr(lastNl + 1);
+                            combined.resize(lastNl + 1);
+                            TxtSplitComplete(combined, done.lines);
+                        }
+                        s_txtSess.nextOff += rd;
+                        s_txtSess.consumed += rd;
+                    }
+                }
+            }
+            done.loaded = s_txtSess.consumed;
+            done.hasMore = !stop && s_txtSess.nextOff < s_txtSess.size && s_txtSess.consumed < XJS_TEXT_LOAD_MAX;
+            {
+                XjsTxtJobCs lk;
+                s_txtDone = std::move(done);
+            }
+            PostMessage(req.hwnd, WM_PV_TXT_READY, 0, (LPARAM)req.gen);
+        }
+    }
+    return 0;
+}
+
+/* WM_PV_TXT_READY 落点 (窗口过程调): 代号/归属/选中校验后追加行集 */
+void XjsPreviewTextAdopt(HWND hwnd, long long gen) {
+    std::vector<std::wstring> lines;
+    int fileId = -1;
+    bool first = false, hasMore = false;
+    long long total = 0, loaded = 0;
+    {
+        XjsTxtJobCs lk;
+        if (s_txtDone.gen != gen || s_txtDone.hwnd != hwnd) return;   /* 槽已被更新结果覆盖 */
+        fileId = s_txtDone.fileId;
+        first = s_txtDone.first;
+        hasMore = s_txtDone.hasMore;
+        total = s_txtDone.total;
+        loaded = s_txtDone.loaded;
+        lines = std::move(s_txtDone.lines);
+        s_txtDone.lines.clear();
+    }
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || w->hWnd != hwnd || w->previewFileId != fileId) return;   /* 期间已换窗/换选中 */
+    if (first) {
+        w->previewTextLines.clear();
+        w->previewTextScroll = 0;
+        w->previewTextFileId = fileId;
+    }
+    if (!lines.empty())
+        w->previewTextLines.insert(w->previewTextLines.end(), std::make_move_iterator(lines.begin()),
+                                   std::make_move_iterator(lines.end()));
+    w->previewTextHasMore = hasMore;
+    w->previewTextTotal = total;
+    w->previewTextLoaded = loaded;
+    w->previewTextPending = false;
+    if (w->hWnd) {
+        XjsRect b = w->layout.preview;
+        RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
+        InvalidateRect(w->hWnd, &r, FALSE);
+    } else {
+        w->Invalidate();
+    }
+}
+
 /* 框选拖动中预览节流 (鼠标交互瞬态): 上次放行时刻 (时间戳比对, 同单击打开防重的无时钟口径;
    拖动中鼠标持续产生 move, 间隔一够下一帧就刷新, 松开经解除点补刷终态) */
 static ULONGLONG s_pvMarqueeLastLoad = 0;
@@ -188,14 +608,19 @@ void XjsPreviewUpdateSelection() {
     if (idx >= 0 && g_result) fileId = xjs_result_GetFileId(g_result, idx);
     if (fileId == g_previewFileId) return;
     g_previewFileId = fileId;
-    s_imgZoom = 1.0f;
-    if (g_previewImage) { g_previewImage->Release(); g_previewImage = NULL; }
-    g_previewImageFileId = -1;
+    g_previewImgW = 0;
+    g_previewImgH = 0;    /* 原始尺寸随目标复位 (图片在下方只读头重取) */
+    s_imgZoom = 0;        /* 复位 = 适应窗口 (哨兵值, 渲染帧现算适配比例) */
+    s_rot = 0;            /* 旋转随文件复位 (灯箱共用同字段) */
+    s_lightbox = false;   /* 内容已换: 灯箱随手收 (防程序性选中刷新后残留看不见的模态) */
+    XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
     XjsPreviewPluginDrop();
     s_pvPlugReq++;   /* 世代推进: 在途的旧交付作废 */
     s_textLines.clear();
     s_textFileId = -1;
     s_textScroll = 0;
+    s_textPending = false;
+    s_textHasMore = false;   /* 文本流式状态随目标复位 (下方 Ask 重新置 pending) */
     if (fileId >= 0 && g_engine && g_previewVisible) {   /* 面板未开启只记 ID 不读文件 (隐藏期读图/读文本纯属浪费) */
         std::wstring name = Utf8ToUtf16(xjs_db_GetName(g_engine, fileId));
         std::wstring path = Utf8ToUtf16(xjs_db_GetPath(g_engine, fileId));
@@ -204,19 +629,41 @@ void XjsPreviewUpdateSelection() {
             return;
         }
         if (XjsIsImageExt(name)) {
-            /* 图片文件: 预载内容位图 */
-            g_previewImage = XjsDecodeFileImage(path);
-            if (g_previewImage) g_previewImageFileId = fileId;
+            /* 图片文件: 只读头取原始尺寸 (毫秒级, 几十 M 也不冻结); 像素走异步装载
+               (渲染帧投作业, 工作线程解码缩放后回主线程 — UI 线程零解码, 2026-09-29) */
+            int iw2 = 0, ih2 = 0;
+            if (XjsImageFileDims(path, &iw2, &ih2)) {
+                g_previewImgW = iw2;
+                g_previewImgH = ih2;
+            }
         } else if (XjsIsTextExt(name)) {
-            /* 文本文件: 预载行集 (≤5MB) */
-            XjsLoadPreviewText(fileId, path, xjs_db_GetFileSize(g_engine, fileId));
+            /* 文本文件: 异步流式装载 (首块 256KB 到货即显, 快到底自动续载 — 大文件可
+               滚动预览, UI 线程零读取零解码, 2026-09-29) */
+            XjsPreviewTextAsk(fileId, path, xjs_db_GetFileSize(g_engine, fileId), true);
         }
     }
     XjsSearchWindow::Cur()->Invalidate();
 }
 
+/* 滚轮缩放预览图片 (普通滚轮/Ctrl+滚轮同义, dir=±1): 适应态 (0 哨兵) 从当前适配比例
+   起步, 每格 ×1.25; 范围 5%~400% (400 上限同灯箱)。绝对比例不随布局漂移, 换文件复位适应 */
+void XjsPreviewWheel(int dir) {
+    float z = (s_imgZoom > 0) ? s_imgZoom : s_imgBase;
+    z = (dir > 0) ? z * 1.25f : z / 1.25f;
+    if (z > 4) z = 4;
+    if (z < 0.05f) z = 0.05f;
+    s_imgZoom = z;
+    XjsSearchWindow::Cur()->Invalidate();
+}
+
 bool XjsPreviewIsText() {
     return g_previewFileId >= 0 && s_textFileId == g_previewFileId && !s_textLines.empty();
+}
+
+bool XjsPreviewIsImage() {
+    if (!g_previewVisible || g_previewFileId < 0) return false;
+    if (XjsPreviewPluginBitmap(g_previewFileId)) return true;
+    return g_previewImgW > 0;   /* 内置图: 选目标时已只读头取到尺寸 */
 }
 
 /* 文本预览普通滚轮滚动 (每格 3 行) */
@@ -229,6 +676,10 @@ void XjsPreviewScrollLines(int dir) {
 void XjsPreviewToggle() {
     if (g_previewVisible && g_plugPanelOn) XjsPreviewPanelCloseForToggle();   /* 藏面板先结束接管 (会话状态不跨隐藏) */
     g_previewVisible = !g_previewVisible;
+    if (!g_previewVisible) {
+        s_lightbox = false;   /* 藏面板随手收灯箱 (防下次开启吃到残留态) */
+        XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
+    }
     if (g_previewVisible) {
         /* 开启即回填当前选中: 隐藏期间 UpdateSelection 只记 ID 未读文件,
            置 -1 破去重, 让下方加载真正执行 (否则同一选中会吃到旧缓存/空内容) */
@@ -313,7 +764,7 @@ static void XjsPanelButton(const XjsRect& r, const wchar_t* text, int iconKind, 
     g_rt->DrawText(text, (UINT32)wcslen(text), g_tfMenu, tr, g_br[XTH_TEXT]);
 }
 
-/* 圆形小按钮 (面板头: 锁/最大/关闭; hover=悬停高亮) */
+/* 圆形小按钮 (面板头: 锁/最大/关闭; 图片工具条: 左旋/右旋; hover=悬停高亮) */
 static void XjsPanelHeaderBtn(const XjsRect& r, int kind, bool active, bool hover) {
     if (active || hover) g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(6), XSF(6)), g_br[XTH_ROW_HOVER]);
     float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
@@ -324,10 +775,29 @@ static void XjsPanelHeaderBtn(const XjsRect& r, int kind, bool active, bool hove
         g_rt->DrawEllipse(XjsEllipseF(XjsPoint2F(cx, cy - XSF(2.5f)), XSF(2.8f), XSF(2.8f)), bc, 1.2f);
     } else if (kind == 1) {
         g_rt->DrawRectangle(XjsRectF(cx - XSF(4.5f), cy - XSF(4.5f), cx + XSF(4.5f), cy + XSF(4.5f)), bc, 1.2f);
-    } else {
+    } else if (kind == 2) {
         g_rt->DrawLine(XjsPoint2F(cx - XSF(4), cy - XSF(4)), XjsPoint2F(cx + XSF(4), cy + XSF(4)), bc, 1.3f);
         g_rt->DrawLine(XjsPoint2F(cx + XSF(4), cy - XSF(4)), XjsPoint2F(cx - XSF(4), cy + XSF(4)), bc, 1.3f);
+    } else {
+        /* 旋转 (3=左旋/逆时针 4=右旋/顺时针): 圆环 + 顶部切向箭头, 镜像两方向 */
+        float rr = XSF(4.2f);
+        g_rt->DrawEllipse(XjsEllipseF(XjsPoint2F(cx, cy), rr, rr), bc, 1.3f);
+        float dir = (kind == 4) ? 1.0f : -1.0f;   /* 箭头朝向: 右旋朝右, 左旋朝左 */
+        float ax = cx + dir * XSF(2.5f), ay = cy - rr;
+        g_rt->DrawLine(XjsPoint2F(ax - dir * XSF(2.2f), ay - XSF(1.8f)), XjsPoint2F(ax, ay), bc, 1.3f);
+        g_rt->DrawLine(XjsPoint2F(ax, ay), XjsPoint2F(ax - dir * XSF(2.2f), ay + XSF(1.8f)), bc, 1.3f);
     }
+}
+
+/* 图片工具条文本小按钮 (1:1/适应): 圆角描边底 hover 高亮, 文字水平居中 (纵对齐恒中) */
+static void XjsPvTextBtn(const XjsRect& r, const wchar_t* text, bool hover) {
+    g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(5), XSF(5)), g_br[hover ? XTH_ROW_HOVER : XTH_PANEL2]);
+    g_rt->DrawRoundedRectangle(XjsRoundedRectF(r, XSF(5), XSF(5)), g_br[hover ? XTH_ACCENT : XTH_BORDER], 1.0f);
+    float tw = XjsMeasureText(text, g_tfTiny);
+    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    g_rt->DrawText(text, (UINT32)wcslen(text), g_tfTiny,
+        XjsRectF(cx - tw / 2, cy - XSF(9), cx + tw / 2, cy + XSF(9)),
+        g_br[hover ? XTH_TEXT : XTH_TEXT_DIM]);
 }
 
 void XjsPreviewRender() {
@@ -346,6 +816,7 @@ void XjsPreviewRender() {
        否则上一帧 (驱动器卡/文件卡) 的按钮矩形残留仍可命中, 点出错误命令 */
     s_hits.copySerial = s_hits.bigDirs = s_hits.bigFiles = {};
     s_hits.locate = s_hits.open = {};
+    s_hits.image = {};
     /* 面板接管中: 整块面板体 (含原头部带) 交给插件位图, 宿主头部 (标题/锁/宽窄/✕) 不画 —
        关闭入口 = 插件头部自绘 ✕ (SDK PanelClose, 按打开前状态恢复预览); 头部按钮命中矩形按帧清零 */
     if (g_plugPanelOn) {
@@ -495,26 +966,66 @@ void XjsPreviewRender() {
         XjsPanelButton(s_hits.bigFiles, XjsT(L"预览.查找大文件"), -1, XjsPvHover(6));
     } else {
         /* ===== 文件 / 目录 ===== */
-        /* 内容位图: 内置解码图优先, 插件交付位图兜底 (世代/目标同源才取) */
-        XjsBitmap* contentImg = (g_previewImage && g_previewImageFileId == rd->fileId)
-                                    ? g_previewImage : XjsPreviewPluginBitmap(rd->fileId);
-        bool isImage = (contentImg != NULL);
+        /* 内容位图: 插件交付位图优先 (已在内存); 内置图 = 异步装载缓存 (UI 线程零解码,
+           几十 M 的图同步解码曾冻结 UI 数百毫秒, 2026-09-29 用户对比 Everything 实锤) */
+        XjsBitmap* contentImg = XjsPreviewPluginBitmap(rd->fileId);
+        bool builtin = (contentImg == NULL) && g_previewImgW > 0;
+        bool isImage = (contentImg != NULL) || builtin;
         bool isText = XjsPreviewIsText();
-        float drawH = XSF(160);
+        /* 图片可用区 = 头部以下到预留行之间整块 (面板多高图就多大 — 用户口径 "面板这么
+           宽高图片还这么小不合理", 2026-09-29); 预留 = 信息五行120 + 图下间距12 (名称/路径
+           行已删 — 与头部标题重复, 空间让给内容, 同日用户口径)。下限 120u: 矮窗口不把图挤没 */
+        float imgAvailH = xf_max(contentBottom - cy - XSF(24 * 5 + 12), XSF(120));
         if (isImage) {
-            /* 图片内容预览 (等比缩放; Ctrl+滚轮可再缩放, 超出面板部分裁剪) */
-            XjsSizeU sz = contentImg->GetPixelSize();
-            float iw = (float)sz.width, ih = (float)sz.height;
-            float maxW = pw * s_imgZoom, maxH = drawH * s_imgZoom;
-            float scale = xf_min(maxW / iw, maxH / ih);
-            if (scale > 1) scale = 1;
+            /* 图片内容预览 (等比适配可用区, 上限 4 倍; 滚轮/Ctrl+滚轮缩放, 超出面板裁剪)。
+               s_imgZoom: 0=适应窗口哨兵, >0=相对原图的绝对比例 (0.05~4)。内置图旋转走
+               WIC FlipRotator (异步装载链内, 无损); 装载在途垫显旧缓存, 到货即换。
+               插件交付图已在内存直接绘 (无旋转)。
+               工具条 (旋转/1:1/适应/比例) 在灯箱 (用户口径 "点击图片放大后"), 不在面板。 */
+            float iw, ih;
+            bool rotated = builtin && (s_rot % 2) == 1;
+            if (builtin) {
+                iw = rotated ? (float)g_previewImgH : (float)g_previewImgW;   /* 转后内容宽高 */
+                ih = rotated ? (float)g_previewImgW : (float)g_previewImgH;
+            } else {
+                XjsSizeU sz = contentImg->GetPixelSize();
+                iw = (float)sz.width;
+                ih = (float)sz.height;
+            }
+            /* 左右内边距镜像 (各 14u): pw 含到面板体右缘的 0 边距, 直接用会"左有空位右没有";
+               下方文本行右缘是 16u, 差 2u 不可感, 图片自身对称优先 */
+            float areaW = pw - XSF(14);
+            float base = xf_min(areaW / iw, imgAvailH / ih);
+            if (base > 4) base = 4;
+            s_imgBase = base;   /* 滚轮起步比例 (渲染帧现算) */
+            float scale = (s_imgZoom > 0) ? s_imgZoom : base;
             float dw = iw * scale, dh = ih * scale;
-            XjsRect dst = XjsRectF(px + (maxW - dw) / 2, cy, px + (maxW - dw) / 2 + dw, cy + dh);
+            float dx = px + (areaW - dw) / 2;
+            XjsBitmap* draw = contentImg;
+            if (builtin) {
+                int tw2 = ximax(1, (int)(dw + 0.5f)), th2 = ximax(1, (int)(dh + 0.5f));
+                bool sameSrc = s_pvScaled && s_pvKeyFile == rd->fileId && s_pvKeyRot == s_rot;
+                bool band = sameSrc && tw2 * 20 <= s_pvKeyW * 21 && tw2 * 20 >= s_pvKeyW * 19 &&
+                            th2 * 20 <= s_pvKeyH * 21 && th2 * 20 >= s_pvKeyH * 19;
+                if (!band && !s_pvPending && !s_pvFailed && tw2 <= 4096 && th2 <= 4096)
+                    XjsPreviewImgAsk(0, rd->fileId, tw2, th2, s_rot);
+                if (band) {
+                    draw = s_pvScaled;   /* 键尺寸命中: 1:1 贴图 (零插值) */
+                    dw = (float)s_pvKeyW;
+                    dh = (float)s_pvKeyH;
+                    dx = floorf(px + (areaW - dw) / 2 + 0.5f);
+                } else if (sameSrc) {
+                    draw = s_pvScaled;   /* 重采样在途: 旧图垫显 (略软, 到货即换) */
+                }
+                /* 都没有 = 暗底占位 (装载完成自动浮现) */
+            }
+            XjsRect dst = XjsRectF(dx, floorf(cy + 0.5f), dx + dw, floorf(cy + 0.5f) + dh);
+            s_hits.image = dst;   /* 点击图片 = 打开放大层 (命中表随帧, 命中序在底部按钮之后) */
             g_rt->PushAxisAlignedClip(body, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             g_rt->FillRectangle(dst, XjsTempBrush(XjsCol(0x000000, 0.35f)));
-            g_rt->DrawBitmap(contentImg, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            if (draw) g_rt->DrawBitmap(draw, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             g_rt->PopAxisAlignedClip();
-            cy += maxH + XSF(12);
+            cy += xf_max(dh, imgAvailH) + XSF(12);   /* 适应态行贴底稳定; 放大溢出随图推移 (同旧缩放行为) */
         } else if (!isText) {
             XjsBitmap* ic = XjsPreviewIcon(rd->fileId);
             float isz = XSF(64);
@@ -522,33 +1033,45 @@ void XjsPreviewRender() {
                 g_rt->DrawBitmap(ic, XjsRectF(px, cy, px + isz, cy + isz));
                 ic->Release();
             }
+            if (s_textPending && XjsIsTextExt(rd->name)) {   /* 文本首块在途: 加载中占位 (异步, 面板不冻结) */
+                const wchar_t* lh = XjsT(L"预览.文本加载中");
+                g_rt->DrawText(lh, (UINT32)wcslen(lh), g_tfTiny,
+                    XjsRectF(px, cy + isz + XSF(8), body.right - XSF(10), cy + isz + XSF(26)), g_br[XTH_TEXT_FAINT]);
+            }
             cy += isz + XSF(10);
         }
-        /* 名称 + 路径 */
-        {
-            std::wstring path = Utf8ToUtf16(xjs_db_GetPath(g_engine, rd->fileId));
-            XjsDrawEllText(rd->name, XjsRectF(px, cy, body.right - XSF(16), cy + XSF(22)), g_tfCardVal, g_br[XTH_TEXT]);
-            cy += XSF(24);
-            XjsDrawEllText(path, XjsRectF(px, cy, body.right - XSF(16), cy + XSF(18)), g_tfTiny, g_br[XTH_TEXT_FAINT]);
-            cy += XSF(24);
-        }
+        /* 名称+路径行已删 (2026-09-29 用户口径: 与头部标题重复, 空间让给内容):
+           文本内容直接从头部下方起画, 普通文件信息行上移 */
         if (isText) {
             /* ===== 文本内容预览 (普通滚轮滚动, 底部按钮让位) ===== */
             float lineH = XSF(17);
-            int visLines = (int)((contentBottom - cy) / lineH);
+            /* 底部状态行 (加载中/还有更多) 常驻一条带: 行区让出, 不与末行重叠 (2026-09-29 实锤) */
+            float listBottom = (s_textPending || s_textHasMore) ? contentBottom - XSF(18) : contentBottom;
+            int visLines = (int)((listBottom - cy) / lineH);
             int maxScroll = (int)s_textLines.size() - ximax(visLines, 1);
             if (maxScroll < 0) maxScroll = 0;
             if (s_textScroll > maxScroll) s_textScroll = maxScroll;
             int first = (int)s_textScroll;
             float y = cy;
-            g_rt->PushAxisAlignedClip(XjsRectF(body.left, cy - XSF(2), body.right, contentBottom + XSF(4)),
+            g_rt->PushAxisAlignedClip(XjsRectF(body.left, cy - XSF(2), body.right, listBottom + XSF(4)),
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            for (int i = first; i < (int)s_textLines.size() && y < contentBottom; i++, y += lineH) {
+            for (int i = first; i < (int)s_textLines.size() && y < listBottom; i++, y += lineH) {
                 if (!s_textLines[i].empty())
                     XjsDrawEllText(s_textLines[i], XjsRectF(px, y, body.right - XSF(10), y + lineH),
                         g_tfTiny, g_br[XTH_TEXT_DIM]);
             }
             g_rt->PopAxisAlignedClip();
+            /* 流式大文件: 快到底 (300 行内) 预取下一块 (pending 闸防重复投); 底部状态行 */
+            if (s_textHasMore && !s_textPending && g_previewFileId >= 0 && maxScroll - (int)s_textScroll < 300)
+                XjsPreviewTextAsk(g_previewFileId, std::wstring(), 0, false);
+            {
+                const wchar_t* hint = s_textPending ? XjsT(L"预览.文本加载中")
+                                     : s_textHasMore ? XjsT(L"预览.继续滚动") : NULL;
+                if (hint)
+                    g_rt->DrawText(hint, (UINT32)wcslen(hint), g_tfTiny,
+                        XjsRectF(px, listBottom + XSF(2), body.right - XSF(10), listBottom + XSF(18)),
+                        g_br[XTH_TEXT_FAINT]);
+            }
         } else {
             /* 信息行 */
             if (!rd->isDrive) {
@@ -579,14 +1102,6 @@ void XjsPreviewRender() {
 
 /* ==================== 鼠标 ==================== */
 
-/* Ctrl+滚轮缩放预览图片 (同正式版: 预览面板上滚轮缩放预览内容) */
-void XjsPreviewWheel(int dir) {
-    s_imgZoom += dir * 0.2f;
-    if (s_imgZoom < 0.5f) s_imgZoom = 0.5f;
-    if (s_imgZoom > 4.0f) s_imgZoom = 4.0f;
-    XjsSearchWindow::Cur()->Invalidate();
-}
-
 /* 预览面板分隔线命中带 — 用户口径: 命中必须与视觉线条完全一致 (3px), 不做任何
    外扩。按下 (XjsPreviewMouseDown) 与光标 (main.cpp resizerHover) 都走这里,
    两处永不漂移 */
@@ -598,7 +1113,7 @@ bool XjsPreviewResizerHit(POINT pt) {
 }
 
 /* 面板按钮命令编码 (按下待定/松开触发两处同源): 1=关闭 2=宽窄切换 3=锁定 4=复制序列号
-   5=大目录 6=大文件 7=定位 8=打开 */
+   5=大目录 6=大文件 7=定位 8=打开 9=图片放大层 (灯箱工具条命令在 XjsLightboxHitCmd) */
 static int s_pvPress = 0;
 
 static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
@@ -610,6 +1125,7 @@ static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
     else if (XjsPtIn(s_hits.bigFiles, pt)) *cmdOut = 6;
     else if (XjsPtIn(s_hits.locate, pt)) *cmdOut = 7;
     else if (XjsPtIn(s_hits.open, pt)) *cmdOut = 8;
+    else if (XjsPtIn(s_hits.image, pt)) *cmdOut = 9;   /* 最后判: 图片放大超出面板时按钮优先 (视觉层序同) */
     else return false;
     return true;
 }
@@ -655,6 +1171,8 @@ static void XjsPreviewRunCmd(int cmd) {
             return;
         }
         g_previewVisible = false;
+        s_lightbox = false;
+        XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
         XjsSaveConfig();
         XjsClampScroll();
     } else if (cmd == 2) {
@@ -690,6 +1208,13 @@ static void XjsPreviewRunCmd(int cmd) {
                 else XjsOpenFolderAndSelect(path);
             }
         }
+    } else if (cmd == 9) {
+        /* 图片放大层 (灯箱): 整窗模态放大 + 工具条 (旋转/1:1/适应/滚轮缩放/拖动平移),
+           关闭入口见 XjsLightboxMsg (点工具条外任意处/Esc)。每次开层从适应窗口居中起步 */
+        s_lightbox = true;
+        s_lbZoom = 0;
+        s_lbPress = 0;
+        s_lbPanX = s_lbPanY = 0;
     }
     XjsSearchWindow::Cur()->Invalidate();
 }
@@ -713,6 +1238,242 @@ bool XjsPreviewMouseUp(POINT pt) {
     if (XjsPtIn(g_layout.preview, pt) && XjsPreviewHitCmd(pt, &again) && again == cmd)
         XjsPreviewRunCmd(cmd);   /* 松开仍命中同一按钮才执行 (拖离=取消) */
     return true;
+}
+
+/* ==================== 图片放大层 (灯箱) ====================
+ * 预览面板图片被点击后整窗模态放大: 等比缩放至窗口内居中, 非图片区域盖同款模态钟罩
+ * (XjsModeDlgRender 口径 g_skin.bg1×0.6)。模态 = main.cpp WndProc 总闸统一拦截输入。
+ * 底部工具条 (用户口径 "点击图片放大后"): 左旋/右旋/1:1/适应 + 原始尺寸·当前比例,
+ * 滚轮 = 缩放 (适应态起步, 每格 ×1.25, 5%~400%); 点工具条外任意处/Esc 关闭。
+ * 关闭发生在"按下" (LDOWN), 其后同一连击的第二击以 WM_LBUTTONDBLCLK 到达时本层已收 —
+ * XjsLightboxJustClosedAt 按系统双击判定 (时限+双击矩形) 吞掉, 否则第二击穿透到底下
+ * 列表/预览误开文件。 */
+static ULONGLONG s_lbCloseTick = 0;   /* 鼠标点击关闭的时刻/落点 (鼠标交互瞬态, 文件级 static 口径) */
+static POINT s_lbClosePt = {};
+static int s_lbHover = 0;             /* 灯箱按钮悬停命令号 (0=无; 悬停态随本层收起熄灭) */
+
+bool XjsLightboxActive() {
+    return g_previewVisible && s_lightbox;
+}
+
+void XjsLightboxClose() {
+    s_lightbox = false;
+    s_lbPress = 0;
+    s_lbHover = 0;
+    if (s_lbDrag) {   /* Esc 等路径可在拖动中收层: 捕获一并归还 */
+        s_lbDrag = false;
+        ReleaseCapture();
+    }
+    XjsPreviewImageCacheDropAll(XjsSearchWindow::Cur());
+    XjsSearchWindow::Cur()->Invalidate();
+}
+
+bool XjsLightboxJustClosedAt(POINT pt) {
+    if (GetTickCount64() - s_lbCloseTick > (unsigned long long)GetDoubleClickTime()) return false;
+    return abs(pt.x - s_lbClosePt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) &&
+           abs(pt.y - s_lbClosePt.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+}
+
+/* 灯箱工具条命中 (渲染帧填写的按钮矩形): 10=左旋 11=右旋 12=适应 13=1:1, 0=无 */
+static int XjsLightboxHitCmd(POINT pt) {
+    if (XjsPtIn(s_lbRotL, pt)) return 10;
+    if (XjsPtIn(s_lbRotR, pt)) return 11;
+    if (XjsPtIn(s_lbFit, pt)) return 12;
+    if (XjsPtIn(s_lbOne, pt)) return 13;
+    return 0;
+}
+
+static void XjsLightboxRunCmd(int cmd) {
+    if (cmd == 10) {
+        s_rot = (s_rot + 3) % 4;   /* 左旋 90° (预览面板同步跟随, 缓存按旋转档自动重采样) */
+        s_lbPanX = s_lbPanY = 0;   /* 转后尺寸变, 平移回中 */
+    } else if (cmd == 11) {
+        s_rot = (s_rot + 1) % 4;   /* 右旋 90° */
+        s_lbPanX = s_lbPanY = 0;
+    } else if (cmd == 12) {
+        s_lbZoom = 0;              /* 适应窗口 (哨兵) */
+        s_lbPanX = s_lbPanY = 0;
+    } else if (cmd == 13) {
+        s_lbZoom = 1.0f;           /* 1:1 原始像素 */
+        s_lbPanX = s_lbPanY = 0;
+    }
+    XjsSearchWindow::Cur()->Invalidate();
+}
+
+/* 滚轮缩放 (dir=±1): 适应态从本帧适配比例起步, 每格 ×1.25, 范围 5%~400% (同面板口径) */
+static void XjsLightboxWheel(int dir) {
+    float z = (s_lbZoom > 0) ? s_lbZoom : s_lbBase;
+    z = (dir > 0) ? z * 1.25f : z / 1.25f;
+    if (z > 4) z = 4;
+    if (z < 0.05f) z = 0.05f;
+    s_lbZoom = z;
+    XjsSearchWindow::Cur()->Invalidate();
+}
+
+/* 模态总闸输入消费: LDOWN=按钮待定 / 图面按下拖动平移 / 其余关闭并记连击落点,
+   LUP=按钮落地 (松开仍命中才执行) 或 拖动收尾 (未动视作点击关闭), 滚轮=缩放,
+   MOVE=拖动跟手/按钮悬停/手型光标, Esc=关闭, 其余一概吞 */
+void XjsLightboxMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)hwnd;
+    if (!XjsLightboxActive()) return;
+    POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };   /* 滚轮的 lParam 是屏幕坐标, 本函数不取用 */
+    if (msg == WM_LBUTTONDOWN) {
+        int cmd = XjsLightboxHitCmd(pt);
+        if (cmd) {
+            s_lbPress = cmd;
+        } else if (s_lbPannable && XjsPtIn(s_lbImg, pt)) {
+            /* 图面按下 = 拖动平移 (溢出才可拖); 捕获保证拖出窗外松开也收到 LUP */
+            s_lbDrag = true;
+            s_lbDragPt = pt;
+            s_lbDragPanX = s_lbPanX;
+            s_lbDragPanY = s_lbPanY;
+            SetCapture(g_hWnd);
+        } else {
+            s_lbCloseTick = GetTickCount64();
+            s_lbClosePt = pt;
+            XjsLightboxClose();
+        }
+    } else if (msg == WM_LBUTTONUP) {
+        if (s_lbPress) {
+            if (XjsLightboxHitCmd(pt) == s_lbPress) XjsLightboxRunCmd(s_lbPress);
+            s_lbPress = 0;
+        } else if (s_lbDrag) {
+            s_lbDrag = false;
+            ReleaseCapture();
+            if (abs(pt.x - s_lbDragPt.x) + abs(pt.y - s_lbDragPt.y) <= 5) {
+                /* 原地点击 (未拖动) = 关闭, 同非拖路径; 记落点供连击第二击吞掉 */
+                s_lbCloseTick = GetTickCount64();
+                s_lbClosePt = pt;
+                XjsLightboxClose();
+            }
+        }
+    } else if (msg == WM_MOUSEWHEEL) {
+        XjsLightboxWheel(((short)HIWORD(wParam)) > 0 ? 1 : -1);
+    } else if (msg == WM_MOUSEMOVE) {
+        if (s_lbDrag) {
+            s_lbPanX = s_lbDragPanX + (pt.x - s_lbDragPt.x);
+            s_lbPanY = s_lbDragPanY + (pt.y - s_lbDragPt.y);
+            XjsSearchWindow::Cur()->Invalidate();   /* 越界由渲染帧按溢出量钳制 */
+        } else {
+            int hov = XjsLightboxHitCmd(pt);
+            if (hov != s_lbHover) {
+                s_lbHover = hov;
+                XjsSearchWindow::Cur()->Invalidate();
+            }
+        }
+        bool onImg = !XjsLightboxHitCmd(pt) && XjsPtIn(s_lbImg, pt);
+        SetCursor(LoadCursorW(NULL, (onImg && s_lbPannable) ? IDC_HAND : IDC_ARROW));
+    } else if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        XjsLightboxClose();
+    }
+}
+
+/* 钟罩+大图 (WM_PAINT 状态栏之后调)。
+ * 取图口径: 插件交付图 (已在内存) / 内置图 = 异步装载缓存 (UI 线程零解码)。尺寸 =
+ * 等比适配窗口 (底部让出工具条带), 上限 4 倍 (同预览滚轮上限)。质量路线: 内置图按
+ * 目标尺寸走工作线程 Fant 重采样结果 1:1 贴图 (照片查看器级; DrawBitmap 只有双线性,
+ * 直接拉大必糊)。缓存键 = 文件ID+目标尺寸+旋转档 (请求时落键), 目标尺寸漂移 ≤5% 内
+ * 复用旧图 (拖窗缩放不逐帧重投, 5% 内差值插值不可感); 在途垫显旧缓存/面板缓存,
+ * 都没有画暗底占位 — 装载到货即换。装载失败不再重投 (换文件/旋转复位)。 */
+void XjsLightboxRender(XjsRt* rt, float w, float h) {
+    if (!rt || !XjsLightboxActive()) return;
+    XjsBitmap* plugImg = XjsPreviewPluginBitmap(g_previewFileId);
+    bool builtin = (plugImg == NULL) && g_previewImgW > 0;
+    if (!plugImg && !builtin) {
+        s_lightbox = false;   /* 非图片目标 (选中被程序性换走等): 就地收层防"看不见的模态" */
+        return;
+    }
+    float iw, ih;
+    if (plugImg) {
+        XjsSizeU sz = plugImg->GetPixelSize();
+        iw = (float)sz.width;
+        ih = (float)sz.height;
+    } else {
+        iw = (float)g_previewImgW;   /* 原始尺寸 (选目标时只读头取得) */
+        ih = (float)g_previewImgH;
+    }
+    bool rotated = builtin && (s_rot % 2) == 1;
+    float effW = rotated ? ih : iw, effH = rotated ? iw : ih;   /* 转后内容宽高 (预览旋转灯箱跟随) */
+    XjsColor mask = g_skin.bg1;
+    mask.a *= 0.6f;   /* 同款模态钟罩 */
+    rt->FillRectangle(XjsRectF(0, 0, w, h), XjsTempBrush(mask));
+    float margin = XSF(24);
+    float tbH = XSF(30);   /* 底部工具条带高 */
+    float availH = xf_max(h - margin * 2 - tbH, XSF(60));
+    float base = xf_min((w - margin * 2) / effW, availH / effH);
+    if (base > 4) base = 4;
+    s_lbBase = base;   /* 滚轮起步比例 (渲染帧现算) */
+    float scale = (s_lbZoom > 0) ? s_lbZoom : base;
+    float dw = effW * scale, dh = effH * scale;
+    XjsBitmap* draw = plugImg;
+    if (builtin) {   /* 内置图: 异步装载缓存 (请求时落键; 在途垫显, 失败不重投) */
+        int tw = ximax(1, (int)(dw + 0.5f)), th = ximax(1, (int)(dh + 0.5f));
+        bool sameSrc = s_lbBmp && s_lbKeyFile == g_previewFileId && s_lbKeyRot == s_rot;
+        bool band = sameSrc && tw * 20 <= s_lbKeyW * 21 && tw * 20 >= s_lbKeyW * 19 &&
+                    th * 20 <= s_lbKeyH * 21 && th * 20 >= s_lbKeyH * 19;
+        if (!band && !s_lbPending && !s_lbFailed && tw <= 4096 && th <= 4096)
+            XjsPreviewImgAsk(1, g_previewFileId, tw, th, s_rot);
+        if (band) {
+            draw = s_lbBmp;   /* 键尺寸命中: 1:1 贴图 (零插值) */
+            dw = (float)s_lbKeyW;
+            dh = (float)s_lbKeyH;
+        } else if (sameSrc) {
+            draw = s_lbBmp;   /* 重采样在途: 旧图垫显 */
+        } else if (s_pvScaled && s_pvKeyFile == g_previewFileId && s_pvKeyRot == s_rot) {
+            draw = s_pvScaled;   /* 面板缓存先垫 (小图放大, 点开即刻有内容) */
+        }
+    }
+    /* 拖动平移: 溢出才可拖 (钳制使图缘不进视口, 不溢出轴恒居中); 渲染帧自愈式钳制 —
+       缩放/旋转/开层后的旧偏移自动归位, 拖动中越界同帧收回 */
+    float viewW = w, viewH = h - tbH;
+    float maxPanX = xf_max((dw - viewW) / 2, 0), maxPanY = xf_max((dh - viewH) / 2, 0);
+    if (s_lbPanX > maxPanX) s_lbPanX = maxPanX;
+    if (s_lbPanX < -maxPanX) s_lbPanX = -maxPanX;
+    if (s_lbPanY > maxPanY) s_lbPanY = maxPanY;
+    if (s_lbPanY < -maxPanY) s_lbPanY = -maxPanY;
+    s_lbPannable = maxPanX > 0 || maxPanY > 0;
+    float bx = floorf((viewW - dw) / 2 + s_lbPanX + 0.5f), by = floorf((viewH - dh) / 2 + s_lbPanY + 0.5f);
+    XjsRect dst = XjsRectF(bx, by, bx + dw, by + dh);   /* 整数对齐: 半像素落点徒增发虚, 拖动也整像素步进 */
+    s_lbImg = dst;   /* 拖动/手型光标命中 (XjsLightboxMsg) */
+    /* 缩放溢出裁到工具条带上缘: 放大图不盖工具条 (按钮/文字画在其上仍清晰) */
+    rt->PushAxisAlignedClip(XjsRectF(0, 0, w, h - tbH), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    rt->FillRectangle(dst, XjsTempBrush(XjsCol(0x000000, 0.35f)));   /* 占位暗底 (装载中即见图框) */
+    if (draw) rt->DrawBitmap(draw, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    rt->DrawRectangle(dst, g_br[XTH_BORDER], 1.0f);   /* 细边: 深色图片在深色钟罩上有轮廓 */
+    rt->PopAxisAlignedClip();
+    /* ===== 底部工具条: 左旋/右旋 (仅内置图) + 1:1 + 适应 + 原始尺寸·当前比例, 居中一组 ===== */
+    float ty2 = h - tbH + XSF(3);
+    g_rt->FillRectangle(XjsRectF(0, h - tbH, w, h - tbH + 1), g_br[XTH_BORDER]);
+    const wchar_t* fitLabel = XjsT(L"预览.适应");
+    float fitW = XjsMeasureText(fitLabel, g_tfTiny) + XSF(16);
+    wchar_t infoBuf[48];
+    _snwprintf(infoBuf, 48, L"%d×%d · %d%%", (int)iw, (int)ih, (int)(scale * 100.0f + 0.5f));
+    float infoW = XjsMeasureText(infoBuf, g_tfTiny);
+    float total = (builtin ? XSF(24 + 6 + 24 + 8) : 0) + XSF(34 + 6) + fitW + XSF(16) + infoW;
+    if (total > w - XSF(16)) {   /* 窄窗放不下: 去尺寸信息只留按钮与比例 */
+        _snwprintf(infoBuf, 48, L"%d%%", (int)(scale * 100.0f + 0.5f));
+        infoW = XjsMeasureText(infoBuf, g_tfTiny);
+        total = (builtin ? XSF(24 + 6 + 24 + 8) : 0) + XSF(34 + 6) + fitW + XSF(16) + infoW;
+    }
+    float x0 = floorf((w - total) / 2 + 0.5f);
+    if (builtin) {
+        s_lbRotL = XjsRectF(x0, ty2, x0 + XSF(24), ty2 + XSF(24));
+        XjsPanelHeaderBtn(s_lbRotL, 3, false, s_lbHover == 10);
+        x0 += XSF(30);
+        s_lbRotR = XjsRectF(x0, ty2, x0 + XSF(24), ty2 + XSF(24));
+        XjsPanelHeaderBtn(s_lbRotR, 4, false, s_lbHover == 11);
+        x0 += XSF(32);
+    } else {
+        s_lbRotL = s_lbRotR = {};   /* 插件交付图无文件可重解码, 旋转不可用 */
+    }
+    s_lbOne = XjsRectF(x0, ty2, x0 + XSF(34), ty2 + XSF(24));
+    XjsPvTextBtn(s_lbOne, L"1:1", s_lbHover == 13);
+    x0 += XSF(40);
+    s_lbFit = XjsRectF(x0, ty2, x0 + fitW, ty2 + XSF(24));
+    XjsPvTextBtn(s_lbFit, fitLabel, s_lbHover == 12);
+    x0 += fitW + XSF(16);
+    g_rt->DrawText(infoBuf, (UINT32)wcslen(infoBuf), g_tfTiny,
+        XjsRectF(x0, ty2 + XSF(3), x0 + infoW + XSF(4), ty2 + XSF(21)), g_br[XTH_TEXT_FAINT]);
 }
 
 /* ==================== 插件预览交付 (preview 能力, P2) ====================

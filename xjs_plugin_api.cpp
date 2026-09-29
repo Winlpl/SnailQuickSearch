@@ -722,6 +722,28 @@ static xjs_result* ApiWindowResult(XjsPluginCtx* ctx, XjsWindowToken window) {
     return g_result;
 }
 
+/* ==================== drag.lastPaths ====================
+ * 最近一次列表拖出会话的路径快照 (免权限读面; 快照本体与时效基准在 xjs_util,
+ * 名称匹配/时效判定在插件侧)。指针表静态复用 — 本 API 契约仅 UI 线程, 无并发。 */
+static unsigned long ApiDragPaths(XjsPluginCtx* ctx, const wchar_t* const** paths, unsigned long* count) {
+    int e = XjsPluginApiGate(ctx, 0);
+    if (e != XJS_PLUGIN_OK) {
+        if (paths) *paths = NULL;
+        if (count) *count = 0;
+        return 0;
+    }
+    static std::vector<const wchar_t*> ro;
+    ro.clear();
+    const std::vector<std::wstring>* v = NULL;
+    const DWORD tick = XjsDragOutLastPaths(&v);
+    if (v)
+        for (const auto& p : *v)
+            ro.push_back(p.c_str());
+    if (paths) *paths = ro.data();
+    if (count) *count = (unsigned long)ro.size();
+    return tick;
+}
+
 /* ==================== 名称解析器 (宿主表尾 QueryApi 的落点) ==================== */
 
 void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
@@ -747,6 +769,7 @@ void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name) {
         { XJS_API_WINDOW_SELECTION, (void*)&ApiWindowSelection },
         { XJS_API_LANGS_LIST,    (void*)&ApiLangsList },
         { XJS_API_WINDOW_RESULT, (void*)&ApiWindowResult },
+        { XJS_API_DRAG_PATHS,    (void*)&ApiDragPaths },
     };
     for (auto& t : T)
         if (!strcmp(t.name, name)) return t.fn;

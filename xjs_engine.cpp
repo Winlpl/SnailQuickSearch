@@ -172,8 +172,7 @@ static void XjsClearWinCaches(XjsSearchWindow* w) {
     w->searching = false;
     for (auto& kv : w->iconCache) { if (kv.second) kv.second->Release(); }   /* 图标位图随渲染缓存作废 (重建索引) */
     w->iconCache.clear();
-    if (w->previewImage) { w->previewImage->Release(); w->previewImage = NULL; }
-    w->previewImageFileId = -1;
+    /* 预览/灯箱图片缓存也绑 RT: 由 XjsClearRenderCaches 尾部 XjsPreviewPlugCacheInvalidate 一并作废 */
     if (w->plugPanelCache) { w->plugPanelCache->Release(); w->plugPanelCache = NULL; }   /* 面板接管位图绑 RT, 随缓存作废 */
     w->plugPanelCacheRt = NULL;
     w->plugPanelCacheRev = 0;

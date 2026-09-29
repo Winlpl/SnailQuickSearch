@@ -331,7 +331,8 @@ XjsSearchWindow::~XjsSearchWindow() {
     if (hFontEdit) { DeleteObject(hFontEdit); hFontEdit = NULL; }
     for (auto& kv : brushCache) { if (kv.second) kv.second->Release(); }
     brushCache.clear();
-    if (previewImage) { previewImage->Release(); previewImage = NULL; }
+    if (previewPvScaled) { previewPvScaled->Release(); previewPvScaled = NULL; }   /* 预览图片异步装载缓存持 RT 引用, 随窗释放 */
+    if (previewLbBmp) { previewLbBmp->Release(); previewLbBmp = NULL; }            /* 灯箱图片异步装载缓存同上 */
     if (previewPlugCache) { previewPlugCache->Release(); previewPlugCache = NULL; }   /* 预览接管位图持 RT 引用, 随窗释放 */
     previewPlugCacheRt = NULL;
     if (plugPanelCache) { plugPanelCache->Release(); plugPanelCache = NULL; }   /* 面板接管位图持 RT 引用, 随窗释放 */

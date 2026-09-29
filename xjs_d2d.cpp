@@ -461,23 +461,73 @@ XjsBitmap* XjsBitmapFromBgra(const void* bgra, int w, int h, int stride) {
     return out;
 }
 
-/* 磁盘图片文件 → D2D 位图 (预览面板) */
-XjsBitmap* XjsDecodeFileImage(const std::wstring& path) {
-    if (!g_wic || !g_rt || path.empty()) return NULL;
-    XjsBitmap* bmp = NULL;
+/* 读图片头取像素尺寸 (不解码像素, 头部毫秒级) — 异步装载前先定占位宽高比 */
+bool XjsImageFileDims(const std::wstring& path, int* w, int* h) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (!g_wic || path.empty()) return false;
+    IWICBitmapDecoder* dec = NULL;
+    IWICBitmapFrameDecode* frame = NULL;
+    bool ok = false;
+    if (SUCCEEDED(g_wic->CreateDecoderFromFilename(path.c_str(), NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) && dec &&
+        SUCCEEDED(dec->GetFrame(0, &frame)) && frame) {
+        UINT uw = 0, uh = 0;
+        if (SUCCEEDED(frame->GetSize(&uw, &uh)) && uw > 0 && uh > 0) {
+            if (w) *w = (int)uw;
+            if (h) *h = (int)uh;
+            ok = true;
+        }
+    }
+    if (frame) frame->Release();
+    if (dec) dec->Release();
+    return ok;
+}
+
+/* 磁盘图片 → 目标尺寸 PBGRA 像素字节 (预览/灯箱异步装载, 工作线程调 — 不碰任何 D2D
+   对象, UI 线程拿字节经 XjsBitmapFromBgra 转本域)。帧先转 PBGRA 再 WIC Fant 重采样
+   (≈Lanczos, 照片查看器级质量; DrawBitmap 只有双线性, 直接拉大必糊, 2026-09-29 用户
+   反馈); rot 1..3 = 顺时针 90°/180°/270° (FlipRotator 无损搬转, 在缩放结果上转, 目标
+   宽高调用方按转后内容给, 本函数内部换回转前尺寸喂 scaler)。失败 = false 且 out 清空 */
+bool XjsDecodeFileImagePixels(const std::wstring& path, int dstW, int dstH, int rot,
+                              std::vector<uint8_t>* out, int* stride) {
+    if (!g_wic || path.empty() || dstW <= 0 || dstH <= 0 || dstW > 4096 || dstH > 4096 || !out || !stride) return false;
+    if (rot < 0 || rot > 3) rot = 0;
+    *stride = dstW * 4;
+    out->assign((size_t)*stride * dstH, 0);
     IWICBitmapDecoder* dec = NULL;
     IWICBitmapFrameDecode* frame = NULL;
     IWICFormatConverter* conv = NULL;
+    IWICBitmapScaler* scaler = NULL;
+    IWICBitmapFlipRotator* rotator = NULL;
+    bool ok = false;
+    /* 旋转 90°/270° 时内容宽高互换: scaler 喂转前尺寸, FlipRotator 转出调用方要的目标 */
+    UINT scW = (rot % 2 == 1) ? (UINT)dstH : (UINT)dstW;
+    UINT scH = (rot % 2 == 1) ? (UINT)dstW : (UINT)dstH;
     if (SUCCEEDED(g_wic->CreateDecoderFromFilename(path.c_str(), NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) && dec &&
         SUCCEEDED(dec->GetFrame(0, &frame)) && frame &&
         SUCCEEDED(g_wic->CreateFormatConverter(&conv)) && conv &&
-        SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom))) {
-        g_rt->CreateBitmapFromWicBitmap(conv, NULL, &bmp);
+        SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(g_wic->CreateBitmapScaler(&scaler)) && scaler &&
+        SUCCEEDED(scaler->Initialize(conv, scW, scH, WICBitmapInterpolationModeFant))) {
+        IWICBitmapSource* src = scaler;   /* rot=0 直接出图; 其余过 FlipRotator (无损 90° 搬转) */
+        if (rot != 0) {
+            if (SUCCEEDED(g_wic->CreateBitmapFlipRotator(&rotator)) && rotator &&
+                SUCCEEDED(rotator->Initialize(scaler,
+                    rot == 1 ? WICBitmapTransformRotate90 : rot == 2 ? WICBitmapTransformRotate180
+                                                                     : WICBitmapTransformRotate270)))
+                src = rotator;
+            else
+                src = NULL;
+        }
+        ok = src != NULL && SUCCEEDED(src->CopyPixels(NULL, *stride, (UINT)out->size(), out->data()));
     }
+    if (rotator) rotator->Release();
+    if (scaler) scaler->Release();
     if (conv) conv->Release();
     if (frame) frame->Release();
     if (dec) dec->Release();
-    return bmp;
+    if (!ok) out->clear();
+    return ok;
 }
 
 /* 临时色刷缓存 (同一颜色复用; 设备重建时随 XjsDeviceDiscard 清空) */

@@ -968,10 +968,11 @@ void XjsShowColumnMenu(POINT screenPt) {
     std::vector<XjsPopupItem> items;
     items.push_back({ 0, XjsT(L"列.列显示菜单标题"), L"", false, false, true, false });
     for (int i = 0; i < n; i++) {
-        /* 数据库未开启的字段不可显示 (置灰, 同源样式"未开启字段置灰"); 名称列结构性恒显 */
+        /* 数据库未开启的字段不可勾选开启 (置灰, 同源样式"未开启字段置灰"); 名称列结构性恒显。
+           已显示的未开启列必须允许关掉 — 建索引时未含该字段, 列显"-"却置灰关不掉 (2026-09-29 实锤) */
         bool structural = (!strcmp(S.arr[i].sortField, "文件名") || !strcmp(S.arr[i].sortField, "文件夹"));
         bool fieldOn = structural || (g_engine && xjs_db_IsFieldEnabled(g_engine, S.arr[i].sortField));
-        bool disable = !fieldOn || (S.arr[i].visible && visCount <= 1);
+        bool disable = (!fieldOn && !S.arr[i].visible) || (S.arr[i].visible && visCount <= 1);
         items.push_back({ IDM_COL_BASE + i, XjsT(S.arr[i].label), L"", S.arr[i].visible, false, false, false, disable });
     }
     XjsShowPopupMenu(g_hWnd, screenPt, items, XSF(170));

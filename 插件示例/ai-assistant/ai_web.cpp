@@ -1024,6 +1024,31 @@ static void WebFocusApply(AiSess* s, bool has) {
     }
 }
 
+/* WebView2 运行时已知缺陷 (152.x 起): 运行时开始遵循 Windows"在输入时隐藏指针"
+ * (SPI_GETMOUSEVANISH) — 打字时压低**本进程输入队列的 ShowCursor 计数**且恢复有缺陷
+ * (指针悬在宿主自绘窗上移动也不恢复, 移出自绘窗换队列才见; 停在浏览器子窗上没事,
+ * 那些窗口属于 Chromium 自己的线程队列)。SendInput 假移动救不了计数器, 解法 = UI 线程
+ * (与宿主窗同队列) 维持队列计数 ≥1: 先 TRUE 再 FALSE 的"探针对"净零拿到当前计数
+ * (可见态全程不变隐), <1 就补到 1 — 一层免疫力, 运行时单次按键抑制 (FALSE 一次)
+ * 只把 1→0 仍可见, 不再闪; 连击残余由 50ms 快定时器兜住 (50ms 内不可感)。
+ * 系统设置关着时运行时根本不会压指针 → 先查 SPI_GETMOUSEVANISH, 关 = 不动计数
+ * (尊重 OS 偏好也不做无谓探针; 根修 = 用户关掉该设置, 缺陷在运行时的恢复逻辑)。
+ * ShowCursor 无法只读, 探针对是唯一的测量手段; 范围收在自家前台窗口内 */
+static void WebCursorRebalance(AiWebCtx* w) {
+    BOOL vanish = FALSE;
+    SystemParametersInfoW(SPI_GETMOUSEVANISH, 0, &vanish, 0);
+    if (!vanish) return;
+    HWND root = GetAncestor(w->hwnd, GA_ROOT);
+    if (!root || GetForegroundWindow() != root) return;
+    RECT rr;
+    if (!GetWindowRect(root, &rr)) return;
+    POINT pt;
+    if (!GetCursorPos(&pt) || !PtInRect(&rr, pt)) return;
+    ShowCursor(TRUE);
+    int c = ShowCursor(FALSE);   /* 探针对: 计数回到原值, c = 队列当前计数 */
+    for (int i = 0; i < 8 && c < 1; i++) c = ShowCursor(TRUE);   /* 补到 1 (封顶防谎报) */
+}
+
 static void WebFocusTick(AiSess* s) {
     if (!s || !s->inUse || !s->web || !HOST_PANEL_OK || !g_host) return;
     AiWebCtx* w = (AiWebCtx*)s->web;
@@ -1038,9 +1063,12 @@ static LRESULT CALLBACK AiWebChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 1;   /* 底色由 WebView2 DefaultBackgroundColor 出, 免白闪 */
         case WM_TIMER:
             if (wParam == 1) { WebFocusTick((AiSess*)GetWindowLongPtrW(hwnd, GWLP_USERDATA)); return 0; }
+            if (wParam == 2) { AiSess* s2 = (AiSess*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                               if (s2 && s2->inUse && s2->web) WebCursorRebalance((AiWebCtx*)s2->web); return 0; }
             break;
         case WM_DESTROY:
             KillTimer(hwnd, 1);
+            KillTimer(hwnd, 2);
             break;
         default:
             break;
@@ -1310,6 +1338,7 @@ void WebSessionCreate(AiSess* s) {
     s->web = w;   /* 建好即挂 (环境在途时由 WebCreateControllersPending 补建控制器) */
     SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)s);
     SetTimer(w->hwnd, 1, 250, NULL);   /* 焦点对账心跳 (WebFocusTick) */
+    SetTimer(w->hwnd, 2, 50, NULL);    /* 指针计数平衡 (WebCursorRebalance; 50ms 压残影) */
     if (std::find(s_panelHosts.begin(), s_panelHosts.end(), (HWND)parent) == s_panelHosts.end())
         s_panelHosts.push_back((HWND)parent);   /* 前台判定用 (AiPanelHostForeground) */
     if (g_webEnv) WebCreateControllerFor(s);
@@ -2072,6 +2101,46 @@ void WebCommand(AiSess* s, const Jv& msg) {
     }
     if (c == L"close") {
         if (HOST_PANEL_OK && g_host) g_host->PanelClose(g_ctx, s->tok);
+        return;
+    }
+    if (c == L"dropPaths") {
+        /* 非媒体文件拖放回填完整路径: 页面里 CF_HDROP 过 WebView2 沙箱只剩文件名,
+         * 按名匹配宿主最近一次列表拖出快照 (文件就来自列表, 恒可中); 时效 3 秒 —
+         * 结束太久 = 大概率资源管理器等别的来源拖的, 不认 (原样回填文件名)。
+         * 恒回复一次 (paths 与 names 一一对齐), JS 无需超时兜底 */
+        const Jv* nv = msg.Get(L"names");
+        std::vector<std::wstring> names;
+        if (nv && nv->t == 4)
+            for (const Jv& e : nv->arr)
+                if (e.t == 3 && !e.str.empty()) names.push_back(e.str);
+        std::vector<std::wstring> out = names;
+        long hit = 0;
+        if (!names.empty() && g_api.dragPaths) {
+            const wchar_t* const* paths = NULL;
+            unsigned long n = 0;
+            const DWORD endTick = g_api.dragPaths(g_ctx, &paths, &n);
+            if (paths && n && endTick && (DWORD)(GetTickCount() - endTick) < 3000) {
+                for (size_t k = 0; k < names.size(); k++) {
+                    for (unsigned long i = 0; i < n; i++) {
+                        const wchar_t* p = paths[i];
+                        const wchar_t* base = wcsrchr(p, L'\\');
+                        base = base ? base + 1 : p;   /* 文件名部分 (拖出快照恒反斜杠 Windows 路径) */
+                        if (!_wcsicmp(base, names[k].c_str())) {
+                            out[k] = p;
+                            hit++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        picojson::object o;
+        o["t"] = picojson::value("dropPaths");
+        picojson::array arr;
+        for (auto& p : out) arr.push_back(JS(p));
+        o["paths"] = picojson::value(arr);
+        o["hit"] = picojson::value((double)hit);
+        WebPost(s, picojson::value(o).serialize());
         return;
     }
     if (c == L"profSave") {

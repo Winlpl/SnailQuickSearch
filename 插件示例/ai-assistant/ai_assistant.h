@@ -88,6 +88,7 @@ struct HostApi {
     XjsApiWindowSelection windowSel;
     XjsApiLangsList     langsList;
     XjsApiWindowResult  windowResult;   /* window.result: 窗口结果对象裸指针 (旧宿主 = NULL) */
+    XjsApiDragPaths     dragPaths;      /* drag.lastPaths: 最近列表拖出路径快照 (旧宿主 = NULL) */
 };
 extern HostApi g_api;
 void ApiResolveAll();   /* UI 线程 (Init) 解析全部名字; 旧宿主全 NULL */

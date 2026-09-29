@@ -536,6 +536,7 @@ void ApiResolveAll() {   /* UI 线程 (Init); 旧宿主 = 全 NULL, 相关工具
     g_api.windowSel    = (XjsApiWindowSelection)g_host->QueryApi(g_ctx, XJS_API_WINDOW_SELECTION);
     g_api.langsList    = (XjsApiLangsList)g_host->QueryApi(g_ctx, XJS_API_LANGS_LIST);
     g_api.windowResult = (XjsApiWindowResult)g_host->QueryApi(g_ctx, XJS_API_WINDOW_RESULT);
+    g_api.dragPaths    = (XjsApiDragPaths)g_host->QueryApi(g_ctx, XJS_API_DRAG_PATHS);
 }
 
 /* UIW_* 分派码 (AiUiJob::kind) */

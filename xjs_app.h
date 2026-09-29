@@ -99,6 +99,8 @@
 #define WM_HOTKEY_WARN      (WM_APP + 3)      /* 全局热键注册失败提醒 (WM_CREATE 时窗未显示, 延后弹 toast) */
 #define WM_WAKEUP           (WM_APP + 4)      /* 第二实例唤起本窗恢复显示 (跨完整性级别唯一放行通道, 见 wWinMain 单实例守卫) */
 #define WM_PANEL_RESYNC     (WM_APP + 5)      /* 插件面板接管: 绘制帧发现尺寸/位置失配, 投到消息循环做世代同步 (回调禁在 WM_PAINT 内) */
+#define WM_PV_IMG_READY     (WM_APP + 6)      /* 预览图片异步装载完成 (工作线程 → 窗口; lParam=作业代号) */
+#define WM_PV_TXT_READY     (WM_APP + 7)      /* 预览文本异步装载完成 (流式分块; lParam=作业代号) */
 
 /* 面板接管事件类型 (镜像 xjs_plugin_sdk.h 的 XJS_PANEL_*; SDK 头只有 xjs_plugin.cpp include,
    宿主路由走这套同名值 — xjs_plugin.cpp 内 static_assert 逐项对值, 禁止单边改号) */
@@ -785,6 +787,7 @@ struct XjsPreviewHits {
     XjsRect copySerial{};
     XjsRect bigDirs{}, bigFiles{};
     XjsRect locate{}, open{};
+    XjsRect image{};                        /* 图片内容矩形 (渲染填写; 点击 = 打开放大层) */
     bool valid = false;
 };
 
@@ -1120,14 +1123,41 @@ public:
     int previewWidth = 400;
     bool previewLocked = false;
     int previewFileId = -1;
-    XjsBitmap* previewImage = NULL;       /* 图片预览位图 (绑本窗 RT) */
-    int previewImageFileId = -1;
+    int previewImgW = 0, previewImgH = 0;   /* 当前图片原始尺寸 (选目标时只读头, 0=非图/未取) */
     bool previewDrag = false;
     XjsPreviewHits previewHits;             /* 面板命中区域 (渲染填写) */
-    float previewImgZoom = 1.0f;            /* Ctrl+滚轮图片缩放 (切换文件复位) */
+    float previewImgZoom = 0;               /* 图片缩放: 0 = 适应窗口哨兵, >0 = 相对原图的绝对比例 (0.05~4); 切换文件复位 */
+    float previewImgBase = 1.0f;            /* 本帧适应窗口比例 (渲染帧现算写回; 滚轮起步/1:1 按钮用) */
+    int previewImgRot = 0;                  /* 图片旋转 90° 步数 0..3 (顺时针; 切换文件复位; 灯箱共用) */
     std::vector<std::wstring> previewTextLines;   /* 文本预览行缓存 */
     int previewTextFileId = -1;
     double previewTextScroll = 0;
+    bool previewTextPending = false;        /* 文本异步流式装载在途 (渲染帧不重复投) */
+    bool previewTextHasMore = false;        /* 未加载完 (快到底自动续载下一块) */
+    long long previewTextTotal = 0;         /* 文件总字节 (worker 回报) */
+    long long previewTextLoaded = 0;        /* 已加载原始字节 */
+    bool previewLightbox = false;           /* 图片放大层 (灯箱): 预览图被点击后整窗放大, 点按/Esc 关闭 (xjs_preview.cpp) */
+    XjsBitmap* previewLbBmp = NULL;         /* 灯箱图异步装载缓存 (WIC Fant 目标尺寸, 绑本窗 RT; NULL=未成/在途) */
+    int previewLbKeyFile = -1;              /* 缓存键: 文件ID + 目标尺寸 + 旋转 (请求时落键) */
+    int previewLbKeyW = 0, previewLbKeyH = 0, previewLbKeyRot = 0;
+    bool previewLbPending = false;          /* 作业在途 */
+    bool previewLbFailed = false;           /* 上次装载失败 */
+    XjsRect previewLbRotL{}, previewLbRotR{};    /* 灯箱工具条按钮 (渲染帧填写, XjsLightboxMsg 命中) */
+    XjsRect previewLbOne{}, previewLbFit{};
+    int previewLbPress = 0;                 /* 灯箱按钮按下待定 (松开触发, 同面板口径) */
+    float previewLbBase = 1.0f;             /* 本帧适应窗口比例 (渲染现算写回; 滚轮起步用) */
+    float previewLbZoom = 0;                /* 灯箱缩放: 0=适应哨兵, >0=相对原图绝对比例 (0.05~4); 开层复位 */
+    float previewLbPanX = 0, previewLbPanY = 0;   /* 灯箱平移偏移 (渲染帧按溢出量钳制; 拖图看细节) */
+    bool previewLbDrag = false;             /* 按住图片拖动平移中 (SetCapture) */
+    POINT previewLbDragPt = {};             /* 拖动起点 (客户区) */
+    float previewLbDragPanX = 0, previewLbDragPanY = 0;   /* 拖动起始平移 */
+    XjsRect previewLbImg{};                 /* 本帧图面矩形 (拖动/手型光标命中) */
+    bool previewLbPannable = false;         /* 本帧图面溢出视口 = 可拖 */
+    XjsBitmap* previewPvScaled = NULL;      /* 预览面板图异步装载缓存 (WIC Fant 目标尺寸, 绑本窗 RT; 双线性 ≥2x 缩放文字必糊) */
+    int previewPvKeyFile = -1;              /* 缓存键: 文件ID + 目标尺寸 + 旋转 (请求时落键) */
+    int previewPvKeyW = 0, previewPvKeyH = 0, previewPvKeyRot = 0;
+    bool previewPvPending = false;          /* 作业在途 (渲染帧不重复投) */
+    bool previewPvFailed = false;           /* 上次装载失败 (不逐帧重投; 换文件复位) */
 
     /* 插件预览接管 (preview 能力, P2; 实现收口 xjs_preview.cpp "插件预览接管"节)。
        会话状态必须住窗口类 (可维护性红线 — 曾为文件级 static: 双窗口各自预览互相
@@ -1327,8 +1357,8 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_previewWidth    (XjsSearchWindow::Cur()->previewWidth)
 #define g_previewLocked   (XjsSearchWindow::Cur()->previewLocked)
 #define g_previewFileId   (XjsSearchWindow::Cur()->previewFileId)
-#define g_previewImage    (XjsSearchWindow::Cur()->previewImage)
-#define g_previewImageFileId (XjsSearchWindow::Cur()->previewImageFileId)
+#define g_previewImgW     (XjsSearchWindow::Cur()->previewImgW)
+#define g_previewImgH     (XjsSearchWindow::Cur()->previewImgH)
 #define g_previewDrag     (XjsSearchWindow::Cur()->previewDrag)
 /* 插件面板接管会话 (xjs_preview.cpp "面板接管"节) */
 #define g_plugPanelOn       (XjsSearchWindow::Cur()->plugPanelOn)
@@ -1485,6 +1515,7 @@ void XjsCopySelected(bool namesOnly);
 void XjsCopyFilesToClipboard(const std::vector<int>& idxs, bool cut);  /* CF_HDROP+DropEffect (源样式剪切/复制文件) */
 void XjsCutSelected();                                                 /* Ctrl+X: 写剪贴板+灰显 */
 void XjsDragOutSelected();                                             /* 按住已选行拖动: OLE 拖出选中集合 */
+DWORD XjsDragOutLastPaths(const std::vector<std::wstring>** paths);    /* 最近一次拖出会话路径快照 (进程共享; 返回=会话结束 GetTickCount, 0=从未拖出) — AI 面板拖放回填全路径用 */
 bool XjsRenameStart(int idx);                                          /* F2/右键重命名: 进入行内编辑 */
 void XjsRenameFinish(bool commit);                                     /* 提交(MoveFile)/取消 */
 bool XjsRenameKey(WPARAM vk);
@@ -1541,7 +1572,9 @@ void XjsEllSignCacheDropFormat(XjsFormat* fmt);   /* 格式被单独释放 (弹�
 void XjsRecreateTextFormats();   /* 页面缩放变化后按新倍率重建文本格式 */
 void XjsSyncTextFormats();       /* 窗口上下文切换后调用: 当前窗 DPI/缩放与格式构建时失配 → 重建 */
 XjsBitmap* XjsDecodeImage(const void* data, int len);
-XjsBitmap* XjsDecodeFileImage(const std::wstring& path);
+bool XjsImageFileDims(const std::wstring& path, int* w, int* h);   /* 读头取尺寸 (不解码, 异步装载前定占位比) */
+bool XjsDecodeFileImagePixels(const std::wstring& path, int dstW, int dstH, int rot,
+                              std::vector<uint8_t>* out, int* stride);   /* 解码+Fant缩放+旋转 → PBGRA 字节 (工作线程) */
 XjsBitmap* XjsBitmapFromBgra(const void* bgra, int w, int h, int stride);   /* 插件预览交付: 裸 BGRA → 本域位图 */
 XjsSolidBrush* XjsTempBrush(XjsColor c);          // 临时色刷缓存 (设备重建时清)
 float XjsMeasureText(const wchar_t* s, XjsFormat* fmt);
@@ -1703,7 +1736,7 @@ void XjsGetColumnRects(float listWidth, bool listView, float* xs, float* ws);
 double XjsColumnsContentWidth(bool listView);     /* 列总宽 (含左右 padding), 超视口 → 横向滚动条 */
 void XjsClampHScroll(bool listView);              /* g_hScroll 收敛到 [0, 内容宽-视口宽] */
 int XjsHitTestColHandle(POINT pt);
-void XjsShowColumnMenu(POINT screenPt);           /* 表头右键: 列显隐 (未开启字段置灰, 名称列恒显) */
+void XjsShowColumnMenu(POINT screenPt);           /* 表头右键: 列显隐 (未开启字段禁勾选开启, 已显示的可关闭; 名称列恒显) */
 void XjsColumnToggle(int fullIdx);                /* 菜单命令: 切换某列显隐 */
 void XjsAutoFitColumn(int handleIdx);             /* 双击列宽手柄: 按可视内容自适应 (50~800) */
 /* 选中 (权威在引擎结果对象, 宿主不存副本; 实现见 xjs_list.cpp) */
@@ -1743,6 +1776,16 @@ void XjsPreviewQueryBigFiles();                   // 查找大文件 (SQL)
 void XjsPreviewWheel(int dir);                    // Ctrl+滚轮缩放预览图片 (dir=±1)
 void XjsPreviewScrollLines(int dir);              // 文本预览普通滚轮滚动 (dir=±1)
 bool XjsPreviewIsText();                          // 当前预览目标是文本内容
+bool XjsPreviewIsImage();                         // 当前预览目标是图片内容 (滚轮缩放判定)
+void XjsPreviewImgAdopt(HWND hwnd, long long gen);   /* WM_PV_IMG_READY: 异步装载结果转本域入缓存 */
+void XjsPreviewTextAdopt(HWND hwnd, long long gen);  /* WM_PV_TXT_READY: 流式文本块追加进行集 */
+
+/* 图片放大层 (灯箱): 预览图被点击后的整窗模态 — 钟罩遮罩+等比大图, 实现 xjs_preview.cpp */
+bool XjsLightboxActive();                         // 放大层开启中 (本窗预览图模态)
+void XjsLightboxClose();                          // 收层 (失效自绘)
+bool XjsLightboxJustClosedAt(POINT pt);           // 刚被点击关闭且 pt 在该次连击范围内 (双击第二击吞掉判定)
+void XjsLightboxMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);   // 模态总闸输入消费 (LDOWN/Esc 关, 其余吞)
+void XjsLightboxRender(XjsRt* rt, float w, float h);   // 钟罩+大图 (WM_PAINT 状态栏之后画)
 
 /* ---- xjs_popup (自绘输入对话框; 自绘菜单接口见上方模块接口区) ---- */
 std::wstring XjsGenerateWindowName();   /* 新窗口默认名称 = GUID (CoCreateGuid, 36 连字符格式) */

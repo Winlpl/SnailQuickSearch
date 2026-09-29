@@ -376,6 +376,16 @@ typedef int (XJS_PLUGIN_CALL *XjsApiLangsList)(XjsPluginCtx*, char* buf, int cap
 struct xjs_result;   /* 引擎结果对象 (typedef struct xjs_result xjs_result, 完整定义 xunjieso.h) */
 typedef xjs_result* (XJS_PLUGIN_CALL *XjsApiWindowResult)(XjsPluginCtx*, XjsWindowToken window);
 
+/* drag.lastPaths: 最近一次宿主列表拖出会话的文件路径快照 (免权限, 仅 UI 线程; 2026-09-29 表尾追加)
+   → 返回值 = 该会话结束时刻 (GetTickCount 刻度; 0 = 宿主从未拖出过/旧宿主/插件被禁);
+   *paths/*count 传出只读路径数组 (宿主持有, 下次拖出前有效, 插件不得长期缓存)。
+   用途 = AI 面板接收文件拖放: CF_HDROP 过了 WebView2 沙箱页面里只剩文件名, 按名匹配
+   这份快照回填完整路径; 时效插件自判 (拖出结束太久 = 大概率别的来源拖的, 建议弃用) */
+#define XJS_API_DRAG_PATHS      "drag.lastPaths"
+typedef unsigned long (XJS_PLUGIN_CALL *XjsApiDragPaths)(XjsPluginCtx*,
+                                                         const wchar_t* const** paths,
+                                                         unsigned long* count);
+
 /* ==================== 插件导出面 ==================== */
 
 /* 固定导出 (必须三个都有, 缺一拒载) */

@@ -524,6 +524,17 @@ public:
     STDMETHODIMP GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
 };
 
+/* 最近一次列表拖出会话的路径快照 (进程共享; 拖出 = 模态串行, 不存在并发会话):
+   AI 面板接收文件拖放时页面里只剩文件名 (CF_HDROP 过了 WebView2 沙箱), 完整路径由
+   插件按名匹配这份快照回填; EndTick 供插件做时效判定 (结束太久 = 大概率别的来源拖的) */
+static std::vector<std::wstring> g_dragOutPaths;
+static DWORD g_dragOutEndTick = 0;
+
+DWORD XjsDragOutLastPaths(const std::vector<std::wstring>** paths) {
+    if (paths) *paths = &g_dragOutPaths;
+    return g_dragOutEndTick;
+}
+
 void XjsDragOutSelected() {
     std::vector<std::wstring> paths = XjsSelPaths(true);
     if (paths.empty() || !g_hWnd) return;
@@ -585,7 +596,9 @@ void XjsDragOutSelected() {
         }
         XjsDropSource* src = new XjsDropSource();
         DWORD effect = 0;
+        g_dragOutPaths = paths;   /* 快照在 DoDragDrop 前落账: 只有真发起拖出才算数 (pidl/数据对象失败不会误标) */
         hr = DoDragDrop(dto, src, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+        g_dragOutEndTick = GetTickCount();   /* 拖出结束 (落下/取消) 时刻 — 时效判定基准 */
         dto->Release();
         src->Release();   /* 初始引用归调用方释放 (DoDragDrop 只管它自己 AddRef 的那份) */
     }

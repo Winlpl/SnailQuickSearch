@@ -607,6 +607,9 @@ textarea,input{user-select:text;-webkit-user-select:text}
                  padding:9px 9px 7px 12px;border:1px solid var(--glass-border);border-radius:var(--r);
                  background:var(--surface-raised);transition:border-color 120ms ease}
 .ai-composer-box:focus-within{border-color:color-mix(in srgb,var(--accent-violet) 55%,var(--glass-border))}
+/* 拖放文件悬停提示: 输入框染强调色, drop/拖离即撤 (drop 处理见 bind 尾部拖放监听) */
+body[data-dragover="true"] .ai-composer-box{border-color:var(--accent-violet);
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-violet) 40%,transparent)}
 /* 生成中: 边框流光 (聚焦染色让位 — 底色整圈变紫会把转动的亮弧抹平) */
 @property --ai-composer-flow-angle{syntax:"<angle>";inherits:false;initial-value:0deg}
 )AIWEBUI"
@@ -693,8 +696,9 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-cmd-policy-option-label{white-space:nowrap}
 .ai-cmd-policy-option-hint{color:var(--text-tertiary);font-size:10.5px;line-height:1.4}
 .ai-cmd-policy-option[aria-checked="true"] .ai-cmd-policy-option-hint{color:var(--text-secondary)}
-/* ---- 用量简况 (上下文占用条 + 剩余比例; 点开看详情) ---- */
-.ai-usage{display:inline-flex;flex:0 0 auto;align-items:center;gap:7px;min-width:0;margin-left:auto;padding:2px 6px;
+/* ---- 用量简况 (上下文占用条 + 剩余比例; 点开看详情) ----
+   可收缩 (flex:0 1 auto): 窄宽时 brief 文本先省略号让位, 发送按钮不得被挤出可视区 */
+.ai-usage{display:inline-flex;flex:0 1 auto;align-items:center;gap:7px;min-width:0;margin-left:auto;padding:2px 6px;
           border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text-tertiary);
           font-family:inherit;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default;
           transition:background 120ms ease,border-color 120ms ease,color 120ms ease}
@@ -769,6 +773,19 @@ textarea,input{user-select:text;-webkit-user-select:text}
   .ai-toolbar{padding:12px;gap:10px}
   .ai-btn{padding:0 9px}
   .ai-btn .ellipsis-text{display:none}
+}
+/* 输入条窄宽分级收缩: 底行 = 📎+两个权限下拉+同步+用量+发送, 内容全是固定宽, 宽度不够时发送按钮
+   会被挤出圆框右侧 (实锤) — 与 toolbar 同口径分级收文字, 动作语义由 title 悬停提示保留;
+   发送按钮任何宽度都不得离屏 */
+@media (max-width:560px){
+  #ubrief,#syncLabel{display:none}   /* 用量只留 占用条+箭头; 同步只留勾 (开=紫描边可见) */
+}
+@media (max-width:440px){
+  #policyLabel,#epolicyLabel{display:none}   /* 两个权限下拉只留 图标+箭头 */
+}
+@media (max-width:360px){
+  #usageBtn{display:none}   /* 用量整块让位 (详情本就从对话里看不到精确值, 属极端窄宽) */
+  #sendB{margin-left:auto}  /* 右锚点 (margin-left:auto) 原本挂在用量钮上, 随之一起消失 — 补到发送钮, 恒贴右缘 */
 }
 /* 窄窗口: 侧边栏悬浮在对话区之上, 不再挤压主列 */
 @media (max-width:760px){
@@ -2615,6 +2632,18 @@ function handle(m){
       renderStatus();renderComposer();
       break;
     case 'convs':S.convs=m.convs||[];renderSide();break;
+    case 'dropPaths':{
+      /* 拖放非媒体文件回填 (C++ 按名匹配列表拖出快照; hit=解析成完整路径的个数) */
+      const arr=m.paths||[];
+      if(!arr.length)break;
+      const t=$('inputT'),add=arr.join(' ')+' ';
+      if(t.value&&!/\s$/.test(t.value))t.value+=' ';
+      t.value+=add;
+      autoSize();refreshSendState();
+      showToast(m.hit===arr.length?'已把文件完整路径填入输入框':'已把文件填入输入框 (部分仅有文件名)');
+      try{$('inputT').focus();}catch(err){}
+      break;
+    }
     case 'pathcheck':applyPathCheck(m.r);break;
     case 'msgs':
     if(m.cur!==undefined&&S.cur!==m.cur)S.reasonOpen={};   /* 会话切换: 裸消息下标键整体平移失效 */
@@ -2762,6 +2791,44 @@ function bind(){
     if(!media.length)return;
     e.preventDefault();
     addFiles(media);
+    try{ta.focus();}catch(err){}
+  });
+)AIWEBUI"
+           LR"AIWEBUI(  /* 拖放文件 (左侧搜索结果 / 资源管理器拖入皆可): 媒体走 addFiles 附件管线 (同 📎/粘贴);
+     非媒体文件浏览器拿不到真实路径 (CF_HDROP 到页面只剩 File 对象), 把文件名填入输入框,
+     AI 用搜索工具按名定位。dragover 必须 preventDefault, 否则松手触发 WebView2 默认
+     "拖入即导航", 整个面板被文件内容替换 */
+  let dragDepth=0;   /* dragenter/leave 在子元素间成对抖动, 计数归零才算真离开 */
+  const dragHasFiles=e=>!!(e.dataTransfer&&Array.prototype.indexOf.call(e.dataTransfer.types||[],'Files')>=0);
+  document.addEventListener('dragenter',e=>{
+    if(!dragHasFiles(e))return;
+    e.preventDefault();
+    dragDepth++;
+    document.body.setAttribute('data-dragover','true');
+  });
+  document.addEventListener('dragover',e=>{
+    if(!dragHasFiles(e))return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='copy';
+  });
+  document.addEventListener('dragleave',e=>{
+    if(!dragHasFiles(e))return;
+    dragDepth=Math.max(0,dragDepth-1);
+    if(!dragDepth)document.body.removeAttribute('data-dragover');
+  });
+  document.addEventListener('drop',e=>{
+    if(!dragHasFiles(e))return;
+    e.preventDefault();
+    dragDepth=0;document.body.removeAttribute('data-dragover');
+    const files=Array.from(e.dataTransfer.files||[]);
+    const media=files.filter(f=>f&&/^(image|video|audio)\//i.test(f.type||''));
+    const names=files.filter(f=>f&&!/^(image|video|audio)\//i.test(f.type||'')).map(f=>f.name);
+    if(media.length)addFiles(media);
+    if(names.length){
+      /* 非媒体: 页面只有文件名 (沙箱), 完整路径由 C++ 按名匹配最近一次列表拖出快照
+         回填 (恒回复 dropPaths; 匹配不上原样给名) — 见 handle() 的 dropPaths 分支 */
+      post({c:'dropPaths',names:names});
+    }
     try{ta.focus();}catch(err){}
   });
   $('sendB').addEventListener('click',()=>{if(S.sending)post({c:'stop'});else doSend();});
