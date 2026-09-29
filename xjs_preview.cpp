@@ -723,11 +723,31 @@ void XjsPreviewToggle() {
 
 /* 预览卡片行 = 卡片当前显示的项 (g_previewFileId): 卡上按钮 (复制序列号/查找大目录·大文件/
    定位/打开) 作用于用户看到的这张卡 — 用列表选中项会在 图钉锁定预览 时与卡片分叉, 按钮静默
-   落空 (表象 = "复制点不了") */
+   落空 (表象 = "复制点不了")。
+   结果集换血期 (锁定后输入新词, 新结果不再包含锁定文件) 行下标取不到 → 数据改由引擎库按
+   FileId 直取 (与结果集解耦, 2026-09-30 用户实锤 "锁定后搜索预览被清空")。驱动器卡的
+   卷标/序列号/容量只随结果行回调产生, 离行取不到 → 此时按普通文件卡呈现 (定位/打开仍可用) */
+static XjsRowData s_cardFallback;   /* 离行卡片数据缓冲 (UI 线程; 每次解析现填) */
+static XjsRowData* XjsPreviewCardRowOf(int fileId) {
+    if (fileId < 0 || !g_engine) return NULL;
+    if (g_result) {
+        int idx = xjs_result_GetFileIdIndex(g_result, fileId);
+        if (idx >= 0) return XjsEnsureRowData(idx);
+    }
+    s_cardFallback = XjsRowData{};
+    s_cardFallback.fileId = fileId;
+    {   const char* u8 = xjs_db_GetName(g_engine, fileId);
+        if (u8) s_cardFallback.name = Utf8ToUtf16(u8); }
+    {   const char* u8 = xjs_db_GetParentDirectory(g_engine, fileId);
+        if (u8) s_cardFallback.folder = Utf8ToUtf16(u8); }
+    s_cardFallback.size = xjs_db_GetFileSize(g_engine, fileId);
+    s_cardFallback.mtime = xjs_db_GetModifyTime(g_engine, fileId);
+    s_cardFallback.rating = (int)xjs_db_GetRating(g_engine, fileId);
+    return &s_cardFallback;
+}
+
 static XjsRowData* XjsPreviewCardRow() {
-    if (g_previewFileId < 0 || !g_result) return NULL;
-    int idx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
-    return idx >= 0 ? XjsEnsureRowData(idx) : NULL;
+    return XjsPreviewCardRowOf(g_previewFileId);
 }
 
 /* 查找大目录: 按父路径聚合子项数 (SQL GROUP BY; 空间地图插件另提供矩形树图视图) */
@@ -884,6 +904,77 @@ static void XjsPvMediaMuteBtn(const XjsRect& r, bool muted, bool hover) {
     }
 }
 
+/* 全屏钮 (对角双角括号 "扩展" 图标) */
+static void XjsPvFsGlyph(const XjsRect& r, bool hover) {
+    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    XjsBrush* bc = (XjsBrush*)g_br[hover ? XTH_ACCENT : XTH_TEXT_DIM];
+    g_rt->DrawLine(XjsPoint2F(cx + XSF(1), cy - XSF(7)), XjsPoint2F(cx + XSF(7), cy - XSF(7)), bc, 1.3f);
+    g_rt->DrawLine(XjsPoint2F(cx + XSF(7), cy - XSF(7)), XjsPoint2F(cx + XSF(7), cy - XSF(1)), bc, 1.3f);
+    g_rt->DrawLine(XjsPoint2F(cx - XSF(7), cy + XSF(1)), XjsPoint2F(cx - XSF(7), cy + XSF(7)), bc, 1.3f);
+    g_rt->DrawLine(XjsPoint2F(cx - XSF(7), cy + XSF(7)), XjsPoint2F(cx - XSF(1), cy + XSF(7)), bc, 1.3f);
+}
+
+/* 媒体控制条 (面板与全屏层共用, 高 36u): [播放][进度][时间][静音][全屏]。
+   xL..xR = 条带横向范围; 命中矩形写 oPlay/oSeek/oMute/oFs (放不下进度时 oSeek 清零)。
+   时间右缘对齐到静音钮左侧; 进度右端给滑块半径留位, 顶满不压时间 */
+static void XjsPvMediaCtrlStrip(XjsMediaCtx* mc, float y0, float xL, float xR,
+                                bool hovPlay, bool hovMute, bool hovFs,
+                                XjsRect* oPlay, XjsRect* oSeek, XjsRect* oMute, XjsRect* oFs) {
+    float bs = XSF(30), timeW = XSF(86), muteW = XSF(26), fsW = XSF(26);
+    *oPlay = XjsRectF(xL, y0 + XSF(3), xL + bs, y0 + XSF(3) + bs);
+    XjsPvMediaPlayBtn(*oPlay, XjsMediaPlaying(mc), XjsMediaEnded(mc), hovPlay);
+    float muteL = xR - fsW - XSF(6) - muteW;
+    *oMute = XjsRectF(muteL, y0 + XSF(5), muteL + muteW, y0 + XSF(5) + muteW);
+    XjsPvMediaMuteBtn(*oMute, XjsMediaMuted(mc), hovMute);
+    *oFs = XjsRectF(xR - fsW, y0 + XSF(5), xR, y0 + XSF(5) + fsW);
+    XjsPvFsGlyph(*oFs, hovFs);
+    /* 时间 (右缘对齐静音钮左侧) */
+    wchar_t tb[16], db[16];
+    XjsMediaFmtTime(XjsMediaPos(mc), tb, 16);
+    XjsMediaFmtTime(XjsMediaDur(mc), db, 16);
+    std::wstring tt = std::wstring(tb) + L" / " + db;
+    float tw = XjsMeasureText(tt.c_str(), g_tfTiny);
+    float timeR = muteL - XSF(6);
+    g_rt->DrawText(tt.c_str(), (UINT32)tt.length(), g_tfTiny,
+        XjsRectF(timeR - tw, y0 + XSF(11), timeR, y0 + XSF(25)), g_br[XTH_TEXT_FAINT]);
+    /* 进度条 */
+    float seekL = xL + bs + XSF(10);
+    float seekR = timeR - tw - XSF(10);   /* 文字左缘再留滑块半径+间距 */
+    if (seekR > seekL + XSF(40)) {
+        *oSeek = XjsRectF(seekL, y0 + XSF(12), seekR, y0 + XSF(24));   /* 命中带高于视觉轨道 */
+        float trackY = y0 + XSF(17), trackH = XSF(5);
+        XjsRect track = XjsRectF(seekL, trackY, seekR, trackY + trackH);
+        g_rt->FillRoundedRectangle(XjsRoundedRectF(track, XSF(2.5f), XSF(2.5f)), XjsTempBrush(g_skin.driveTrack));
+        double dur = XjsMediaDur(mc), pos = XjsMediaPos(mc);
+        if (dur > 0) {
+            double frac = pos / dur;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+            float fillW = (float)((seekR - seekL) * frac);
+            if (fillW > XSF(1)) {
+                XjsRect fill = XjsRectF(seekL, trackY, seekL + fillW, trackY + trackH);
+                g_rt->FillRoundedRectangle(XjsRoundedRectF(fill, XSF(2.5f), XSF(2.5f)), g_br[XTH_ACCENT]);
+                g_rt->FillEllipse(XjsEllipseF(XjsPoint2F(seekL + fillW, trackY + trackH / 2), XSF(4.5f), XSF(4.5f)),
+                                  g_br[XTH_ACCENT]);
+            }
+        }
+    } else {
+        *oSeek = {};
+    }
+    /* 音量/静音浮标 (调完 1.2s 内显示, 挂在静音钮上方) */
+    float badge = XjsMediaVolumeBadge(mc);
+    if (badge >= 0) {
+        wchar_t vb[8];
+        _snwprintf(vb, 8, L"%d%%", (int)(badge * 100.0f + 0.5f));
+        float bw = XjsMeasureText(vb, g_tfTiny);
+        XjsRect br2 = XjsRectF(oMute->right - bw - XSF(10), y0 - XSF(18), oMute->right + XSF(10), y0 - XSF(2));
+        g_rt->FillRoundedRectangle(XjsRoundedRectF(br2, XSF(4), XSF(4)), g_br[XTH_PANEL2]);
+        g_rt->DrawText(vb, (UINT32)wcslen(vb), g_tfTiny,
+            XjsRectF(br2.left + XSF(5), br2.top + XSF(1), br2.right - XSF(5), br2.bottom - XSF(1)),
+            g_br[XTH_TEXT_DIM]);
+    }
+}
+
 /* 媒体卡整卡 (调用方已保证 media 会话在且目标是本卡文件) */
 static void XjsPvRenderMedia(XjsSearchWindow* w, float px, float pw, float cy, const XjsRect& body) {
     XjsLayout& L = g_layout;
@@ -891,11 +982,10 @@ static void XjsPvRenderMedia(XjsSearchWindow* w, float px, float pw, float cy, c
     if (!mc) return;
     float fbY = L.statusbar.top - XSF(44);   /* 与底部 定位/打开 按钮带对齐 */
     float ctrlH = XSF(36);
-    float ctrlY = fbY - ctrlH - XSF(6);
     float areaW = pw - XSF(14);              /* 左右内边距镜像 (同图片口径) */
-    float availH = xf_max(ctrlY - XSF(8) - cy, XSF(60));
+    float availH = xf_max(fbY - ctrlH - XSF(8) - cy, XSF(60));   /* 画面区上限 = 底部按钮带之上给控制条留位 */
 
-    /* ===== 画面区 (视频=等比适配, 音频=音符占位卡) ===== */
+    /* ===== 画面区 (顶部对齐: 紧随头部带, 空隙留底部 — 用户口径 "控制按钮跟随画面") ===== */
     XjsRect vr;
     bool hasVid = XjsMediaHasVideo(mc);
     bool failed = XjsMediaFailed(mc);
@@ -904,13 +994,15 @@ static void XjsPvRenderMedia(XjsSearchWindow* w, float px, float pw, float cy, c
         float base = xf_min(areaW / iw, availH / ih);
         if (base > 4) base = 4;
         float dw = iw * base, dh = ih * base;
-        float vx = px + (areaW - dw) / 2, vy = cy + (availH - dh) / 2;
-        vr = XjsRectF(vx, vy, vx + dw, vy + dh);
+        float vx = px + (areaW - dw) / 2;
+        vr = XjsRectF(vx, cy, vx + dw, cy + dh);
     } else {
         float aw = xf_min(areaW, XSF(300)), ah = xf_min(availH, XSF(150));
-        float vx = px + (areaW - aw) / 2, vy = cy + (availH - ah) / 2;
-        vr = XjsRectF(vx, vy, vx + aw, vy + ah);
+        float vx = px + (areaW - aw) / 2;
+        vr = XjsRectF(vx, cy, vx + aw, cy + ah);
     }
+    /* 控制条跟随画面下缘 (极矮窗口兜底压回按钮带之上) */
+    float ctrlY = xf_min(vr.bottom + XSF(8), fbY - ctrlH);
     s_hits.mediaVideo = failed ? XjsRect{} : vr;   /* 失败态画面不可点 (无播放可言) */
     XjsMediaSetFrameTarget(mc, (int)(vr.right - vr.left + 0.5f), (int)(vr.bottom - vr.top + 0.5f));   /* 帧搬运目标尺寸 */
 
@@ -948,61 +1040,10 @@ static void XjsPvRenderMedia(XjsSearchWindow* w, float px, float pw, float cy, c
     }
     g_rt->PopAxisAlignedClip();
 
-    /* ===== 控制条 ===== */
-    bool playing = XjsMediaPlaying(mc), ended = XjsMediaEnded(mc);
-    float bs = XSF(30);
-    s_hits.mediaPlay = XjsRectF(px, ctrlY, px + bs, ctrlY + bs);
-    XjsPvMediaPlayBtn(s_hits.mediaPlay, playing, ended, XjsPvHover(10));
-    float timeW = XSF(86);
-    float muteW = XSF(26);
-    float seekL = px + bs + XSF(12);
-    float seekR = body.right - XSF(16) - muteW - timeW;
-    double dur = XjsMediaDur(mc), pos = XjsMediaPos(mc);
-    if (seekR > seekL + XSF(40)) {
-        s_hits.mediaSeek = XjsRectF(seekL, ctrlY + XSF(12), seekR, ctrlY + XSF(24));   /* 命中带高于视觉轨道 */
-        float trackY = ctrlY + XSF(17), trackH = XSF(5);
-        XjsRect track = XjsRectF(seekL, trackY, seekR, trackY + trackH);
-        g_rt->FillRoundedRectangle(XjsRoundedRectF(track, XSF(2.5f), XSF(2.5f)), XjsTempBrush(g_skin.driveTrack));
-        if (dur > 0) {
-            double frac = pos / dur;
-            if (frac < 0) frac = 0;
-            if (frac > 1) frac = 1;
-            float fillW = (float)((track.right - track.left) * frac);
-            if (fillW > XSF(1)) {
-                XjsRect fill = XjsRectF(track.left, trackY, track.left + fillW, trackY + trackH);
-                g_rt->FillRoundedRectangle(XjsRoundedRectF(fill, XSF(2.5f), XSF(2.5f)), g_br[XTH_ACCENT]);
-                g_rt->FillEllipse(XjsEllipseF(XjsPoint2F(track.left + fillW, trackY + trackH / 2), XSF(4.5f), XSF(4.5f)),
-                                  g_br[XTH_ACCENT]);
-            }
-        }
-    } else {
-        s_hits.mediaSeek = {};
-    }
-    wchar_t tb[16], db[16];
-    XjsMediaFmtTime(pos, tb, 16);
-    XjsMediaFmtTime(dur, db, 16);
-    std::wstring tt = std::wstring(tb) + L" / " + db;
-    float tw = XjsMeasureText(tt.c_str(), g_tfTiny);
-    g_rt->DrawText(tt.c_str(), (UINT32)tt.length(), g_tfTiny,
-        XjsRectF(body.right - XSF(16) - muteW - timeW, ctrlY + XSF(9),
-                 body.right - XSF(16) - muteW - XSF(4), ctrlY + XSF(27)),
-        g_br[XTH_TEXT_FAINT]);
-    s_hits.mediaMute = XjsRectF(body.right - XSF(16) - muteW, ctrlY + XSF(5),
-                                body.right - XSF(16), ctrlY + XSF(5) + muteW);
-    XjsPvMediaMuteBtn(s_hits.mediaMute, XjsMediaMuted(mc), XjsPvHover(11));
-    /* 音量/静音浮标 (调完 1.2s 内显示) */
-    float badge = XjsMediaVolumeBadge(mc);
-    if (badge >= 0) {
-        wchar_t vb[8];
-        _snwprintf(vb, 8, L"%d%%", (int)(badge * 100.0f + 0.5f));
-        float bw = XjsMeasureText(vb, g_tfTiny);
-        XjsRect br2 = XjsRectF(s_hits.mediaMute.right - bw - XSF(10), ctrlY - XSF(18),
-                               s_hits.mediaMute.right + XSF(10), ctrlY - XSF(2));
-        g_rt->FillRoundedRectangle(XjsRoundedRectF(br2, XSF(4), XSF(4)), g_br[XTH_PANEL2]);
-        g_rt->DrawText(vb, (UINT32)wcslen(vb), g_tfTiny,
-            XjsRectF(br2.left + XSF(5), br2.top + XSF(1), br2.right - XSF(5), br2.bottom - XSF(1)),
-            g_br[XTH_TEXT_DIM]);
-    }
+    /* ===== 控制条 (与全屏层共用同一条带; 全屏钮命中 12) ===== */
+    XjsPvMediaCtrlStrip(mc, ctrlY, px, body.right - XSF(16),
+                        XjsPvHover(10), XjsPvHover(11), XjsPvHover(12),
+                        &s_hits.mediaPlay, &s_hits.mediaSeek, &s_hits.mediaMute, &s_hits.mediaFsBtn);
 }
 
 void XjsPreviewRender() {
@@ -1022,7 +1063,7 @@ void XjsPreviewRender() {
     s_hits.copySerial = s_hits.bigDirs = s_hits.bigFiles = {};
     s_hits.locate = s_hits.open = {};
     s_hits.image = {};
-    s_hits.mediaVideo = s_hits.mediaSeek = s_hits.mediaPlay = s_hits.mediaMute = {};
+    s_hits.mediaVideo = s_hits.mediaSeek = s_hits.mediaPlay = s_hits.mediaMute = s_hits.mediaFsBtn = {};
     /* 面板接管中: 整块面板体 (含原头部带) 交给插件位图, 宿主头部 (标题/锁/宽窄/✕) 不画 —
        关闭入口 = 插件头部自绘 ✕ (SDK PanelClose, 按打开前状态恢复预览); 头部按钮命中矩形按帧清零 */
     if (g_plugPanelOn) {
@@ -1035,17 +1076,18 @@ void XjsPreviewRender() {
 
     /* 头部: 小图标 + 标题 + 锁/最大/关闭 */
     float headH = XSF(40);
-    XjsRowData* rd = NULL;
-    int idx = -1;
-    if (g_previewFileId >= 0 && g_result) {
-        int fileIdx = xjs_result_GetFileIdIndex(g_result, g_previewFileId);
-        if (fileIdx >= 0) { rd = XjsEnsureRowData(fileIdx); idx = fileIdx; }
+    XjsRowData* rd = g_previewFileId >= 0 ? XjsPreviewCardRowOf(g_previewFileId) : NULL;
+    int idx = -1;   /* 行下标仅列表图标用; 锁定换血期离行 → 走按 fileId 的同步取图标 */
+    if (rd && !rd->isDrive && g_result) {
+        int fileIdx = xjs_result_GetFileIdIndex(g_result, rd->fileId);
+        if (fileIdx >= 0) idx = fileIdx;
     }
     std::wstring title = rd ? rd->name : XjsT(L"通用词.预览");
     {
         float ty = p.top + XSF(8);
         if (rd) {
-            XjsBitmap* ic = XjsGetRowIcon(idx, rd->fileId, XjsIconFetchPx(32), "preview");
+            XjsBitmap* ic = (idx >= 0) ? XjsGetRowIcon(idx, rd->fileId, XjsIconFetchPx(32), "preview")
+                                       : XjsPreviewIcon(rd->fileId);
             if (ic) {
                 float isz = XSF(22);
                 g_rt->DrawBitmap(ic, XjsRectF(px, ty, px + isz, ty + isz));
@@ -1326,7 +1368,7 @@ bool XjsPreviewResizerHit(POINT pt) {
 }
 
 /* 面板按钮命令编码 (按下待定/松开触发两处同源): 1=关闭 2=宽窄切换 3=锁定 4=复制序列号
-   5=大目录 6=大文件 7=定位 8=打开 9=图片放大层 10=媒体播放暂停 11=媒体静音
+   5=大目录 6=大文件 7=定位 8=打开 9=图片放大层 10=媒体播放暂停 11=媒体静音 12=媒体全屏
    (灯箱工具条命令在 XjsLightboxHitCmd) */
 static int s_pvPress = 0;
 
@@ -1341,6 +1383,7 @@ static bool XjsPreviewHitCmd(POINT pt, int* cmdOut) {
     else if (XjsPtIn(s_hits.open, pt)) *cmdOut = 8;
     else if (XjsPtIn(s_hits.mediaPlay, pt)) *cmdOut = 10;   /* 媒体钮优先于画面 (视觉层序同) */
     else if (XjsPtIn(s_hits.mediaMute, pt)) *cmdOut = 11;
+    else if (XjsPtIn(s_hits.mediaFsBtn, pt)) *cmdOut = 12;
     else if (XjsPtIn(s_hits.mediaVideo, pt)) *cmdOut = 10;
     else if (XjsPtIn(s_hits.image, pt)) *cmdOut = 9;   /* 最后判: 图片放大超出面板时按钮优先 (视觉层序同) */
     else return false;
@@ -1457,6 +1500,8 @@ static void XjsPreviewRunCmd(int cmd) {
         XjsSearchWindow::Cur()->MediaTogglePlay();   /* 媒体播放/暂停 (画面点击与播放钮同令) */
     } else if (cmd == 11) {
         XjsSearchWindow::Cur()->MediaToggleMute();
+    } else if (cmd == 12) {
+        XjsPreviewMediaToggleFull();   /* 媒体全屏层 (整窗模态, 见下方全屏节) */
     }
     XjsSearchWindow::Cur()->Invalidate();
 }
@@ -1720,6 +1765,172 @@ void XjsLightboxRender(XjsRt* rt, float w, float h) {
     x0 += fitW + XSF(16);
     g_rt->DrawText(infoBuf, (UINT32)wcslen(infoBuf), g_tfTiny,
         XjsRectF(x0, ty2 + XSF(3), x0 + infoW + XSF(4), ty2 + XSF(21)), g_br[XTH_TEXT_FAINT]);
+}
+
+/* ==================== 媒体全屏层 (视频/音频, 灯箱同模态模式) ====================
+ * 整窗模态: 钟罩 + 大画面(等比放大到窗口内, 控制条让位) + 底部控制条 (与面板共用条带绘制)。
+ * 进出 = 面板全屏钮(命令12)/画面双击; 退出 = Esc/点空白/退出钮; 换选中/停播随 MediaStop 收层。
+ * 取帧目标 = 全屏画面矩形 (后画者胜出: 面板渲染先设小尺寸, 本层后设大尺寸, 泵按最终值取帧) */
+static int s_fsHover = 0;     /* 悬停钮: 1=播放 2=静音 3=退出 (鼠标交互瞬态, 文件级 static 口径) */
+static int s_fsPress = 0;     /* 按下待定 (松开触发, 同面板口径) */
+static bool s_fsScrub = false;   /* 进度拖动中 */
+
+bool XjsMediaFullActive() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    return w && w->mediaFull && XjsMediaActive(w->media);
+}
+
+void XjsPreviewMediaToggleFull() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !XjsMediaActive(w->media)) return;
+    w->mediaFull = !w->mediaFull;
+    s_fsPress = 0;
+    s_fsHover = 0;
+    s_fsScrub = false;
+    w->Invalidate();
+}
+
+void XjsMediaFullClose() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->mediaFull) return;
+    w->mediaFull = false;
+    s_fsPress = 0;
+    s_fsHover = 0;
+    if (s_fsScrub) { s_fsScrub = false; ReleaseCapture(); }
+    w->Invalidate();
+}
+
+/* 全屏层命中: 1=播放 2=静音 3=退出 5=进度 4=画面 0=空白(点外=退出) */
+static int XjsFsHitCmd(POINT pt) {
+    if (XjsPtIn(s_hits.mediaFsPlay, pt)) return 1;
+    if (XjsPtIn(s_hits.mediaFsMute, pt)) return 2;
+    if (XjsPtIn(s_hits.mediaFsExit, pt)) return 3;
+    if (XjsPtIn(s_hits.mediaFsSeek, pt)) return 5;
+    if (XjsPtIn(s_hits.mediaFsVideo, pt)) return 4;
+    return 0;
+}
+
+static double XjsFsScrubFrac(POINT pt) {
+    const XjsRect& t = s_hits.mediaFsSeek;
+    float wd = t.right - t.left;
+    if (wd <= 1) return 0;
+    double f = (double)(pt.x - t.left) / wd;
+    if (f < 0) f = 0;
+    if (f > 1) f = 1;
+    return f;
+}
+
+void XjsMediaFullRender(XjsRt* rt, float w, float h) {
+    XjsSearchWindow* wnd = XjsSearchWindow::Cur();
+    if (!wnd || !wnd->mediaFull || !wnd->media) return;
+    XjsMediaCtx* mc = wnd->media;
+    /* 钟罩 (灯箱同款, 略深一档衬托画面) */
+    XjsColor mask = g_skin.bg1;
+    mask.a *= 0.72f;
+    rt->FillRectangle(XjsRectF(0, 0, w, h), XjsTempBrush(mask));
+    s_hits.mediaFsVideo = s_hits.mediaFsPlay = s_hits.mediaFsSeek = s_hits.mediaFsMute = s_hits.mediaFsExit = {};
+    bool failed = XjsMediaFailed(mc);
+    bool hasVid = XjsMediaHasVideo(mc);
+    float ctrlH = XSF(44);
+    float margin = XSF(20);
+    float availW = xf_max(w - margin * 2, XSF(120));
+    float availH = xf_max(h - ctrlH - margin - XSF(12), XSF(80));
+    XjsRect vr;
+    if (hasVid && !failed) {
+        float iw = (float)ximax(1, XjsMediaVidW(mc)), ih = (float)ximax(1, XjsMediaVidH(mc));
+        float base = xf_min(availW / iw, availH / ih);
+        if (base > 4) base = 4;
+        float dw = iw * base, dh = ih * base;
+        float vx = (w - dw) / 2, vy = XSF(12) + (availH - dh) / 2;
+        vr = XjsRectF(vx, vy, vx + dw, vy + dh);
+    } else {
+        float aw = xf_min(availW, XSF(420)), ah = xf_min(availH, XSF(200));
+        float vx = (w - aw) / 2, vy = XSF(12) + (availH - ah) / 2;
+        vr = XjsRectF(vx, vy, vx + aw, vy + ah);
+    }
+    if (!failed) s_hits.mediaFsVideo = vr;
+    /* 取帧目标 = 全屏画面矩形 (本层在面板渲染之后画, 尺寸以本层为准) */
+    XjsMediaSetFrameTarget(mc, (int)(vr.right - vr.left + 0.5f), (int)(vr.bottom - vr.top + 0.5f));
+    rt->FillRoundedRectangle(XjsRoundedRectF(vr, XSF(8), XSF(8)), g_br[XTH_PANEL2]);
+    rt->DrawRoundedRectangle(XjsRoundedRectF(vr, XSF(8), XSF(8)), g_br[XTH_BORDER], 1.0f);
+    float mcx = (vr.left + vr.right) / 2, mcy = (vr.top + vr.bottom) / 2;
+    if (failed) {
+        std::wstring msg = XjsT(L"预览.媒体不支持");
+        rt->DrawText(msg.c_str(), (UINT32)msg.length(), g_tfTiny,
+            XjsRectF(vr.left + XSF(12), mcy - XSF(9), vr.right - XSF(12), mcy + XSF(9)), g_br[XTH_TEXT_FAINT]);
+    } else if (hasVid) {
+        rt->FillRectangle(vr, XjsTempBrush(XjsCol(0x000000, 0.45f)));
+        XjsBitmap* fb = XjsMediaFrameBitmap(mc);
+        if (fb) {
+            rt->DrawBitmap(fb, vr, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else if (XjsMediaLoading(mc)) {
+            XjsDrawSpinner(XjsPoint2F(mcx, mcy), XSF(9), (float)((GetTickCount64() % 900) / 900.0));
+        }
+    } else {
+        XjsBrush* ac = (XjsBrush*)g_br[XTH_ACCENT];
+        float nx = mcx - XSF(8), ny = mcy + XSF(6);
+        rt->FillEllipse(XjsEllipseF(XjsPoint2F(nx, ny), XSF(6), XSF(4.5f)), ac);
+        rt->DrawLine(XjsPoint2F(nx + XSF(5.6f), ny - XSF(1.5f)), XjsPoint2F(nx + XSF(5.6f), ny - XSF(24)), ac, 2.0f);
+        rt->DrawLine(XjsPoint2F(nx + XSF(5.6f), ny - XSF(24)), XjsPoint2F(nx + XSF(15), ny - XSF(18)), ac, 2.0f);
+        if (XjsMediaLoading(mc))
+            XjsDrawSpinner(XjsPoint2F(mcx, mcy + XSF(34)), XSF(9), (float)((GetTickCount64() % 900) / 900.0));
+    }
+    /* 底部控制条: 居中, 宽度夹取 */
+    float stripW = xf_min(w - XSF(48), XSF(640));
+    float stripX = (w - stripW) / 2;
+    XjsPvMediaCtrlStrip(mc, h - ctrlH + XSF(2), stripX, stripX + stripW,
+                        s_fsHover == 1, s_fsHover == 2, s_fsHover == 3,
+                        &s_hits.mediaFsPlay, &s_hits.mediaFsSeek, &s_hits.mediaFsMute, &s_hits.mediaFsExit);
+}
+
+/* 模态总闸输入消费 (灯箱同口径): 按钮待定/画面点切/进度拖动/点空白退出/Esc/滚轮调音量 */
+void XjsMediaFullMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)hwnd;
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->mediaFull || !w->media) return;
+    POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };   /* 滚轮 lParam 是屏幕坐标, 本函数不取用 */
+    if (msg == WM_LBUTTONDOWN) {
+        int c = XjsFsHitCmd(pt);
+        if (c == 5) {
+            s_fsScrub = true;
+            SetCapture(g_hWnd);
+            w->MediaSeekFrac(XjsFsScrubFrac(pt));
+        } else if (c == 4) {
+            w->MediaTogglePlay();   /* 画面点击直接切换 (同面板口径) */
+        } else if (c) {
+            s_fsPress = c;
+        } else {
+            XjsMediaFullClose();   /* 点空白 = 退出全屏 */
+        }
+    } else if (msg == WM_LBUTTONUP) {
+        if (s_fsScrub) { s_fsScrub = false; ReleaseCapture(); return; }
+        int c = s_fsPress;
+        s_fsPress = 0;
+        if (c && XjsFsHitCmd(pt) == c) {
+            if (c == 1) w->MediaTogglePlay();
+            else if (c == 2) w->MediaToggleMute();
+            else if (c == 3) XjsMediaFullClose();
+        }
+    } else if (msg == WM_MOUSEMOVE) {
+        if (s_fsScrub) { w->MediaSeekFrac(XjsFsScrubFrac(pt)); return; }
+        int hov = 0;
+        if (XjsPtIn(s_hits.mediaFsPlay, pt)) hov = 1;
+        else if (XjsPtIn(s_hits.mediaFsMute, pt)) hov = 2;
+        else if (XjsPtIn(s_hits.mediaFsExit, pt)) hov = 3;
+        if (hov != s_fsHover) { s_fsHover = hov; w->Invalidate(); }
+    } else if (msg == WM_MOUSEWHEEL) {
+        w->MediaAdjustVolume(((short)HIWORD(wParam)) > 0 ? 1 : -1);
+    } else if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        XjsMediaFullClose();
+    }
+}
+
+/* 双击画面 = 全屏切换 (main WM_LBUTTONDBLCLK 判定; 首击已切换过播放, 此处只翻全屏) */
+bool XjsPreviewMediaVideoHit(POINT pt) {
+    if (!g_previewVisible || g_plugPanelOn) return false;
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !XjsMediaIsTarget(w->media, g_previewFileId)) return false;
+    return XjsPtIn(s_hits.mediaVideo, pt);
 }
 
 /* ==================== 插件预览交付 (preview 能力, P2) ====================

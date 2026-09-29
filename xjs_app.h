@@ -792,7 +792,8 @@ struct XjsPreviewHits {
     XjsRect bigDirs{}, bigFiles{};
     XjsRect locate{}, open{};
     XjsRect image{};                        /* 图片内容矩形 (渲染填写; 点击 = 打开放大层) */
-    XjsRect mediaVideo{}, mediaSeek{}, mediaPlay{}, mediaMute{};   /* 媒体卡 (画面/进度/播放/静音) */
+    XjsRect mediaVideo{}, mediaSeek{}, mediaPlay{}, mediaMute{}, mediaFsBtn{};   /* 媒体卡 (画面/进度/播放/静音/全屏钮) */
+    XjsRect mediaFsVideo{}, mediaFsPlay{}, mediaFsSeek{}, mediaFsMute{}, mediaFsExit{};   /* 媒体全屏层 (mediaFull 时有效) */
     bool valid = false;
 };
 
@@ -1171,6 +1172,7 @@ public:
     XjsMediaCtx* media = NULL;
     float mediaVol = 1.0f;                  /* 预览音量 0..1 (档案 "预览音量" %) */
     bool mediaMute = false;                 /* 预览静音 (档案 "预览静音") */
+    bool mediaFull = false;                 /* 媒体全屏层 (整窗模态: 大画面+控制条; 停播/换选中/藏面板即收) */
 
     /* 插件预览接管 (preview 能力, P2; 实现收口 xjs_preview.cpp "插件预览接管"节)。
        会话状态必须住窗口类 (可维护性红线 — 曾为文件级 static: 双窗口各自预览互相
@@ -1810,6 +1812,15 @@ bool XjsLightboxJustClosedAt(POINT pt);           // 刚被点击关闭且 pt �
 void XjsLightboxMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);   // 模态总闸输入消费 (LDOWN/Esc 关, 其余吞)
 void XjsLightboxRender(XjsRt* rt, float w, float h);   // 钟罩+大图 (WM_PAINT 状态栏之后画)
 
+/* 媒体全屏层 (视频/音频的整窗模态, 灯箱同模式): 大画面+底部控制条, 双击画面/全屏钮进出,
+   Esc/点空白/退出钮收层; 实现 xjs_preview.cpp */
+bool XjsMediaFullActive();                        // 全屏层开启中
+void XjsMediaFullClose();                         // 收层 (失效自绘)
+void XjsMediaFullMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);   // 模态总闸输入消费 (灯箱同口径)
+void XjsMediaFullRender(XjsRt* rt, float w, float h);   // 钟罩+大画面+控制条 (WM_PAINT 灯箱之后画)
+bool XjsPreviewMediaVideoHit(POINT pt);           // pt 落在面板媒体画面上 (双击=全屏切换判定)
+void XjsPreviewMediaToggleFull();                 // 全屏切换 (面板全屏钮/画面双击共用)
+
 /* ---- xjs_popup (自绘输入对话框; 自绘菜单接口见上方模块接口区) ---- */
 std::wstring XjsGenerateWindowName();   /* 新窗口默认名称 = GUID (CoCreateGuid, 36 连字符格式) */
 void XjsShowInputDialog(HWND owner, const wchar_t* title, const wchar_t* desc, const std::wstring& initial,
@@ -1985,6 +1996,7 @@ void XjsMediaFree(XjsMediaCtx* c);                /* 窗口析构: 引擎 Shutdo
 void XjsMediaGlobalShutdown();                    /* 主窗销毁收尾: MFShutdown 配对 MFStartup */
 XjsBitmap* XjsMediaFrameBitmap(XjsMediaCtx* c);   /* 当前视频帧位图 (无帧/未就绪 = NULL) */
 bool   XjsMediaHasVideo(XjsMediaCtx* c);
+bool   XjsMediaActive(XjsMediaCtx* c);                /* 会话装载着文件 (装载中/播放中/暂停/失败) */
 bool   XjsMediaIsTarget(XjsMediaCtx* c, int fileId);   /* 会话是否装载着该文件 (绘制/滚轮路由判定) */
 void   XjsMediaSetFrameTarget(XjsMediaCtx* c, int w, int h);   /* 绘制端回写画面矩形 (泵取帧目标尺寸) */
 int    XjsMediaVidW(XjsMediaCtx* c);              /* 原生视频宽高 (元数据就绪前 0) */

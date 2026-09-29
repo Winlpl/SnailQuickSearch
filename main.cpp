@@ -666,6 +666,27 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 default: break;
             }
         }
+        /* ===== 媒体全屏层总闸 (灯箱同口径): 大画面+控制条整窗模态 — 输入全吞,
+           Esc/点空白/退出钮收层, 画面双击切换, 滚轮调音量 (XjsMediaFullMsg) ===== */
+        if (XjsMediaFullActive()) {
+            if (msg == WM_SETCURSOR) {
+                if (LOWORD(lParam) == HTCLIENT) SetCursor(LoadCursorW(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            switch (msg) {
+                case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+                case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+                case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+                case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_MOUSELEAVE: case WM_CONTEXTMENU:
+                case WM_SYSCOMMAND:
+                case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP:
+                case WM_CHAR: case WM_UNICHAR: case WM_IME_CHAR: case WM_IME_STARTCOMPOSITION:
+                case WM_IME_COMPOSITION: case WM_IME_NOTIFY:
+                    XjsMediaFullMsg(hwnd, msg, wParam, lParam);
+                    return 0;
+                default: break;
+            }
+        }
         if (XjsModeDlgActive()) {
             if (msg == WM_SETCURSOR) {
                 if (LOWORD(lParam) == HTCLIENT) {
@@ -812,6 +833,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (L.preview.bottom > L.preview.top && bandHit(L.preview.top, L.preview.bottom)) XjsPreviewRender();
                 if (bandHit(L.statusbar.top, L.statusbar.bottom)) XjsRenderStatusbar();
                 XjsLightboxRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 图片放大层: 钟罩+大图 (输入由上方总闸接管) */
+                XjsMediaFullRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 媒体全屏层: 钟罩+大画面+控制条 (最顶) */
                 g_rt->PopAxisAlignedClip();
                 if (backdrop) XjsBackdropEndBlur(g_rt, cr);   /* 虚化底整面盖住 + 暗罩 */
                 XjsModeDlgRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 模态对话框 (遮罩置顶) */
@@ -1038,6 +1060,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_LBUTTONDBLCLK: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             if (XjsLightboxJustClosedAt(pt)) return 0;   /* 灯箱刚被本次连击的首击按下关闭: 第二击吞掉 (防穿透误开文件) */
+            /* 媒体画面双击 = 全屏切换 (首击已切换过播放, 此处只翻全屏; 面板接管时归插件) */
+            if (XjsPreviewMediaVideoHit(pt)) { XjsPreviewMediaToggleFull(); return 0; }
             if (pt.y < XSF(40) && XjsPtIn(g_layout.searchBox, pt)) { XjsSearchDoubleClick(pt); return 0; }
             /* 面板接管: 内容区双击归插件 (不能落到列表的"双击打开文件") */
             if (XjsPreviewPanelWantsPt(pt)) { XjsPreviewPanelMouse(XJS_HPANEL_DBLCLK, pt); return 0; }

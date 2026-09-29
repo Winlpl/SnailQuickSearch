@@ -254,8 +254,10 @@ static void MediaUnload(XjsMediaCtx* c) {
     if (c->hwnd) KillTimer(c->hwnd, ID_TIMER_MEDIA);
 }
 
-/* 只失效预览区 (同图片装载/插件交付口径; 布局为空 = 整窗兜底) */
+/* 只失效预览区 (同图片装载/插件交付口径; 布局为空 = 整窗兜底)。
+   全屏层例外: 它铺满整窗 (控制条伸进状态栏带), 局部矩形会漏刷 → 整窗失效 */
 static void MediaInvalidate(XjsSearchWindow* w) {
+    if (w->mediaFull) { w->Invalidate(); return; }
     if (w->hWnd) {
         XjsRect b = w->layout.preview;
         RECT r = { (int)b.left, (int)b.top, (int)b.right, (int)b.bottom };
@@ -549,8 +551,9 @@ void XjsSearchWindow::MediaSeekFrac(double frac) {
 }
 
 void XjsSearchWindow::MediaStop() {
-    if (!media) return;
+    if (!media) { mediaFull = false; return; }
     MediaUnload(media);
+    mediaFull = false;   /* 全屏层随停播收起 (绘制/输入入口按本字段短路) */
     media->invState = -1;
     MediaInvalidate(this);
 }
@@ -594,6 +597,7 @@ XjsBitmap* XjsMediaFrameBitmap(XjsMediaCtx* c) {
 }
 
 bool XjsMediaHasVideo(XjsMediaCtx* c) { return c && c->hasVideo; }
+bool XjsMediaActive(XjsMediaCtx* c) { return c && c->fileId >= 0; }   /* 会话装载着文件 (含装载中) */
 bool XjsMediaIsTarget(XjsMediaCtx* c, int fileId) { return c && c->fileId == fileId; }   /* 会话是否装载着该文件 */
 void XjsMediaSetFrameTarget(XjsMediaCtx* c, int w, int h) {   /* 绘制端回写画面矩形 (UI 泵取帧目标尺寸) */
     if (!c) return;
