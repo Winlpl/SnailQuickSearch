@@ -39,6 +39,24 @@ if not exist "..\..\webview2\x64\WebView2Loader.dll" (
     exit /b 1
 )
 
+:: Chart library for the AI frontend (mermaid v11 IIFE bundle, vendored next to the
+:: sources). The embedded page loads it through a WebView2 virtual-host mapping to
+:: the deployed plugin folder; missing file = chart blocks fall back to source view.
+if not exist "mermaid.min.js" (
+    echo ERROR: mermaid.min.js not found next to the plugin sources.
+    pause
+    exit /b 1
+)
+
+:: Math rendering for the AI frontend (KaTeX IIFE + css + woff2 fonts, vendored in
+:: .\katex). Loaded through the same virtual-host mapping as mermaid; missing folder
+:: = math falls back to plain source text.
+if not exist "katex\katex.min.js" (
+    echo ERROR: katex\katex.min.js not found next to the plugin sources.
+    pause
+    exit /b 1
+)
+
 :: UI = embedded WebView2 frontend (system Edge runtime renders; no GDI+ bitmap
 :: pipeline anymore). md4c is compiled straight in (markdown -> HTML for bubbles).
 :: WinToast is compiled straight in too (system toast notifications, no PowerShell).
@@ -92,6 +110,8 @@ if errorlevel 1 (
     exit /b 1
 )
 copy /y manifest.json "..\..\plugins\ai-assistant\manifest.json" >nul
+copy /y mermaid.min.js "..\..\plugins\ai-assistant\mermaid.min.js" >nul
+xcopy /e /i /y katex "..\..\plugins\ai-assistant\katex" >nul
 copy /y "..\..\webview2\x64\WebView2Loader.dll" "..\..\plugins\ai-assistant\WebView2Loader.dll" >nul
 if errorlevel 1 (
     echo ERROR: deploy failed - WebView2Loader.dll is locked.

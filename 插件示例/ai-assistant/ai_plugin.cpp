@@ -17,7 +17,7 @@ unsigned             g_uiThread = 0;
 static const XjsPluginInfo* XJS_PLUGIN_CALL XjsPlugin_GetInfo(void) {
     /* 版本与 manifest "版本" 同步维护: 宿主当前只消费 abiVersion/id, 但任何未来按
        GetInfo 版本显示/比对的改动拿到陈旧假版本都是维护陷阱 */
-    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "2.13.1" };
+    static const XjsPluginInfo info = { XJS_PLUGIN_ABI_VERSION, sizeof(XjsPluginInfo), "ai-assistant", "2.15.0" };
     return &info;
 }
 

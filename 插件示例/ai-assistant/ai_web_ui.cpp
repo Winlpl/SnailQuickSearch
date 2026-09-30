@@ -29,7 +29,7 @@ const wchar_t* AiWebUiHtml() {
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+      content="default-src 'none'; script-src 'unsafe-inline' https://aiassets.snailqs.local; style-src 'unsafe-inline' https://aiassets.snailqs.local; img-src data:; font-src https://aiassets.snailqs.local; connect-src 'none'; form-action 'none'; base-uri 'none'">
 <title>AI 助手</title>
 <style>
 /* ============================================================
@@ -326,6 +326,59 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-bubble .ai-code pre{margin:0;padding:8px 10px;overflow-x:auto}
 .ai-bubble .ai-code pre code{padding:0;background:transparent;color:var(--text-primary);font-size:11.5px;line-height:1.6;white-space:pre}
 )AIWEBUI"
+           LR"AIWEBUI(/* ---- mermaid 图表卡 (```mermaid 围栏; 源码态=代码块样式, 出图后源码隐藏) ---- */
+.ai-bubble .ai-code pre.ai-mermaid-src{white-space:pre;color:var(--text-secondary)}
+.ai-mermaid[data-done] pre.ai-mermaid-src{display:none}
+.ai-mermaid-out{overflow-x:auto}
+.ai-mermaid-out:not(:empty){padding:10px 12px}
+/* mermaid 给 svg 写内联 max-width (原图像素宽, 可能超过卡宽) — 必须 !important 压成随容器缩放 */
+.ai-mermaid-out svg{max-width:100% !important;height:auto;display:block;margin:0 auto}
+.ai-mermaid-err{margin:0;padding:5px 10px;font-size:11.5px;line-height:1.5;color:var(--accent-amber)}
+/* ---- mermaid 图表灯箱 (点击图表整面板放大: 滚轮缩放/按住拖动/原地点击·Esc·✕ 收) ---- */
+.ai-mm-lb{position:fixed;inset:0;z-index:15000;background:color-mix(in srgb,var(--bg) 88%,transparent);
+          user-select:none;-webkit-user-select:none}
+.ai-mm-lb .mm-vp{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none}
+.ai-mm-lb .mm-vp:active{cursor:grabbing}
+.ai-mm-lb .mm-holder{position:absolute;left:0;top:0;transform-origin:0 0;
+                     filter:drop-shadow(0 12px 40px rgba(0,0,0,.45))}
+.ai-mm-lb .mm-holder svg{display:block;background:var(--surface-raised);
+                         border:1px solid var(--glass-border);border-radius:8px}
+.ai-mm-lb .mm-x{position:absolute;top:10px;right:12px;width:30px;height:30px;border-radius:8px;
+                border:1px solid var(--glass-border);background:var(--surface-raised);
+                color:var(--text-secondary);font-size:14px;cursor:pointer}
+.ai-mm-lb .mm-x:hover{color:var(--text-primary);border-color:var(--overlay-border)}
+.ai-mm-lb .mm-hint{position:absolute;bottom:12px;left:0;right:0;text-align:center;
+                   font-size:11px;color:var(--text-tertiary);pointer-events:none}
+/* 卡内图表 = 点击放大的入口 (不可拖选; 放大交互在灯箱里) */
+.ai-mermaid-out{cursor:zoom-in;user-select:none;-webkit-user-select:none}
+/* ---- GitHub 提示块 ([!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]) ---- */
+.ai-gq{border-left:3px solid var(--accent-violet);border-radius:0 6px 6px 0;padding:6px 10px;margin:6px 0;
+       background:color-mix(in srgb,var(--accent-violet) 10%,transparent)}
+.ai-gq.gq-note{border-color:var(--accent-cyan);background:color-mix(in srgb,var(--accent-cyan) 10%,transparent)}
+.ai-gq.gq-tip{border-color:var(--accent-emerald);background:color-mix(in srgb,var(--accent-emerald) 10%,transparent)}
+.ai-gq.gq-important{border-color:var(--accent-violet);background:color-mix(in srgb,var(--accent-violet) 10%,transparent)}
+.ai-gq.gq-warning{border-color:var(--accent-amber);background:color-mix(in srgb,var(--accent-amber) 10%,transparent)}
+.ai-gq.gq-danger{border-color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 10%,transparent)}
+/* ---- 中文强调框 (注意/提示/重要/警告/危险 粗体开头段落) ---- */
+.ai-cnote{border-left:3px solid var(--accent-cyan);border-radius:6px;padding:6px 10px;margin:7px 0;
+          background:color-mix(in srgb,var(--accent-cyan) 9%,transparent)}
+.ai-cnote.cn-tip{border-color:var(--accent-emerald);background:color-mix(in srgb,var(--accent-emerald) 9%,transparent)}
+.ai-cnote.cn-important{border-color:var(--accent-violet);background:color-mix(in srgb,var(--accent-violet) 9%,transparent)}
+.ai-cnote.cn-warning{border-color:var(--accent-amber);background:color-mix(in srgb,var(--accent-amber) 9%,transparent)}
+.ai-cnote.cn-danger{border-color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 9%,transparent)}
+/* ---- 折叠卡 (<details> 归一化; 默认收起, open 变体默认展开) ---- */
+.ai-fold{margin:7px 0;border:1px solid var(--glass-border);border-radius:6px;overflow:hidden;background:var(--bg)}
+.ai-fold-head{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border:0;
+              background:var(--btn-secondary-hover);color:var(--text-primary);font-size:12.5px;
+              font-family:inherit;text-align:left;cursor:pointer}
+.ai-fold-head:hover{background:color-mix(in srgb,var(--btn-secondary-hover) 60%,var(--overlay-border))}
+.ai-fold-arrow{display:inline-block;transition:transform 120ms ease;color:var(--text-tertiary);font-size:10px}
+.ai-fold.open>.ai-fold-head .ai-fold-arrow{transform:rotate(90deg)}
+.ai-fold-body{display:none;padding:2px 10px 6px}
+.ai-fold.open>.ai-fold-body{display:block}
+/* ---- 数学公式 (KaTeX 渲染目标; 库未就绪时按源码文本显示, 块级居中可横滚) ---- */
+.ai-math-disp{display:block;text-align:center;margin:8px 0;overflow-x:auto;padding:4px 0}
+)AIWEBUI"
            LR"AIWEBUI(/* ---- 可点击交互: 搜索卡片 (xjs-search 围栏渲染) ---- */
 .ai-chip{display:flex;align-items:center;gap:8px;width:fit-content;max-width:100%;margin:7px 0;
          padding:7px 11px;border:1px solid color-mix(in srgb,var(--accent-violet) 40%,var(--glass-border));
@@ -558,6 +611,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-empty-icon{font-size:32px;color:var(--accent-violet);opacity:.62}
 .ai-empty-title{font-size:14px;color:var(--text-primary)}
 .ai-empty-desc{max-width:460px;font-size:12px;line-height:1.75;color:var(--text-secondary)}
+.ai-empty-feat{max-width:520px;font-size:11.5px;line-height:1.8;color:var(--text-tertiary);margin-top:-4px}
 .ai-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:6px}
 .ai-suggestion{padding:6px 11px;border:1px solid var(--glass-border);border-radius:999px;background:var(--surface-raised);
                color:var(--text-secondary);font:inherit;font-size:12px;cursor:default;
@@ -1003,6 +1057,10 @@ body[data-dragover="true"] .ai-composer-box{border-color:var(--accent-violet);
   <!-- 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 恒在 DOM, 显隐走 .visible, pointer-events:none 不挡点击) -->
   <div class="ai-toast" id="toast" role="status" aria-live="polite"></div>
 </div>
+<!-- 图表库 mermaid + 数学渲染 KaTeX: 本地文件经 C++ 虚拟主机映射载入 (缺文件/旧运行时加载失败 = 各自降级为源码/纯文本) -->
+<script defer src="https://aiassets.snailqs.local/mermaid.min.js"></script>
+<link rel="stylesheet" href="https://aiassets.snailqs.local/katex/katex.min.css"/>
+<script defer src="https://aiassets.snailqs.local/katex/katex.min.js"></script>
 <script>
 'use strict';
 /* ==================== 工具 ==================== */
@@ -1032,6 +1090,7 @@ function histTime(t){if(!t)return '';const d=new Date(t*1000),now=new Date();
  * 点击 = 填入输入框不发送, 用户确认/修改后自己发 */
 const SUGGS=[
   '现在哪些大文件占用空间最多','找出一周内修改过的文档并列个清单','看看当前的文件分类和重复文件',
+  '统计每种扩展名的文件数量,画成饼图','找出最大的 5 个文件,用柱状图对比大小',
   '哪些文件夹占用的空间最大','统计一下各个磁盘分区的空间占用',
   '列出最近三天新建的文件',
   '看看我今天做了什么->请告诉我，我今天具体做了哪些事情？请列出详细清单。','这周我都做了什么->请总结我本周的文件活动：新建、修改、下载了哪些文件，按天列出清单。',
@@ -1078,6 +1137,7 @@ const EMPTY_HTML='<div class="ai-empty" id="empty">'
   +'<span class="ai-empty-icon glyph" aria-hidden="true">&#xE99A;</span>'
   +'<span class="ai-empty-title">用对话来查找和整理文件</span>'
   +'<span class="ai-empty-desc">我可以读取索引库的全部实时数据（文件名、路径、大小、时间、分类），直接执行搜索并打开文件；每一步工具调用都会以卡片展示。</span>'
+  +'<span class="ai-empty-feat">回答支持：📊 mermaid 图表（17 种 · 点击放大）&nbsp;📐 数学公式&nbsp;🎨 提示块&nbsp;📂 折叠块&nbsp;💻 代码高亮&nbsp;✅ emoji</span>'
   +'<div class="ai-suggestions" id="suggBox">'+suggsHtml()+'</div>'
   +'<button class="ai-sugg-refresh" id="suggRefresh" type="button"><span class="glyph" aria-hidden="true">&#xE72C;</span>换一批</button>'
   +'<span class="ai-donate-row">'
@@ -1143,6 +1203,7 @@ function applyPal(p){
   set('glass-border',p.border); set('overlay-border',p.borderStrong);
   set('divider',p.divider); set('btn-secondary-hover',p.hover);
   set('ai-user-accent',p.userAcc);
+  mermaidRetheme();   /* 已出图的卡片按新调色重出 (mermaid 主题色取自 CSS 变量) */
 }
 
 /* ==================== 状态点 ==================== */
@@ -1879,17 +1940,49 @@ function hlApply(code,src,lang){
   }
   code.innerHTML=html;
 }
+)AIWEBUI"
+           LR"AIWEBUI(/* 通用高亮 (python/js/bash/json/c): 关键字+字符串+注释+数字 近似着色, 不做完整 tokenizer */
+const PY_KW=new Set('False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case'.split(' '));
+const JS_KW=new Set('async await break case catch class const continue debugger default delete do else enum export extends false finally for from function if implements import in instanceof interface let new null of private protected public readonly return static super switch this throw true try typeof undefined var void while with yield'.split(' '));
+const SH_KW=new Set('if then else elif fi for while until do done case esac function in select break continue return exit local export readonly declare unset shift eval trap echo cd ls pwd grep sed awk cat chmod chown cp mv rm mkdir rmdir touch find tar zip unzip curl wget sudo apt yum dnf systemctl service kill ps top df du head tail sort uniq wc xargs tee which whoami git npm node python pip'.split(' '));
+const C_KW=new Set('alignas alignof auto bool break case catch char class const constexpr continue decltype default delete do double dynamic_cast else enum explicit extern false float for friend goto if inline int long mutable namespace new noexcept nullptr operator private protected public register return short signed sizeof static static_cast struct switch template this throw true try typedef typeid typename union unsigned using virtual void volatile while include define ifndef endif pragma'.split(' '));
+function hlGeneric(code,src,lang){
+  const kw=lang==='python'?PY_KW:lang==='bash'?SH_KW:lang==='c'?C_KW:JS_KW;
+  /* 统一 tokenizer: 注释 (# 与 // /*) | 字符串 | 数字 | 标识符 | 空白 | 兜底单字符 */
+  const re=/((?:#|\/\/)[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|(\d+(?:\.\d+)?)|([A-Za-z_@#][\w]*)|(\s+)|([\s\S])/g;
+  let html='',m;
+  while((m=re.exec(src))){
+    if(m[1])html+='<span class="tok-c">'+esc(m[1])+'</span>';
+    else if(m[2])html+='<span class="tok-s">'+esc(m[2])+'</span>';
+    else if(m[3])html+='<span class="tok-n">'+esc(m[3])+'</span>';
+    else if(m[4]){
+      const w=m[4];
+      if(kw.has(w)||kw.has(w.toLowerCase()))html+='<span class="tok-k">'+esc(w)+'</span>';
+      else{let k=re.lastIndex;while(k<src.length&&(src[k]===' '||src[k]==='\t'))k++;
+        html+=(src[k]==='(')?'<span class="tok-f">'+esc(w)+'</span>':esc(w);}
+    }
+    else html+=esc(m[5]||m[6]||'');
+  }
+  code.innerHTML=html;
+}
 function highlightCode(root){
   (root||$('threadInner')).querySelectorAll('.ai-code').forEach(box=>{
     const langEl=box.querySelector('.ai-code-lang');
     if(!langEl)return;
     const lang=langEl.textContent.trim().toLowerCase();
-    if(lang!=='lua'&&lang!=='luau'&&lang!=='sql')return;
+    /* 通用高亮语言集 (python/js/bash/json/c; 关键字+字符串+注释+数字 近似着色) */
+    const GENERIC={python:1,py:1,javascript:1,js:1,typescript:1,ts:1,bash:1,sh:1,shell:1,zsh:1,
+                   json:1,c:1,cpp:1,'c++':1,java:1};
+    if(lang!=='lua'&&lang!=='luau'&&lang!=='sql'&&!GENERIC[lang])return;
     const code=box.querySelector('pre code');
     /* data-code 是 C++ HtmlEscape 后的属性: 浏览器解析时已解码一次, getAttribute 拿到的
        即原文 — 再过 decodeHtml 会把代码里字面的 &lt; 之类实体样文本二次解码成标签字符 */
     const raw=box.getAttribute('data-code')||'';
-    if(code&&raw)hlApply(code,raw,lang==='sql'?'sql':'lua');
+    if(!code||!raw)return;
+    if(lang==='lua'||lang==='luau')hlApply(code,raw,'lua');
+    else if(lang==='sql')hlApply(code,raw,'sql');
+    else hlGeneric(code,raw,lang==='py'?'python':(lang==='js'||lang==='ts')?'javascript':
+      (lang==='sh'||lang==='shell'||lang==='zsh')?'bash':(lang==='cpp'||lang==='c++'||lang==='java')?'c':lang);
   });
 }
 )AIWEBUI"
@@ -1960,10 +2053,263 @@ function linkifyPaths(root){
     }
   });
 }
+/* ==================== mermaid 图表 (```mermaid 围栏 → C++ 出 .ai-mermaid 卡) ====================
+ * 库 = 插件目录 mermaid.min.js (v11 IIFE), 经 WebView2 虚拟主机映射同源载入 (C++ 控制器创建时
+ * SetVirtualHostNameToFolderMapping); 缺文件/旧运行时 = window.mermaid 为空, 图表块恒为源码卡。
+ * 流式期间不出图 (每帧重建 DOM, mermaid 渲染太贵), 回合收尾/历史装载的整帧重渲统一出图;
+ * 换肤 (pal) 重置已出图卡片按新调色重出。渲染失败 = 错误行 + 保留源码 (内容不丢)。 */
+let mmSeq=0;
+function mmThemeVars(){
+  const cs=getComputedStyle(document.documentElement),v=k=>String(cs.getPropertyValue('--'+k)||'').trim()||'#8888aa';
+  return {background:'transparent',fontFamily:'Segoe UI, Microsoft YaHei UI, sans-serif',fontSize:'13px',
+    primaryColor:v('accent-violet'),primaryTextColor:v('text-primary'),primaryBorderColor:v('accent-violet'),
+    secondaryColor:v('surface-raised'),tertiaryColor:v('surface-raised'),mainBkg:v('surface-raised'),
+    nodeBorder:v('accent-violet'),lineColor:v('text-secondary'),textColor:v('text-primary'),
+    titleColor:v('text-primary'),edgeLabelBackground:v('surface-raised'),clusterBkg:v('surface-raised'),
+    clusterBorder:v('glass-border'),actorBkg:v('surface-raised'),actorBorder:v('accent-violet'),
+    actorTextColor:v('text-primary'),signalTextColor:v('text-primary'),labelBoxBkgColor:v('surface-raised'),
+    labelBoxBorderColor:v('glass-border'),noteBkgColor:v('accent-amber'),noteTextColor:v('text-primary'),
+    noteBorderColor:v('accent-amber'),
+    /* pie 系列扇区色: 不接皮肤色时第 2+ 扇区默认近黑, 暗色皮肤下整图糊底 (实测实锤) */
+    pie1:v('accent-violet'),pie2:v('accent-cyan'),pie3:v('accent-emerald'),pie4:v('accent-amber'),
+    pie5:v('accent-pink'),pie6:v('text-tertiary'),pieOpacity:1,
+    pieLegendTextColor:v('text-primary'),pieTitleTextColor:v('text-primary'),pieSectionTextColor:v('text-primary')};
+}
+function mmInit(){
+  if(!window.mermaid)return false;
+  try{window.mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',logLevel:'fatal',
+    themeVariables:mmThemeVars()});}catch(e){return false;}
+  return true;
+}
+)AIWEBUI"
+           LR"AIWEBUI()AIWEBUI"
+           LR"AIWEBUI(/* ---- 数学公式: md4c LaTeX 开关输出的 .ai-math 喂 KaTeX (库缺 = 按源码文本显示) ---- */
+function renderMath(scope){
+  const root=(scope&&scope.querySelectorAll)?scope:document;
+  const els=root.querySelectorAll('.ai-math:not([data-kx])');
+  if(!els.length||!window.katex)return;
+  els.forEach(function(el){
+    el.setAttribute('data-kx','1');
+    try{
+      window.katex.render(el.textContent,el,{throwOnError:false,
+        displayMode:el.classList.contains('ai-math-disp')});
+    }catch(e){el.removeAttribute('data-kx');}
+  });
+}
+/* ---- emoji 短代码 :white_check_mark: → 真 emoji (代码块/链接/按钮内不动) ---- */
+const EMOJI={white_check_mark:'✅',heavy_check_mark:'✔️',check:'✓',x:'❌',negative_squared_cross_mark:'❎',
+ warning:'⚠️',rocket:'🚀',sparkles:'✨',fire:'🔥',bulb:'💡',memo:'📝',clipboard:'📋',pushpin:'📌',
+ lock:'🔒',unlock:'🔓',key:'🔑',key2:'🗝️',gear:'⚙️',hammer:'🔧',wrench:'🛠️',mag:'🔍',mag_right:'🔎',
+ file_folder:'📁',open_file_folder:'📂',card_index:'🗂️',page_facing_up:'📄',date:'📅',hourglass:'⌛',
+ alarm_clock:'⏰',bar_chart:'📊',chart:'📊',chart_with_upwards_trend:'📈',chart_with_downwards_trend:'📉',
+ clock:'🕐',floppy_disk:'💾',computer:'💻',house:'🏠',office:'🏢',question:'❓',exclamation:'❗',
+ star:'⭐',zap:'⚡',wastebasket:'🗑️',package:'📦',inbox_tray:'📥',outbox_tray:'📤',link:'🔗',
+ paperclip:'📎',bookmark:'🔖',pencil:'✏️',book:'📖',books:'📚',blue_book:'📘',camera:'📷',
+ iphone:'📱',battery:'🔋',point_right:'👉',point_down:'👇',thumbsup:'👍',thumbsdown:'👎',
+ ok_hand:'👌',pray:'🙏',eyes:'👀',brain:'🧠',dart:'🎯',trophy:'🏆',medal:'🏅',
+ one:'1️⃣',two:'2️⃣',three:'3️⃣',four:'4️⃣',five:'5️⃣',six:'6️⃣',seven:'7️⃣',eight:'8️⃣',nine:'9️⃣'};
+const EMOJI_RE=/:([a-z0-9_]{2,24}):/g;
+function applyEmoji(scope){
+  const root=scope||$('threadInner');
+  if(!root)return;
+  /* createTreeWalker 挂在 document 上 (Element 没有), root 可以是任意节点 */
+  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
+    acceptNode:function(n){
+      if(!n.nodeValue||n.nodeValue.length<5||n.nodeValue.indexOf(':')<0)return NodeFilter.FILTER_REJECT;
+      const p=n.parentElement;
+      if(!p||p.closest('.ai-code,a,.ai-path,button,textarea,select,script,style,.ai-chip,.scmd,pre'))return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }});
+  const nodes=[];let n;
+  while((n=walker.nextNode()))nodes.push(n);
+  nodes.forEach(function(node){
+    const v=node.nodeValue;
+    EMOJI_RE.lastIndex=0;
+    if(!EMOJI_RE.test(v))return;
+    let html='',last=0,m;
+    EMOJI_RE.lastIndex=0;
+    while((m=EMOJI_RE.exec(v))){
+      const e=EMOJI[m[1]];
+      if(!e)continue;
+      html+=esc(v.slice(last,m.index))+e;
+      last=m.index+m[0].length;
+    }
+    if(!last)return;
+    html+=esc(v.slice(last));
+    const sp=document.createElement('span');
+    sp.innerHTML=html;
+    node.parentNode.replaceChild(sp,node);
+  });
+}
+function mmSanitize(src){
+  /* 模型高频把 引号/圆括号 裸写进 flowchart 节点标签 — 未加引号的标签一遇这些字符
+     解析必炸 (Parse error ... Expecting 'SQE' 实锤)。官方转义口径 = 标签整体包双引号,
+     内部双引号写 #quot; 实体。只对 flowchart/graph 保守修复: 已引号包裹的标签不动,
+     仅在标签内真含危险字符时才包; 裸圆括号形态 (B(文字)) 不碰 — 与边文本里的普通
+     括号无法可靠区分, 包错反而毁掉本来合法的图; 其余图型原样过 (失败仍走源码回退)。 */
+  if(!/^\s*(flowchart|graph)\b/im.test(src)){
+    /* timeline: 时段/事件文字里的冒号是分隔符, 行首裸时间 (07:18 : x) 解析必炸
+       (Expecting EOF/SPACE/NEWLINE/title 实锤) — 行首 HH:MM 改写为 07时18分 */
+    if(/^\s*timeline\b/im.test(src)){
+      src=src.split('\n').map(function(line){
+        return line.replace(/^(\s*)(\d{1,2}):(\d{2})(?=\s*:)/,'$1$2时$3分');
+      }).join('\n');
+    }
+    return src;
+  }
+  const W=/[A-Za-z0-9_\u00C0-\uFFFF]/;
+  return src.split('\n').map(function(line){
+    if(/^\s*(%%|flowchart\b|graph\b|subgraph\b|direction\b|end\s*$)/i.test(line))return line;
+    let out='',i=0;
+    while(i<line.length){
+      const ch=line[i];
+      let ls=i+1,closeSeq=null;
+      if(ch==='[')closeSeq=']';
+      else if(ch==='{')closeSeq='}';
+      else if(ch==='('&&line[i+1]==='('&&W.test(line[i-1]||' '))closeSeq='))';
+      if(!closeSeq||((ch==='('||ch==='{')&&!W.test(line[i-1]||' '))){out+=ch;i++;continue;}
+      let ce=-1,cl=1;
+      if(ch==='['&&line[i+1]==='('){
+        ls=i+2;
+        const j=line.indexOf(')]',ls);
+        if(j>=0){ce=j;cl=2;}
+      }else if(closeSeq===']'||closeSeq==='}'||closeSeq===')'){
+        let d=1,j=ls;
+        for(;j<line.length;j++){const c2=line[j];
+          if(c2===ch)d++;
+          else if(c2===closeSeq){d--;if(!d)break;}}
+        if(j<line.length){ce=j;cl=1;}
+      }else{
+        const j=line.indexOf(closeSeq,ls);
+        if(j>=0){ce=j;cl=2;}
+      }
+      if(ce<0){out+=ch;i++;continue;}   /* 未闭合: 原样放过 */
+      const inner=line.slice(ls,ce);
+      if(inner.length>=2&&inner.charAt(0)==='"'&&inner.charAt(inner.length-1)==='"'){
+        out+=line.slice(i,ce+cl);i=ce+cl;continue;   /* 已引号包裹: 原样 */
+      }
+      const danger=/["]/.test(inner)||
+        (ch==='['&&/[(){}]/.test(inner))||
+        (ch==='{'&&/[()\[\]]/.test(inner))||
+        (ch==='('&&/["()\[\]{}]/.test(inner));
+      if(danger){
+        out+=line.slice(i,ls)+'"'+inner.replace(/"/g,'#quot;')+'"'+line.slice(ce,ce+cl);
+        i=ce+cl;continue;
+      }
+      out+=line.slice(i,ce+cl);i=ce+cl;
+    }
+    return out;
+  }).join('\n');
+}
+function renderMermaid(scope){
+  const root=(scope&&scope.querySelectorAll)?scope:document;
+  const els=root.querySelectorAll('.ai-mermaid:not([data-mm])');
+  if(!els.length||!window.mermaid||S.sending)return;   /* 流式中保持源码卡; 库未就绪同 */
+  if(!mmInit())return;
+  els.forEach(function(card){
+    card.setAttribute('data-mm','1');
+    const src=card.querySelector('.ai-mermaid-src'),out=card.querySelector('.ai-mermaid-out');
+    if(!src||!out)return;
+    const id='mmd'+(++mmSeq);
+    try{
+      window.mermaid.render(id,mmSanitize(src.textContent)).then(function(r){
+        out.innerHTML=r.svg;card.setAttribute('data-done','1');
+      }).catch(function(e){
+        out.innerHTML='<div class="ai-mermaid-err">'+esc('图表渲染失败 (语法有误), 已保留源码: '+
+          String((e&&e.message)||e).slice(0,160))+'</div>';
+      });
+    }catch(e){out.innerHTML='<div class="ai-mermaid-err">图表渲染失败</div>';}
+  });
+}
+function mermaidRetheme(){
+  mmLbClose();   /* 灯箱里的克隆图引用卡片内 defs, 重渲后悬空 — 直接收掉最稳 */
+  if(!window.mermaid)return;
+  const done=document.querySelectorAll('.ai-mermaid[data-done]');
+  if(!done.length)return;
+  done.forEach(function(card){
+    card.removeAttribute('data-done');card.removeAttribute('data-mm');
+    const out=card.querySelector('.ai-mermaid-out');
+    if(out)out.innerHTML='';
+  });
+  renderMermaid(document);
+}
+)AIWEBUI"
+           LR"AIWEBUI(/* ---- 图表灯箱 (宿主预览灯箱同口径): 点击已出图的图表 → 整面板放大看 — 滚轮缩放
+   (5%~800%, 缩放中心跟光标), 按住拖动平移 (指针捕获, 拖出窗不丢), 原地点击/Esc/✕ 收,
+   拖动结束不算点击。克隆卡片里已渲好的 SVG (矢量, 任意缩放不糊); 换肤重渲时直接收灯箱
+   (克隆图引用卡片内 defs, 悬空会掉箭头)。 ---- */
+let mmLbState=null;
+function mmLbApply(){
+  const st=mmLbState;if(!st)return;
+  st.holder.style.transform='translate('+st.tx+'px,'+st.ty+'px) scale('+st.scale+')';
+}
+function mmLbClose(){
+  const lb=document.getElementById('mmLb');
+  if(lb)lb.remove();
+  mmLbState=null;
+}
+function mmLbOpen(svg){
+  mmLbClose();
+  const bb=svg.getBoundingClientRect();
+  if(!bb.width||!bb.height)return;
+  const lb=document.createElement('div');lb.className='ai-mm-lb';lb.id='mmLb';
+  const vp=document.createElement('div');vp.className='mm-vp';
+  const holder=document.createElement('div');holder.className='mm-holder';
+  const clone=svg.cloneNode(true);
+  clone.style.maxWidth='none';clone.style.width='100%';clone.style.height='100%';
+  holder.style.width=bb.width+'px';holder.style.height=bb.height+'px';
+  holder.appendChild(clone);vp.appendChild(holder);
+  const x=document.createElement('button');x.className='mm-x';x.setAttribute('type','button');
+  x.textContent='✕';x.title='关闭';
+  const hint=document.createElement('div');hint.className='mm-hint';
+  hint.textContent='滚轮缩放 · 按住拖动 · 点击空白或 Esc 关闭';
+  lb.appendChild(vp);lb.appendChild(x);lb.appendChild(hint);
+  document.body.appendChild(lb);
+  const vw=innerWidth,vh=innerHeight;
+  const fit=Math.min(1,(vw*0.88)/bb.width,(vh*0.88)/bb.height);
+  mmLbState={holder:holder,fit:fit,scale:fit,
+             tx:(vw-bb.width*fit)/2,ty:(vh-bb.height*fit)/2};
+  mmLbApply();
+  let drag=null;
+  vp.addEventListener('pointerdown',function(e){
+    if(e.button!==0||!mmLbState)return;
+    drag={x:e.clientX,y:e.clientY,tx:mmLbState.tx,ty:mmLbState.ty,moved:false};
+    try{vp.setPointerCapture(e.pointerId);}catch(err){}
+    e.preventDefault();
+  });
+  vp.addEventListener('pointermove',function(e){
+    if(!drag||!mmLbState)return;
+    const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+    if(Math.abs(dx)>3||Math.abs(dy)>3)drag.moved=true;
+    mmLbState.tx=drag.tx+dx;mmLbState.ty=drag.ty+dy;mmLbApply();
+  });
+  vp.addEventListener('pointerup',function(){
+    const wasDrag=drag&&drag.moved;
+    drag=null;
+    if(!wasDrag)mmLbClose();   /* 原地点击 = 关; 拖完松手不关 */
+  });
+  vp.addEventListener('pointercancel',function(){drag=null;});
+  vp.addEventListener('wheel',function(e){
+    e.preventDefault();
+    const st=mmLbState;if(!st)return;
+    const r=vp.getBoundingClientRect();
+    const cx=e.clientX-r.left,cy=e.clientY-r.top;
+    const ns=Math.min(8,Math.max(0.05,st.scale*(e.deltaY<0?1.15:1/1.15)));
+    st.tx=cx-(cx-st.tx)/st.scale*ns;   /* 缩放中心跟光标: 光标下的内容点保持原位 */
+    st.ty=cy-(cy-st.ty)/st.scale*ns;
+    st.scale=ns;mmLbApply();
+  },{passive:false});
+  x.addEventListener('click',function(ev){ev.stopPropagation();mmLbClose();});
+}
+/* 库 defer 载入可能晚于首帧渲染 (开面板即见历史图表卡): 全部资源就绪后再补一轮 */
+window.addEventListener('load',function(){renderMermaid(document);renderMath(document);});
 function enhance(root){
   const scope=root||$('threadInner');
   transformActionLinks(scope);
   highlightCode(scope);
+  renderMermaid(scope);
+  renderMath(scope);
+  applyEmoji(scope);
   linkifyPaths(scope);
   schedulePathCheck();
 }
@@ -2133,6 +2479,10 @@ function bindThread(){
   inner.addEventListener('click',e=>{
     const lbi=e.target.closest('.ai-att-img');
     if(lbi){showLightbox(lbi.getAttribute('src'));return;}
+    const mmel=e.target.closest('.ai-mermaid-out svg');
+    if(mmel){mmLbOpen(mmel);return;}
+    const fh=e.target.closest('.ai-fold-head');
+    if(fh){fh.closest('.ai-fold').classList.toggle('open');return;}
     const rf=e.target.closest('.ai-sugg-refresh');
     if(rf){rerollSuggs();return;}
     const sug=e.target.closest('.ai-suggestion');
@@ -2674,6 +3024,7 @@ function handle(m){
          停靠侧栏 (宽面板) 与设置面板是常驻模式, 不随焦点收 */
       if(S.ctxOpen)hideCtx();
       if($('lightbox'))hideLightbox();
+      mmLbClose();   /* 图表灯箱同收 (克隆图随面板失焦, 留着无交互意义) */
       if(S.policyOpen)policySetOpen(false);
       if(S.usageOpen)usageSetOpen(false);
       if(S.modelOpen)modelSetOpen(false);
@@ -2898,6 +3249,7 @@ function bind(){
   });
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if(document.getElementById('mmLb')){mmLbClose();e.preventDefault();return;}
       if($('lightbox')){hideLightbox();e.preventDefault();return;}
       if(S.clearArmed){clearDisarm();e.preventDefault();return;}
       if(S.ctxOpen){hideCtx();e.preventDefault();return;}

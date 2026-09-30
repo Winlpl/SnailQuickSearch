@@ -141,8 +141,14 @@ struct HCtx {
     bool inCode = false;
     std::wstring codeRaw;      /* 代码块原文 (data-code 属性, 复制按钮用) */
     int codeIdx = 0;           /* 代码块占位序号 (leave 时回填原文) */
+    bool isMermaid = false;    /* 当前代码块是 ```mermaid 围栏 (图表卡, 前端渲染成 SVG) */
     size_t pStart = 0;         /* 当前 <p> 的写出位置 (小标题改写用) */
     int imgSkip = 0;           /* >0 = 正在渲染捐赠二维码 img, alt 文本不重复输出 */
+    /* GitHub 提示块 ([!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]): blockquote 类名
+       先写占位 (首段文本才认得出标记), leave 时按识别结果回填; 标记文本本身吞掉不显示 */
+    struct GQuote { int id; int cls; bool seenText; bool dropBr; };
+    std::vector<GQuote> gq;    /* 打开的 blockquote 栈 (与 blocks 的 QUOTE 条目平行) */
+    int gqIdx = 0;             /* 类名占位序号 */
 };
 
 static std::wstring MdUtf8(const char* s, MD_SIZE n) {
@@ -216,19 +222,38 @@ static int HEnterBlock(MD_BLOCKTYPE type, void* detail, void* ud) {
             c->blocks.push_back(type);
             break;
         }
-        case MD_BLOCK_QUOTE: c->out += L"<blockquote>"; c->blocks.push_back(type); break;
+        case MD_BLOCK_QUOTE: {
+            HCtx::GQuote g; g.id = c->gqIdx++; g.cls = 0; g.seenText = false; g.dropBr = false;
+            wchar_t nb[16];
+            swprintf(nb, 16, L"\x1GQ%d\x1", g.id);   /* 占位 (leave 时回填识别出的类名) */
+            c->out += L"<blockquote class=\"";
+            c->out += nb;
+            c->out += L"\">";
+            c->gq.push_back(g);
+            c->blocks.push_back(type);
+            break;
+        }
         case MD_BLOCK_CODE: {
             MD_BLOCK_CODE_DETAIL* d = (MD_BLOCK_CODE_DETAIL*)detail;
             c->inCode = true;
             c->codeRaw.clear();
-            c->out += L"<div class=\"ai-code\" data-code=\"\x1CODE";
+            std::wstring lang = d->info.text ? MdUtf8(d->info.text, (MD_SIZE)d->info.size) : L"";
+            /* 首个空格前的语言标记 == mermaid (不分大小写) = 图表卡: 源码照常进 data-code
+               (复制按钮) + pre.ai-mermaid-src, 前端 mermaid 库渲染成 SVG; 解析失败前端
+               原样回退源码显示, 内容不丢 */
+            std::wstring langTok = lang.substr(0, lang.find_first_of(L" \t"));
+            c->isMermaid = _wcsicmp(langTok.c_str(), L"mermaid") == 0;
+            c->out += L"<div class=\"ai-code";
+            if (c->isMermaid) c->out += L" ai-mermaid";
+            c->out += L"\" data-code=\"\x1CODE";
             wchar_t nb[16];
             swprintf(nb, 16, L"%d\x1\">", c->codeIdx++);   /* 占位 (leave 时回填转义原文) */
             c->out += nb;
             c->out += L"<div class=\"ai-code-head\"><span class=\"ai-code-lang\">";
-            std::wstring lang = d->info.text ? MdUtf8(d->info.text, (MD_SIZE)d->info.size) : L"";
             HtmlEscape(&c->out, lang.empty() ? L"text" : lang);
-            c->out += L"</span><span class=\"ai-code-copy\">复制</span></div><pre><code>";
+            c->out += L"</span><span class=\"ai-code-copy\">复制</span></div>";
+            if (c->isMermaid) c->out += L"<div class=\"ai-mermaid-body\"><pre class=\"ai-mermaid-src\">";
+            else            c->out += L"<pre><code>";
             c->blocks.push_back(type);
             break;
         }
@@ -259,6 +284,30 @@ static int HLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
             if (!c->pWrote.empty()) c->pWrote.pop_back();
             if (wrote && !c->blocks.empty() && c->blocks.back() == MD_BLOCK_P) {
                 c->out += L"</p>";
+                /* 中文强调框: 段落以粗体 注意/提示/重要/警告/危险 等关键词开头 → 彩色提示框
+                   (视频参考实现同款; 先于小标题判定, 命中关键词的不会走 ai-md-sub) */
+                if (c->out.size() > c->pStart + 12 &&
+                    c->out.compare(c->pStart, 3, L"<p>") == 0 &&
+                    c->out.compare(c->pStart + 3, 8, L"<strong>") == 0) {
+                    size_t close = c->out.find(L"</strong>", c->pStart + 3);
+                    if (close != std::wstring::npos && close < c->out.size() - 4) {
+                        std::wstring kw = c->out.substr(c->pStart + 11, close - (c->pStart + 11));
+                        while (!kw.empty() && (kw.back() == L'：' || kw.back() == L':' ||
+                                               kw.back() == L' ' || kw.back() == L'\u3000')) kw.pop_back();
+                        static const wchar_t* const CN_KW[8] = {L"注意", L"提示", L"重要", L"警告", L"警示", L"危险", L"说明", L"备注"};
+                        static const wchar_t* const CN_CLS[8] = {L"cn-note", L"cn-tip", L"cn-important", L"cn-warning",
+                                                                 L"cn-warning", L"cn-danger", L"cn-note", L"cn-note"};
+                        if (kw.size() >= 2 && kw.size() <= 6) {
+                            for (int ki = 0; ki < 8; ki++) {
+                                if (kw == CN_KW[ki]) {
+                                    c->out.replace(c->pStart, 3,
+                                                   L"<p class=\"ai-cnote " + std::wstring(CN_CLS[ki]) + L"\">");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 /* 加粗短句 (≤60 内部字符, 尾部最多一个冒号) 视为小标题 (参考实现 sub) */
                 if (c->out.size() > c->pStart + 12 &&
                     c->out.compare(c->pStart, 3, L"<p>") == 0 &&
@@ -295,7 +344,20 @@ static int HLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
             }
             c->out += L"</li>";
             break;
-        case MD_BLOCK_QUOTE: c->out += L"</blockquote>"; break;
+        case MD_BLOCK_QUOTE: {
+            if (!c->gq.empty()) {
+                HCtx::GQuote g = c->gq.back();
+                c->gq.pop_back();
+                static const wchar_t* const GQ_CLS[6] = {L"", L"ai-gq gq-note", L"ai-gq gq-tip",
+                                                         L"ai-gq gq-important", L"ai-gq gq-warning", L"ai-gq gq-danger"};
+                wchar_t key[24];
+                swprintf(key, 24, L"\x1GQ%d\x1", g.id);
+                size_t pos = c->out.find(key);
+                if (pos != std::wstring::npos) c->out.replace(pos, wcslen(key), GQ_CLS[g.cls]);
+            }
+            c->out += L"</blockquote>";
+            break;
+        }
         case MD_BLOCK_CODE: {
             c->inCode = false;
             /* 回填代码块原文进 data-code 属性 (转义含引号) */
@@ -305,7 +367,9 @@ static int HLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* ud) {
             HtmlEscape(&fill, c->codeRaw);
             size_t pos = c->out.find(key);
             if (pos != std::wstring::npos) c->out.replace(pos, wcslen(key), fill);
-            c->out += L"</code></pre></div>";
+            c->out += c->isMermaid ? L"</pre><div class=\"ai-mermaid-out\"></div></div></div>"
+                                   : L"</code></pre></div>";
+            c->isMermaid = false;
             break;
         }
         case MD_BLOCK_TABLE: c->out += L"</table></div>"; break;
@@ -327,6 +391,8 @@ static int HEnterSpan(MD_SPANTYPE type, void* detail, void* ud) {
         case MD_SPAN_EM: c->out += L"<em>"; break;
         case MD_SPAN_CODE: c->out += L"<code>"; break;
         case MD_SPAN_DEL: c->out += L"<del>"; break;
+        case MD_SPAN_LATEXMATH: c->out += L"<span class=\"ai-math\">"; break;                        /* $...$ 行内公式 */
+        case MD_SPAN_LATEXMATH_DISPLAY: c->out += L"<span class=\"ai-math ai-math-disp\">"; break;   /* $$...$$ 块级公式 */
         case MD_SPAN_A: {
             MD_SPAN_A_DETAIL* d = (MD_SPAN_A_DETAIL*)detail;
             c->out += L"<a href=\"";
@@ -367,6 +433,7 @@ static int HLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* ud) {
         case MD_SPAN_EM: c->out += L"</em>"; break;
         case MD_SPAN_CODE: c->out += L"</code>"; break;
         case MD_SPAN_DEL: c->out += L"</del>"; break;
+        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: c->out += L"</span>"; break;
         case MD_SPAN_A: c->out += L"</a>"; break;
         case MD_SPAN_IMG: if (c->imgSkip) c->imgSkip--; break;   /* 捐赠二维码 img 已写完, 恢复 alt 文本输出 */
         default: break;
@@ -387,11 +454,32 @@ static int HText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) 
         case MD_TEXT_NORMAL:
             if (c->imgSkip) break;   /* 捐赠二维码 img 的 alt 内文不重复渲染 (图已带 alt 属性) */
             if (c->inCode) c->codeRaw += w;
+            if (!c->gq.empty() && !c->gq.back().seenText) {
+                /* blockquote 首段文本: 识别 GitHub 提示块标记并吞掉 (大小写不敏感) */
+                static const wchar_t* const GQ_MARK[5] = {L"[!NOTE]", L"[!TIP]", L"[!IMPORTANT]", L"[!WARNING]", L"[!CAUTION]"};
+                c->gq.back().seenText = true;
+                for (int gi = 0; gi < 5; gi++) {
+                    size_t alen = wcslen(GQ_MARK[gi]);
+                    if (w.size() >= alen && _wcsnicmp(w.c_str(), GQ_MARK[gi], alen) == 0) {
+                        c->gq.back().cls = gi + 1;
+                        w.erase(0, alen);
+                        size_t nb = w.find_first_not_of(L" \t");
+                        if (nb == std::wstring::npos) { w.clear(); c->gq.back().dropBr = true; }
+                        else w.erase(0, nb);
+                        break;
+                    }
+                }
+            }
             HtmlEscape(&c->out, w);
             break;
         case MD_TEXT_ENTITY: c->out += w; break;   /* 实体原文透传 (HTML 输出直接可用) */
-        case MD_TEXT_SOFTBR: if (!c->inCode) c->out += L"<br/>"; break;   /* 段内换行保留为 <br> */
+        case MD_TEXT_SOFTBR:
+            if (c->inCode) break;
+            if (!c->gq.empty() && c->gq.back().dropBr) { c->gq.back().dropBr = false; break; }   /* 吞掉标记行后的首个换行 */
+            c->out += L"<br/>";   /* 段内换行保留为 <br> */
+            break;
         case MD_TEXT_BR: c->out += L"<br/>"; break;
+        case MD_TEXT_LATEXMATH: HtmlEscape(&c->out, w); break;   /* $...$/$$...$$ 公式体 (前端 KaTeX 渲染) */
         default: break;   /* HTML/NULLCHAR 丢弃 (不渲染模型输出里的裸 HTML) */
     }
     return 0;
@@ -459,21 +547,120 @@ static std::wstring MdNormalizeTables(const std::wstring& text) {
     return out;
 }
 
+/* ---- <details> 折叠块归一化: 安全层丢弃 HTML 块 = 折叠块正文整个消失 (内容丢失级缺口)。
+   行级扫描 (代码围栏内不动): <details[ open]> / <summary>标题</summary> / </details>
+   三段式换成 ✂ 哨兵独立段落 — 哨兵之间的内容保持 markdown 正常渲染 (列表/表格/代码块都活),
+   MdToHtml 末尾再把哨兵间的 HTML 包成折叠卡。标题行的残余标签剥掉。 ---- */
+static std::wstring MdFoldTrimLeft(const std::wstring& s) {
+    size_t b = s.find_first_not_of(L" \t");
+    return b == std::wstring::npos ? L"" : s.substr(b);
+}
+static std::wstring MdFoldStripTags(const std::wstring& s) {
+    std::wstring o;
+    bool inTag = false;
+    for (wchar_t ch : s) {
+        if (ch == L'<') { inTag = true; continue; }
+        if (ch == L'>') { inTag = false; continue; }
+        if (!inTag) o += ch;
+    }
+    return o;
+}
+static std::wstring MdNormalizeFolds(const std::wstring& text) {
+    if (text.find(L"<details") == std::wstring::npos) return text;
+    std::vector<std::wstring> lines;   /* 切行 (吃 \r; 重建时统一 \n) */
+    size_t pos = 0;
+    for (;;) {
+        size_t nl = text.find(L'\n', pos);
+        std::wstring ln = (nl == std::wstring::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+        if (!ln.empty() && ln.back() == L'\r') ln.pop_back();
+        lines.push_back(ln);
+        if (nl == std::wstring::npos) break;
+        pos = nl + 1;
+    }
+    std::vector<char> fenced(lines.size(), 0);   /* 该行之前是否处于 ``` / ~~~ 围栏内 */
+    wchar_t fence = 0;
+    for (size_t i = 0; i < lines.size(); i++) {
+        fenced[i] = fence != 0;
+        size_t b = lines[i].find_first_not_of(L" \t");
+        if (b == std::wstring::npos || lines[i].size() - b < 3) continue;
+        wchar_t ch = lines[i][b];
+        if ((ch == L'`' || ch == L'~') && lines[i][b + 1] == ch && lines[i][b + 2] == ch)
+            fence = (fence == 0) ? ch : (ch == fence ? (wchar_t)0 : fence);
+    }
+    std::wstring o;
+    for (size_t i = 0; i < lines.size(); ) {
+        std::wstring t = MdFoldTrimLeft(lines[i]);
+        if (!fenced[i] && t.rfind(L"<details", 0) == 0) {
+            bool foldOpen = t.find(L"open") != std::wstring::npos;
+            std::wstring title;
+            size_t j = i;
+            bool found = false;
+            for (; j < lines.size() && j <= i + 6; j++) {   /* summary 在本行或随后几行 */
+                size_t p = lines[j].find(L"<summary");
+                if (p == std::wstring::npos) continue;
+                size_t gt = lines[j].find(L'>', p + 8);
+                size_t q = lines[j].find(L"</summary>", gt == std::wstring::npos ? p : gt);
+                if (gt == std::wstring::npos || q == std::wstring::npos) continue;
+                title = MdFoldStripTags(lines[j].substr(gt + 1, q - (gt + 1)));
+                found = true;
+                break;
+            }
+            if (!found) { o += lines[i]; o += L'\n'; i++; continue; }   /* 非典型结构: 原样放过 */
+            i = j + 1;   /* 跳过 details/summary 行 */
+            if (i < lines.size() && MdFoldTrimLeft(lines[i]).empty()) i++;
+            o += L'\n';
+            o += foldOpen ? L"✂FOLDOPEN✂" : L"✂FOLD✂";
+            o += title;
+            o += L"✂\n\n";
+            continue;
+        }
+        if (!fenced[i] && t.rfind(L"</details>", 0) == 0) {
+            o += L"\n✂ENDFOLD✂\n\n";
+            i++;
+            continue;
+        }
+        o += lines[i];
+        o += L'\n';
+        i++;
+    }
+    return o;
+}
+
 /* md4c 解析失败返回 false (调用方兜底: 原文按代码块呈现, 内容不丢) */
 bool MdToHtml(const std::wstring& text, std::wstring* out) {
     HCtx ctx;
     MD_PARSER p = {};
     p.abi_version = 0;
     p.flags = MD_FLAG_TABLES | MD_FLAG_COLLAPSEWHITESPACE | MD_FLAG_PERMISSIVEURLAUTOLINKS |
-              MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS;
+              MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS | MD_FLAG_LATEXMATHSPANS;
     p.enter_block = HEnterBlock;
     p.leave_block = HLeaveBlock;
     p.enter_span = HEnterSpan;
     p.leave_span = HLeaveSpan;
     p.text = HText;
-    std::string u8 = U8(MdNormalizeTables(text));
+    std::string u8 = U8(MdNormalizeTables(MdNormalizeFolds(text)));
     if (md_parse(u8.c_str(), (MD_SIZE)u8.size(), &p, &ctx) != 0) return false;
-    *out = ctx.out;
+    /* 折叠哨兵 → 折叠卡: <p>✂FOLD✂标题✂</p> 与 <p>✂ENDFOLD✂</p> 之间的 HTML (已按
+       markdown 渲染) 包进 .ai-fold; ENDFOLD 缺失 (模型忘写闭合) 时该哨兵原样保留 */
+    std::wstring& outw = ctx.out;
+    size_t fs;
+    while ((fs = outw.find(L"<p>✂FOLD✂")) != std::wstring::npos ||
+           (fs = outw.find(L"<p>✂FOLDOPEN✂")) != std::wstring::npos) {
+        bool foldOpen = outw.compare(fs, 13, L"<p>✂FOLDOPEN✂") == 0;
+        size_t ts = fs + (foldOpen ? 13 : 9);
+        size_t te = outw.find(L"✂</p>", ts);
+        if (te == std::wstring::npos) break;
+        static const std::wstring END = L"<p>✂ENDFOLD✂</p>";
+        size_t es = outw.find(END, te);
+        if (es == std::wstring::npos) break;
+        std::wstring title = outw.substr(ts, te - ts);
+        std::wstring body = outw.substr(te + 5, es - (te + 5));
+        std::wstring wrap = L"<div class=\"ai-fold" + std::wstring(foldOpen ? L" open" : L"") +
+                            L"\"><button class=\"ai-fold-head\" type=\"button\"><span class=\"ai-fold-arrow\">▸</span><span>" +
+                            title + L"</span></button><div class=\"ai-fold-body\">" + body + L"</div></div>";
+        outw.replace(fs, es + END.size() - fs, wrap);
+    }
+    *out = outw;
     return true;
 }
 
@@ -885,6 +1072,7 @@ static ICoreWebView2Environment* g_webEnv = NULL;   /* 进程一份 (UDF 绑插�
 static bool g_envPending = false;                   /* 环境创建在途 */
 static bool g_noRuntime = false;                    /* 系统无 WebView2 运行时 (每会话 Toast 一次) */
 static std::wstring g_udfDir;
+static std::wstring g_pluginDir;   /* 插件 DLL 所在目录 (mermaid.min.js 虚拟主机映射根) */
 
 /* ---- 加载器 = 官方 WebView2Loader.dll (动态加载, 与插件同目录随包部署) ----
  * 不静态链接 WebView2LoaderStatic.lib: 10MB 静态库换来的只有体积, 动态 DLL 只依赖
@@ -928,7 +1116,8 @@ static bool WebEnsureUdfDir() {
     std::wstring dir(path);
     size_t slash = dir.find_last_of(L"\\/");
     if (slash == std::wstring::npos) return false;
-    g_udfDir = dir.substr(0, slash) + L"\\webview2-data";
+    g_pluginDir = dir.substr(0, slash);
+    g_udfDir = g_pluginDir + L"\\webview2-data";
     return true;
 }
 
@@ -1279,6 +1468,15 @@ struct WebCtrlHandler : ICoreWebView2CreateCoreWebView2ControllerCompletedHandle
         WebSessionRect(s);
         ShowWindow(ctx->hwnd, SW_SHOWNOACTIVATE);
         ctrl->put_IsVisible(TRUE);
+        /* 图表库 mermaid.min.js = 插件目录本地文件, 经虚拟主机映射以同源脚本进页
+           (NavigateToString 的页面引不了 file://, CSP 也只放行该主机);
+           映射失败/旧运行时缺 ICoreWebView2_4 = 脚本加载不出, 图表块保持源码卡 */
+        ICoreWebView2_4* w4 = NULL;
+        if (SUCCEEDED(ctx->web->QueryInterface(__uuidof(ICoreWebView2_4), (void**)&w4)) && w4) {
+            w4->SetVirtualHostNameToFolderMapping(L"aiassets.snailqs.local", g_pluginDir.c_str(),
+                                                  COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+            w4->Release();
+        }
         ctx->web->NavigateToString(AiWebUiHtml());
         return S_OK;
     }
