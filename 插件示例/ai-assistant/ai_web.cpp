@@ -2325,7 +2325,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
             for (auto& st : m.steps) {
                 /* kind 11=命令卡 13=file_op 卡: 都走 pendbar/eallow/edeny 挂起裁决通道 —
                    曾只排除 11, open_file 策略卡与 file_op 卡同屏时点策略「允许」把挂起卡
-                   一起翻掉 = 常驻确认条消失, worker 无人放行 5 分钟超时按取消收场 */
+                   一起翻掉 = 常驻确认条消失, worker 无人放行, 询问挂起永不收场 */
                 if (st.state == 4 && st.kind != 11 && st.kind != 13) {
                     st.state = 3;
                     st.err = allow ? L"已允许文件操作, 本次回答后生效" : L"用户保持拒绝";
