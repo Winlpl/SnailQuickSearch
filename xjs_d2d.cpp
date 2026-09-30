@@ -530,6 +530,98 @@ bool XjsDecodeFileImagePixels(const std::wstring& path, int dstW, int dstH, int 
     return ok;
 }
 
+/* EMF 元文件头取页面尺寸 (0.01mm 物理框 → 96dpi 像素; 异步作业定占位宽高比用)。
+   rclFrame 缺失/退化回落 rclBounds (创建时参考 DC 的设备像素)。失败 = false → 预览落信息卡 */
+bool XjsMetaFileDims(const std::wstring& path, int* w, int* h) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (path.empty()) return false;
+    HENHMETAFILE hemf = GetEnhMetaFileW(path.c_str());
+    if (!hemf) return false;
+    ENHMETAHEADER hdr = {};
+    bool ok = GetEnhMetaFileHeader(hemf, sizeof(hdr), &hdr) != 0;
+    DeleteEnhMetaFile(hemf);
+    if (!ok) return false;
+    long fw = hdr.rclFrame.right - hdr.rclFrame.left;
+    long fh = hdr.rclFrame.bottom - hdr.rclFrame.top;
+    if (fw > 0 && fh > 0) {   /* 0.01mm → 96dpi 像素 */
+        if (w) *w = (int)((double)fw * 96.0 / 2540.0 + 0.5);
+        if (h) *h = (int)((double)fh * 96.0 / 2540.0 + 0.5);
+        return (!w || *w > 0) && (!h || *h > 0);
+    }
+    if (hdr.rclBounds.right > hdr.rclBounds.left && hdr.rclBounds.bottom > hdr.rclBounds.top) {
+        if (w) *w = (int)(hdr.rclBounds.right - hdr.rclBounds.left);
+        if (h) *h = (int)(hdr.rclBounds.bottom - hdr.rclBounds.top);
+        return (!w || *w > 0) && (!h || *h > 0);
+    }
+    return false;
+}
+
+/* EMF 元文件 → 目标尺寸 PBGRA 字节 (预览异步装载, 工作线程调 — 纯 GDI 播放, 不碰任何
+   D2D 对象)。口径同 XjsDecodeFileImagePixels: dstW/dstH 为 rot 后内容尺寸, rot 1..3
+   内部换回转前渲染再经 WIC FlipRotator 搬转。白底铺底 (元文件透明区不发花); 失败 = false */
+bool XjsDecodeMetaFilePixels(const std::wstring& path, int dstW, int dstH, int rot,
+                             std::vector<uint8_t>* out, int* stride) {
+    if (out) out->clear();
+    if (path.empty() || dstW <= 0 || dstH <= 0 || dstW > 4096 || dstH > 4096 || !out || !stride) return false;
+    if (rot < 0 || rot > 3) rot = 0;
+    *stride = dstW * 4;
+    out->assign((size_t)*stride * dstH, 0);
+    UINT scW = (rot % 2 == 1) ? (UINT)dstH : (UINT)dstW;
+    UINT scH = (rot % 2 == 1) ? (UINT)dstW : (UINT)dstH;
+    HENHMETAFILE hemf = GetEnhMetaFileW(path.c_str());
+    if (!hemf) { out->clear(); return false; }
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = (LONG)scW;
+    bmi.bmiHeader.biHeight = -(LONG)scH;   /* top-down: 行序与 WIC/CopyPixels 一致 */
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = NULL;
+    HDC screenDc = GetDC(NULL);
+    HBITMAP bmp = screenDc ? CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    if (screenDc) ReleaseDC(NULL, screenDc);
+    bool ok = false;
+    if (bmp && bits) {
+        HDC mem = CreateCompatibleDC(NULL);
+        if (mem) {
+            HGDIOBJ old = SelectObject(mem, bmp);
+            RECT rc = { 0, 0, (LONG)scW, (LONG)scH };
+            HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255));
+            if (wb) { FillRect(mem, &rc, wb); DeleteObject(wb); }
+            SetGraphicsMode(mem, GM_ADVANCED);   /* 精确映射, PlayEnhMetaFile 按框等比 */
+            PlayEnhMetaFile(mem, hemf, &rc);
+            SelectObject(mem, old);
+            DeleteDC(mem);
+            /* 32bpp BI_RGB 的 alpha 字节未定义 → 置不透明 (不透明 BGRA = PBGRA, 预乘恒等) */
+            uint8_t* px = (uint8_t*)bits;
+            for (UINT i = 0; i < scW * scH; i++) px[i * 4 + 3] = 0xFF;
+            if (rot == 0) {
+                memcpy(out->data(), bits, (size_t)*stride * scH);
+                ok = true;
+            } else if (g_wic) {
+                /* 转后内容: WIC FlipRotator 无损搬转 (同图片管线) */
+                IWICBitmap* src = NULL;
+                IWICBitmapFlipRotator* rotator = NULL;
+                if (SUCCEEDED(g_wic->CreateBitmapFromMemory((UINT)scW, (UINT)scH, GUID_WICPixelFormat32bppPBGRA,
+                                                            (UINT)*stride, (UINT)*stride * scH, (BYTE*)bits, &src)) && src &&
+                    SUCCEEDED(g_wic->CreateBitmapFlipRotator(&rotator)) && rotator &&
+                    SUCCEEDED(rotator->Initialize(src,
+                        rot == 1 ? WICBitmapTransformRotate90 : rot == 2 ? WICBitmapTransformRotate180
+                                                                         : WICBitmapTransformRotate270)))
+                    ok = SUCCEEDED(rotator->CopyPixels(NULL, *stride, (UINT)out->size(), out->data()));
+                if (rotator) rotator->Release();
+                if (src) src->Release();
+            }
+        }
+        DeleteObject(bmp);
+    }
+    DeleteEnhMetaFile(hemf);
+    if (!ok) out->clear();
+    return ok;
+}
+
 /* 临时色刷缓存 (同一颜色复用; 设备重建时随 XjsDeviceDiscard 清空) */
 XjsSolidBrush* XjsTempBrush(XjsColor c) {
     UINT32 key = ((UINT32)(c.a * 255) << 24) | ((UINT32)(c.r * 255) << 16) | ((UINT32)(c.g * 255) << 8) | (UINT32)(c.b * 255);

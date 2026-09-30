@@ -1602,6 +1602,14 @@ bool XjsImageFileDims(const std::wstring& path, int* w, int* h);   /* 读头取�
 bool XjsDecodeFileImagePixels(const std::wstring& path, int dstW, int dstH, int rot,
                               std::vector<uint8_t>* out, int* stride);   /* 解码+Fant缩放+旋转 → PBGRA 字节 (工作线程) */
 XjsBitmap* XjsBitmapFromBgra(const void* bgra, int w, int h, int stride);   /* 插件预览交付: 裸 BGRA → 本域位图 */
+bool XjsDecodeMetaFilePixels(const std::wstring& path, int dstW, int dstH, int rot,
+                             std::vector<uint8_t>* out, int* stride);   /* EMF 元文件 → 目标尺寸 PBGRA 字节 (工作线程) */
+bool XjsMetaFileDims(const std::wstring& path, int* w, int* h);   /* EMF 头取页面尺寸 (工作线程) */
+/* PDF 首页预览后端 (xjs_pdf.cpp; 系统 Windows.Data.Pdf 组件动态加载, 一律工作线程调 —
+   缺组件/加载失败干净 false, 预览落文件信息卡) */
+bool XjsPdfPageDims(const std::wstring& path, int* w, int* h);   /* 首页显示尺寸 (96dpi 基准) */
+bool XjsPdfRenderPixels(const std::wstring& path, int dstW, int dstH, int rot,
+                        std::vector<uint8_t>* out, int* stride);   /* 首页渲染 → PBGRA 字节 */
 XjsSolidBrush* XjsTempBrush(XjsColor c);          // 临时色刷缓存 (设备重建时清)
 float XjsMeasureText(const wchar_t* s, XjsFormat* fmt);
 /* 彩色字体绘制 (emoji): g_dc 可用时带 ENABLE_COLOR_FONT, 否则退 g_rt 单色轮廓 */

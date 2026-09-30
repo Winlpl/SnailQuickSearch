@@ -60,20 +60,54 @@ static bool XjsIsImageExt(const std::wstring& name) {
     if (dot == std::wstring::npos) return false;
     std::wstring ext = name.substr(dot + 1);
     for (auto& c : ext) c = (wchar_t)towlower(c);
-    static const wchar_t* exts[] = { L"jpg", L"jpeg", L"png", L"bmp", L"gif", L"tif", L"tiff" };
+    /* webp/heic/avif 等: WIC 有系统/商店解码器就预览, 没有则读头失败干净落文件信息卡 */
+    static const wchar_t* exts[] = { L"jpg", L"jpeg", L"jfif", L"jpe", L"png", L"bmp", L"gif",
+                                     L"tif", L"tiff", L"webp", L"heic", L"heif", L"avif",
+                                     L"ico", L"dds" };
     for (auto* e : exts) if (ext == e) return true;
+    return false;
+}
+
+/* PDF / EMF: WIC 读不了头, dims 与像素全走异步作业 (worker 经系统 PDF 组件 / EMF 头) */
+static bool XjsIsPdfExt(const std::wstring& name) {
+    size_t dot = name.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = name.substr(dot + 1);
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    return ext == L"pdf";
+}
+
+static bool XjsIsMetaExt(const std::wstring& name) {
+    size_t dot = name.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = name.substr(dot + 1);
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    return ext == L"emf";   /* 仅增强元文件: WMF 无可靠 bbox, 保持信息卡 */
+}
+
+/* 无扩展名按文本试的已知名 (代码仓库常客; 二进制由文本管线 NUL 探测天然拒绝) */
+static bool XjsIsKnownTextName(const std::wstring& name) {
+    static const wchar_t* names[] = {
+        L"readme", L"license", L"copying", L"makefile", L"dockerfile", L"changelog",
+        L"install", L"notice", L"authors", L"news", L"todo", L"version", L"contributing" };
+    std::wstring low = name;
+    for (auto& c : low) c = (wchar_t)towlower(c);
+    for (auto* e : names) if (low == e) return true;
     return false;
 }
 
 static bool XjsIsTextExt(const std::wstring& name) {
     size_t dot = name.rfind(L'.');
-    if (dot == std::wstring::npos) return false;
+    if (dot == std::wstring::npos) return XjsIsKnownTextName(name);
     std::wstring ext = name.substr(dot + 1);
     for (auto& c : ext) c = (wchar_t)towlower(c);
     static const wchar_t* exts[] = {
         L"txt", L"log", L"md", L"markdown", L"json", L"ini", L"cfg", L"conf", L"xml", L"html", L"htm",
         L"h", L"c", L"cpp", L"hpp", L"cs", L"js", L"ts", L"py", L"java", L"bat", L"ps1", L"css",
-        L"sql", L"lua", L"yaml", L"yml", L"rst", L"srt", L"csv" };
+        L"sql", L"lua", L"yaml", L"yml", L"rst", L"srt", L"csv",
+        L"vtt", L"lrc", L"ssa", L"ass", L"tsv", L"inf", L"reg", L"nfo", L"tex", L"diff", L"patch",
+        L"sh", L"php", L"rb", L"go", L"rs", L"toml", L"properties", L"cmake", L"mk",
+        L"gitignore", L"gitattributes", L"editorconfig", L"npmrc" };
     for (auto* e : exts) if (ext == e) return true;
     return false;
 }
@@ -86,8 +120,9 @@ static bool XjsIsMediaExt(const std::wstring& name) {
     /* 视频在列但不保证可解 (rmvb/ape 等系统缺解码器 → 错误占位卡, 打开按钮仍可用) */
     static const wchar_t* exts[] = {
         L"mp4", L"m4v", L"mkv", L"webm", L"avi", L"mov", L"wmv", L"flv", L"mpg", L"mpeg",
-        L"m2ts", L"ts", L"vob", L"3gp", L"ogv", L"rmvb", L"rm", L"asf", L"divx", L"f4v",
-        L"mp3", L"wav", L"wma", L"aac", L"flac", L"m4a", L"ogg", L"oga", L"opus", L"ape",
+        L"m2ts", L"mts", L"m2t", L"mxf", L"ts", L"vob", L"3gp", L"ogv", L"ogm",
+        L"rmvb", L"rm", L"asf", L"divx", L"f4v",
+        L"mp3", L"wav", L"wma", L"aac", L"flac", L"m4a", L"m4r", L"ogg", L"oga", L"opus", L"ape",
         L"mka", L"aiff", L"aif", L"amr", L"m4b", L"caf" };
     for (auto* e : exts) if (ext == e) return true;
     return false;
@@ -204,6 +239,7 @@ struct XjsImgDone {
     int fileId = -1;
     int w = 0, h = 0;
     bool failed = false;
+    bool dimsOnly = false;   /* dims-only 作业 (PDF/EMF; tw=th=0 投递): 只取页面尺寸回填, 无像素 */
     std::vector<uint8_t> bgra;
 };
 static XjsImgDone s_imgDone;   /* 单结果槽 (UI 消费前被覆盖 = 代号校验丢弃, 重投自愈) */
@@ -272,10 +308,28 @@ static DWORD WINAPI XjsImgThreadProc(LPVOID) {
             if (IsWindow(job.hwnd)) {
                 int stride = 0;
                 std::vector<uint8_t> bgra;
-                if (XjsDecodeFileImagePixels(job.path, job.tw, job.th, job.rot, &bgra, &stride)) {
-                    done.bgra = std::move(bgra);
+                std::wstring ext = job.path.substr(job.path.rfind(L'.') + 1);
+                for (auto& c : ext) c = (wchar_t)towlower(c);
+                if (job.tw <= 0) {
+                    /* dims-only 作业 (PDF/EMF; UI 线程读不了头): worker 取页面尺寸回填,
+                       adopt 填 g_previewImgW/H 后下帧走既有图片渲染管线 */
+                    done.dimsOnly = true;
+                    if (ext == L"pdf" ? XjsPdfPageDims(job.path, &done.w, &done.h)
+                                      : XjsMetaFileDims(job.path, &done.w, &done.h)) {
+                        if (done.w <= 0 || done.h <= 0) done.failed = true;   /* 防零尺寸回填 */
+                    } else {
+                        done.failed = true;
+                    }
                 } else {
-                    done.failed = true;
+                    bool ok = false;
+                    if (ext == L"pdf") ok = XjsPdfRenderPixels(job.path, job.tw, job.th, job.rot, &bgra, &stride);
+                    else if (ext == L"emf") ok = XjsDecodeMetaFilePixels(job.path, job.tw, job.th, job.rot, &bgra, &stride);
+                    else ok = XjsDecodeFileImagePixels(job.path, job.tw, job.th, job.rot, &bgra, &stride);
+                    if (ok) {
+                        done.bgra = std::move(bgra);
+                    } else {
+                        done.failed = true;
+                    }
                 }
             } else {
                 done.failed = true;   /* 归属窗已没: 结果照回, UI 侧选中校验兜底丢弃 */
@@ -294,12 +348,18 @@ static DWORD WINAPI XjsImgThreadProc(LPVOID) {
 void XjsPreviewImgAdopt(HWND hwnd, long long gen) {
     XjsBitmap* nb = NULL;
     int ctx = -1, fileId = -1;
+    bool dimsOnly = false, failed = false;
+    int dw = 0, dh = 0;
     {
         XjsImgJobCs lk;
         if (s_imgDone.gen != gen || s_imgDone.hwnd != hwnd) return;   /* 槽已被更新结果覆盖 */
         ctx = s_imgDone.ctx;
         fileId = s_imgDone.fileId;
-        if (!s_imgDone.failed && s_imgDone.w > 0)
+        dimsOnly = s_imgDone.dimsOnly;
+        failed = s_imgDone.failed;
+        dw = s_imgDone.w;
+        dh = s_imgDone.h;
+        if (!s_imgDone.failed && !s_imgDone.dimsOnly && s_imgDone.w > 0)
             nb = XjsBitmapFromBgra(s_imgDone.bgra.data(), s_imgDone.w, s_imgDone.h, s_imgDone.w * 4);
         s_imgDone.bgra.clear();
         s_imgDone.bgra.shrink_to_fit();
@@ -307,6 +367,18 @@ void XjsPreviewImgAdopt(HWND hwnd, long long gen) {
     XjsSearchWindow* w = XjsSearchWindow::Cur();
     if (!w || w->hWnd != hwnd || w->previewFileId != fileId) {   /* 期间已换窗/换选中 */
         if (nb) nb->Release();
+        return;
+    }
+    if (dimsOnly) {
+        /* PDF/EMF 页面尺寸到货: 回填原始尺寸 (渲染/灯箱分支以 g_previewImgW>0 入图),
+           下帧渲染分支照常投渲染作业。失败保持 0 = 永落文件信息卡 (降级干净) */
+        s_pvPending = false;
+        s_pvFailed = false;
+        if (!failed && g_previewImgW == 0 && dw > 0 && dh > 0) {
+            g_previewImgW = dw;
+            g_previewImgH = dh;
+        }
+        w->Invalidate();
         return;
     }
     if (ctx == 1) {
@@ -652,6 +724,10 @@ void XjsPreviewUpdateSelection() {
                 g_previewImgW = iw2;
                 g_previewImgH = ih2;
             }
+        } else if (XjsIsPdfExt(name) || XjsIsMetaExt(name)) {
+            /* PDF/EMF: WIC 读不了头 — 投 dims-only 异步作业 (worker 经系统 PDF 组件 /
+               EMF 头取页面尺寸), 到货 adopt 回填宽高, 之后与图片同管线 (渲染/灯箱/缩放) */
+            XjsPreviewImgAsk(0, fileId, 0, 0, 0);
         } else if (XjsIsTextExt(name)) {
             /* 文本文件: 异步流式装载 (首块 256KB 到货即显, 快到底自动续载 — 大文件可
                滚动预览, UI 线程零读取零解码, 2026-09-29) */
