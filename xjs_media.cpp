@@ -6,7 +6,11 @@
  *     (UI 线程零解码, 解码在引擎线程; 本线程只做 GPU→CPU 帧拷贝)
  *   - 本地文件经 IStream → IMFByteStream 装载 (中文路径零 URL 编码; SHARE_DENY_NONE 不锁文件,
  *     预览期间照常改名/删除); 无 DXGI 管理器时引擎自动软解, 硬解只是增益不是依赖
- *   - 会话 = XjsSearchWindow::media (每窗一份, 可维护性红线), 引擎对象懒建于首次媒体预览
+ *   - 会话 = XjsSearchWindow::media (每窗一份, 可维护性红线), 引擎对象懒建于首次媒体预览;
+ *     D3D11 设备/DXGI 管理器 = 进程共享一份 (渲染资源, 非窗口状态; 每窗独立设备实测
+ *     "多会话并存→逐窗关闭"驱动层释放不全, 每会话漏 ~50MB, 见 test\test_media_leak.cpp)
+ *   - 会话生命周期 = 装载/播放期: 停播/换选中/藏面板即 Shutdown+释放 (MediaUnload),
+ *     窗口析构同; 不随窗常驻 — 多窗各预览视频不再叠加常驻引擎
  *   - 泵 = ID_TIMER_MEDIA (40ms): 装载期轮询就绪态 / 播放期取帧与进度 / 音量浮标收尾,
  *     全部空闲即摘表 (无媒体活动零计时器)
  * 绘制/命中/交互在 xjs_preview.cpp (媒体卡); 本文件只管引擎状态与帧搬运, 不画任何 UI。
@@ -87,12 +91,10 @@ public:
 struct XjsMediaCtx {
     explicit XjsMediaCtx(HWND h) : hwnd(h) {}
     HWND hwnd = NULL;
-    XjsMediaNotify* notify = NULL;    /* 本方持一份引用 (引擎持另一份), Release 在引擎之后 */
+    XjsMediaNotify* notify = NULL;    /* 本方持一份引用 (引擎持另一份), Release 在引擎之后;
+                                         引擎释放后保留复用 (下次 MediaEnsureEngine 重挂) */
     IMFMediaEngine* eng = NULL;
     IMFMediaEngineEx* engEx = NULL;   /* SetSourceFromByteStream */
-    ID3D11Device* d3d = NULL;         /* 硬解设备 (建不成 = 引擎软解, 可省) */
-    ID3D11DeviceContext* d3dc = NULL;
-    IMFDXGIDeviceManager* dxgi = NULL;
 
     /* 装载/播放态 (UI 线程独占读写; 事件只写 notify 原子) */
     int fileId = -1;
@@ -132,6 +134,13 @@ struct XjsMediaCtx {
     unsigned long long volBadgeTick = 0;
     unsigned long long lastScrubTick = 0;   /* 拖动寻位后留泵收尾 (补帧) */
 
+    /* 挂起态 (窗失活且非播放, MediaSuspend): 引擎会话已拆 (解码器+帧池还内存, 大分辨率可观),
+       fileId/path/画面字节/时长尺寸保留垫显 (卡片不 blank); 交互 (播放/寻位) 经 MediaResume
+       同文件重装载并回跳 resumePos */
+    bool suspended = false;
+    double resumePos = 0;         /* 挂起(或挂起期寻位)的位置, 装载就绪后回跳 */
+    bool playOnReady = false;     /* 挂起中点了播放: 元数据就绪后自动起播 */
+
     /* 失效去重快照 */
     unsigned long long invRev = (unsigned long long)-1;
     double invPos = -1;
@@ -139,6 +148,14 @@ struct XjsMediaCtx {
 };
 
 static bool s_mfUp = false;   /* MFStartup 一次 (进程级; 配对 MFShutdown 在主窗销毁) */
+
+/* 进程共享硬解设备 (渲染资源, 非窗口状态 — 每窗独立设备实测多会话并存后逐窗关闭
+   驱动层释放不全: 每会话 ~50MB 永久留渣, 共享一份则任何操作序列零累积,
+   实验矩阵见 test\test_media_leak.cpp 模式C/E/F/G)。懒建于首个媒体会话,
+   释放只随 XjsMediaGlobalShutdown (主窗销毁) */
+static ID3D11Device* s_d3d = NULL;
+static ID3D11DeviceContext* s_d3dc = NULL;
+static IMFDXGIDeviceManager* s_dxgi = NULL;
 
 static void MediaDropFrameTarget(XjsMediaCtx* c);   /* 帧搬运节; 装载/卸载路径先用到 */
 
@@ -151,29 +168,29 @@ static bool MediaEnsureEngine(XjsMediaCtx* c) {
         s_mfUp = true;
     }
     if (!c->notify) c->notify = new XjsMediaNotify();
-    /* D3D11 设备 (VIDEO_SUPPORT 供硬解; 失败不阻断 — 无 DXGI 管理器 = 引擎软解) */
-    if (!c->d3d) {
+    /* 进程共享 D3D11 设备 (VIDEO_SUPPORT 供硬解; 失败不阻断 — 无 DXGI 管理器 = 引擎软解) */
+    if (!s_d3d) {
         UINT flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
         D3D_FEATURE_LEVEL got{};
         if (SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags, NULL, 0,
-                                        D3D11_SDK_VERSION, &c->d3d, &got, &c->d3dc)) ||
+                                        D3D11_SDK_VERSION, &s_d3d, &got, &s_d3dc)) ||
             SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, flags, NULL, 0,
-                                        D3D11_SDK_VERSION, &c->d3d, &got, &c->d3dc))) {
-            ID3D11Multithread* mt = NULL;   /* MF 与本线程共用立即上下文, 多线程保护必开 */
-            if (SUCCEEDED(c->d3dc->QueryInterface(&mt))) { mt->SetMultithreadProtected(TRUE); mt->Release(); }
+                                        D3D11_SDK_VERSION, &s_d3d, &got, &s_d3dc))) {
+            ID3D11Multithread* mt = NULL;   /* MF 引擎线程与本线程共用立即上下文, 多线程保护必开 */
+            if (SUCCEEDED(s_d3dc->QueryInterface(&mt))) { mt->SetMultithreadProtected(TRUE); mt->Release(); }
             UINT token = 0;
-            if (SUCCEEDED(MFCreateDXGIDeviceManager(&token, &c->dxgi)))
-                c->dxgi->ResetDevice(c->d3d, token);
+            if (SUCCEEDED(MFCreateDXGIDeviceManager(&token, &s_dxgi)))
+                s_dxgi->ResetDevice(s_d3d, token);
         } else {
-            c->d3d = NULL;
-            c->d3dc = NULL;
+            s_d3d = NULL;
+            s_d3dc = NULL;
         }
     }
     IMFAttributes* at = NULL;
     if (FAILED(MFCreateAttributes(&at, 4))) return false;
     at->SetUnknown(MF_MEDIA_ENGINE_CALLBACK, c->notify);
     at->SetUINT32(MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, (UINT32)DXGI_FORMAT_B8G8R8A8_UNORM);
-    if (c->dxgi) at->SetUnknown(MF_MEDIA_ENGINE_DXGI_MANAGER, c->dxgi);
+    if (s_dxgi) at->SetUnknown(MF_MEDIA_ENGINE_DXGI_MANAGER, s_dxgi);
     IMFMediaEngineClassFactory* f = NULL;
     HRESULT hr = CoCreateInstance(CLSID_MFMediaEngineClassFactory, NULL, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&f));
@@ -199,6 +216,8 @@ static void MediaLoadFile(XjsMediaCtx* c, int fileId, const std::wstring& path) 
     c->vidW = c->vidH = 0;
     c->playing = c->ended = c->failed = false;
     c->loading = true;
+    c->suspended = false;
+    c->playOnReady = false;
     c->loadTick = GetTickCount64();
     c->wantPoster = false;
     c->posterTries = 0;
@@ -232,19 +251,23 @@ static void MediaLoadFile(XjsMediaCtx* c, int fileId, const std::wstring& path) 
     }
 }
 
-/* 停播并卸载源 (HTML src="" 语义; 卸载失败无害 — 状态标志已清, 流不带独占锁) */
+/* 停播并卸载源; 引擎会话随之彻底拆毁 (Shutdown+Release)。
+   不再随窗常驻: 每窗一套 MediaEngine 会话 (解码器+帧池, 百 MB 级) 若只在关窗才释放,
+   多窗各预览视频 = 常驻内存逐窗叠加; 换选中/藏面板/关窗后把会话还给系统,
+   下次选中媒体经 MediaEnsureEngine 重建 (共享设备已就绪, 异步装载体验不变) */
 static void MediaUnload(XjsMediaCtx* c) {
     if (c->eng) {
-        c->eng->Pause();
-        BSTR empty = SysAllocStringLen(L"", 0);
-        if (empty) {
-            c->eng->SetSource(empty);
-            SysFreeString(empty);
-        }
+        c->eng->Shutdown();   /* 先停引擎 (断掉全部回调线程) 再释放; 卸源由 Shutdown 一并完成 */
+        c->eng->Release();
+        c->eng = NULL;
     }
+    if (c->engEx) { c->engEx->Release(); c->engEx = NULL; }
     c->fileId = -1;
     c->path.clear();
     c->loading = c->playing = c->ended = c->failed = false;
+    c->suspended = false;
+    c->resumePos = 0;
+    c->playOnReady = false;
     c->dur = c->pos = 0;
     c->hasVideo = false;
     c->wantPoster = false;
@@ -285,7 +308,7 @@ static bool MediaEnsureFrameTarget(XjsMediaCtx* c, int w, int h) {
     bool sized = c->frameW > 0 && abs(c->frameW - w) <= 3 && abs(c->frameH - h) <= 3;
     if (sized && (c->frameSurf || c->frameBmp)) return true;
     MediaDropFrameTarget(c);
-    if (c->dxgi && c->d3d && c->d3dc) {
+    if (s_dxgi && s_d3d && s_d3dc) {
         D3D11_TEXTURE2D_DESC d = {};
         d.Width = (UINT)w;
         d.Height = (UINT)h;
@@ -294,12 +317,12 @@ static bool MediaEnsureFrameTarget(XjsMediaCtx* c, int w, int h) {
         d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         d.SampleDesc.Count = 1;
         d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(c->d3d->CreateTexture2D(&d, NULL, &c->frameTex))) return false;
+        if (FAILED(s_d3d->CreateTexture2D(&d, NULL, &c->frameTex))) return false;
         if (FAILED(c->frameTex->QueryInterface(&c->frameSurf))) { MediaDropFrameTarget(c); return false; }
         d.BindFlags = 0;
         d.Usage = D3D11_USAGE_STAGING;
         d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(c->d3d->CreateTexture2D(&d, NULL, &c->stageTex))) { MediaDropFrameTarget(c); return false; }
+        if (FAILED(s_d3d->CreateTexture2D(&d, NULL, &c->stageTex))) { MediaDropFrameTarget(c); return false; }
         c->frameW = w;
         c->frameH = h;
         return true;
@@ -325,11 +348,11 @@ static bool MediaPullFrame(XjsMediaCtx* c) {
     RECT dst = { 0, 0, c->frameW, c->frameH };
     MFARGB border = { 0, 0, 0, 0 };
     if (c->frameSurf) {
-        /* 硬解: GPU 内缩放进目标纹理 → staging 回读 (同 UI 线程; 设备已开多线程保护) */
+        /* 硬解: GPU 内缩放进目标纹理 → staging 回读 (同 UI 线程; 共享设备已开多线程保护) */
         if (FAILED(c->eng->TransferVideoFrame(c->frameSurf, &src, &dst, &border))) return false;
-        c->d3dc->CopyResource(c->stageTex, c->frameTex);
+        s_d3dc->CopyResource(c->stageTex, c->frameTex);
         D3D11_MAPPED_SUBRESOURCE m = {};
-        if (FAILED(c->d3dc->Map(c->stageTex, 0, D3D11_MAP_READ, 0, &m))) return false;
+        if (FAILED(s_d3dc->Map(c->stageTex, 0, D3D11_MAP_READ, 0, &m))) return false;
         bool ok = false;
         if (m.pData && m.RowPitch >= (UINT)c->frameW * 4) {
             c->bits.resize((size_t)c->frameW * 4 * c->frameH);
@@ -339,7 +362,7 @@ static bool MediaPullFrame(XjsMediaCtx* c) {
             c->rev++;
             ok = true;
         }
-        c->d3dc->Unmap(c->stageTex, 0);
+        s_d3dc->Unmap(c->stageTex, 0);
         return ok;
     }
     if (!c->frameBmp) return false;
@@ -405,7 +428,17 @@ void XjsSearchWindow::MediaTick() {
                 if (d == d && d > 0) c->dur = d;
                 if (rs >= (USHORT)MF_MEDIA_ENGINE_READY_HAVE_CURRENT_DATA) {
                     c->loading = false;
-                    c->wantPoster = c->hasVideo;   /* 首帧海报 */
+                    if (c->resumePos > 0.05) {   /* 挂起恢复: 回跳原位置 (垫显字节还是旧位置画面) */
+                        c->eng->SetCurrentTime(c->resumePos);
+                        c->pos = c->resumePos;
+                        c->resumePos = 0;
+                    }
+                    if (c->playOnReady) {        /* 挂起中点了播放: 就绪即起播 (不闪 0 位) */
+                        c->eng->Play();
+                        c->playing = true;
+                        c->playOnReady = false;
+                    }
+                    c->wantPoster = c->hasVideo;   /* 首帧海报/回跳补帧 */
                 }
             } else if (GetTickCount64() - c->loadTick > XJS_MEDIA_LOAD_TIMEOUT_MS) {
                 c->loading = false;
@@ -483,16 +516,29 @@ void XjsSearchWindow::MediaSetFile(int fileId, const std::wstring& path) {
 }
 
 void XjsSearchWindow::MediaTogglePlay() {
+    if (media && media->suspended) {
+        /* 挂起中点了播放: 恢复装载, 元数据就绪后自动起播 (不闪 0 位) */
+        media->playOnReady = true;
+        MediaResume();
+        media->invState = -1;
+        MediaInvalidate(this);
+        return;
+    }
     if (!media || !media->eng || media->fileId < 0) return;
     if (media->playing) {
         media->eng->Pause();
         media->playing = false;
     } else {
-        /* 单声道原则: 开始播放即暂停其它窗口的媒体 (引擎各自独立, 不处理会叠音) */
+        /* 单声道原则: 开始播放即暂停其它窗口的媒体 (引擎各自独立, 不处理会叠音);
+           暂停即挂起 — 其余窗的引擎会话让位还内存 (海报字节保留, 切回点播放自动恢复)。
+           回调是无捕获裸函数指针, 用 Cur() 排除发起窗: 自己正要 Play, 会话绝不可被
+           自己的 MediaSuspend 拆掉 (曾致 eng->Play() 解引用空指针, 2026-09-30 全屏
+           点播放崩溃实锤; ForEach 只在 UI 线程消息处理中调用, Cur() 即发起窗) */
         XjsSearchWindow::ForEach([](XjsSearchWindow* o) {
-            if (o && o->media && o->media->playing && o->media->eng) {
+            if (o && o != XjsSearchWindow::Cur() && o->media && o->media->eng) {
                 o->media->eng->Pause();
                 o->media->playing = false;
+                o->MediaSuspend();
             }
         });
         if (media->ended) { media->eng->SetCurrentTime(0); media->ended = false; }
@@ -537,7 +583,17 @@ void XjsSearchWindow::MediaAdjustVolume(int dir) {
 }
 
 void XjsSearchWindow::MediaSeekFrac(double frac) {
-    if (!media || !media->eng || media->fileId < 0 || media->dur <= 0) return;
+    if (!media || media->fileId < 0 || media->dur <= 0) return;
+    if (media->suspended) {
+        /* 挂起中拖进度: 恢复装载并回跳目标位 (保持暂停; dur 是挂起前快照, 同文件有效) */
+        MediaResume();
+        media->pos = media->resumePos = frac * media->dur;
+        media->ended = false;
+        media->invPos = -1;
+        MediaInvalidate(this);
+        return;
+    }
+    if (!media->eng || media->dur <= 0) return;
     if (frac < 0) frac = 0;
     if (frac > 1) frac = 1;
     media->pos = frac * media->dur;   /* 立即回显 (引擎异步行进) */
@@ -558,6 +614,45 @@ void XjsSearchWindow::MediaStop() {
     MediaInvalidate(this);
 }
 
+/* 失活挂起: 拆掉本窗媒体引擎会话还内存 (解码器+帧池随分辨率可观), 画面字节与元数据保留
+   垫显 (卡片/全屏层不 blank, 进度停在原位)。仅 安全态 挂 (装载中/播放中/补帧中不动 —
+   正在看的片不许失声, 装载与首帧抓取值得跑完)。恢复 = 交互触发 MediaResume (同文件重
+   装载 + 回跳), 或换选中走 MediaSetFile 全新装载。触发点: 本窗 WM_ACTIVATE 失活、
+   其它窗口开始播放 (单声道原则的暂停即挂起) */
+void XjsSearchWindow::MediaSuspend() {
+    XjsMediaCtx* c = media;
+    if (!c || !c->eng || c->suspended || c->loading || c->playing || c->wantPoster) return;
+    c->resumePos = c->pos;
+    c->eng->Shutdown();
+    c->eng->Release();
+    c->eng = NULL;
+    if (c->engEx) { c->engEx->Release(); c->engEx = NULL; }
+    MediaDropFrameTarget(c);   /* 取帧目标面同放 (bits 保留 = 海报垫显) */
+    c->suspended = true;
+    if (hWnd) KillTimer(hWnd, ID_TIMER_MEDIA);   /* 泵无事可做 (Tick 对无会话本就摘表) */
+}
+
+/* 恢复挂起会话: 同文件重装载 (异步), 元数据就地保留 (卡片布局稳定), 位置/起播意图由
+   MediaTick 就绪分支消费 (resumePos 回跳 / playOnReady 起播) */
+void XjsSearchWindow::MediaResume() {
+    XjsMediaCtx* c = media;
+    if (!c || !c->suspended || c->fileId < 0) return;
+    double dur = c->dur;
+    int vw = c->vidW, vh = c->vidH;
+    bool hv = c->hasVideo;
+    double rpos = c->resumePos;
+    bool play = c->playOnReady;
+    c->suspended = false;
+    MediaLoadFile(c, c->fileId, c->path);   /* 重建引擎+装载 (状态复位, 置 loading) */
+    c->dur = dur;
+    c->vidW = vw;
+    c->vidH = vh;
+    c->hasVideo = hv;   /* 同文件, 元数据已知; 引擎值就绪后一致 */
+    c->resumePos = rpos;
+    c->playOnReady = play;
+    if (hWnd) SetTimer(hWnd, ID_TIMER_MEDIA, 40, NULL);
+}
+
 /* ==================== 绘制取用 ==================== */
 
 XjsMediaCtx* XjsMediaCreate(HWND hwnd) {
@@ -566,19 +661,20 @@ XjsMediaCtx* XjsMediaCreate(HWND hwnd) {
 
 void XjsMediaFree(XjsMediaCtx* c) {
     if (!c) return;
-    MediaDropFrameTarget(c);   /* 帧目标面 (DXGI 纹理对/surface/WIC 位图) 先于设备释放 */
+    MediaDropFrameTarget(c);   /* 帧目标面 (DXGI 纹理对/surface/WIC 位图) 先于会话释放 */
     if (c->eng) c->eng->Shutdown();   /* 先停引擎 (断掉全部回调线程) 再释放 */
     if (c->eng) c->eng->Release();
     if (c->engEx) c->engEx->Release();
     if (c->notify) c->notify->Release();
-    if (c->dxgi) c->dxgi->Release();
-    if (c->d3dc) c->d3dc->Release();
-    if (c->d3d) c->d3d->Release();
     if (c->cache) c->cache->Release();
     delete c;
+    /* 共享设备 (s_d3d/s_d3dc/s_dxgi) 是进程级, 不随会话释放 — 配对释放在 XjsMediaGlobalShutdown */
 }
 
 void XjsMediaGlobalShutdown() {
+    if (s_dxgi) { s_dxgi->Release(); s_dxgi = NULL; }
+    if (s_d3dc) { s_d3dc->Release(); s_d3dc = NULL; }
+    if (s_d3d) { s_d3d->Release(); s_d3d = NULL; }
     if (s_mfUp) {
         MFShutdown();
         s_mfUp = false;

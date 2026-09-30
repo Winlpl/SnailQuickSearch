@@ -1252,6 +1252,8 @@ public:
     void MediaSeekFrac(double frac);  /* 进度条寻位 0..1 (拖动中连续调; 暂停态自动补抓帧) */
     void MediaTick();                 /* ID_TIMER_MEDIA 泵: 状态推进/帧搬运 + 计时器自管理 */
     void MediaStop();                 /* 停播并卸载 (换选中/藏面板/插件面板接管) */
+    void MediaSuspend();              /* 失活挂起: 拆引擎会话还内存 (仅非装载/播放/补帧态; 海报字节保留垫显) */
+    void MediaResume();               /* 恢复挂起: 同文件重装载 + 位置回跳 (播放/寻位等交互触发) */
 };
 
 /* 作用域内把"当前窗"临时切到指定窗口 (设置窗等 owner 绑定场景); 析构自动恢复 */

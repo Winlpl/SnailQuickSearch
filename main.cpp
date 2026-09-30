@@ -1182,6 +1182,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             bool active = LOWORD(wParam) != WA_INACTIVE;
             XjsCaretBlink::SetWindowActive(hwnd, active);
             XjsPreviewPanelFocus(hwnd, active);   /* 面板接管: 激活/失活转插件 (熄自绘光标) */
+            if (!active) w->MediaSuspend();   /* 失活即挂起媒体会话 (仅非装载/播放态) — 引擎只留给前台窗 */
             /* 每窗"窗口失去焦点: 关闭窗口" (launcher 口径): 经统一消失策略 (主窗藏托盘/子窗销毁)。
                豁免 = 本窗自有模态层/菜单开着 (它们抢前台会让本窗收到 WA_INACTIVE, 不豁免则
                弹个菜单就把窗口关了) + 设置窗正作用在本窗 */
