@@ -62,7 +62,7 @@ enum XjsSetAct {
     /* 插件管理 (全局, 2026-09-19): 段 1600..1666 上方空闲无邻段 */
     ACT_PLUGINS_OPENDIR = 1600,  /* 打开插件目录 */
     ACT_PLUGINS_RESCAN  = 1601,  /* 重新扫描 plugins\ */
-    ACT_PLUGINS_TOGGLE  = 1602,  /* +插件下标 启用/禁用 (上限 200, 同票号上限; 首次启用过确认框) */
+    ACT_PLUGINS_TOGGLE  = 1602,  /* +插件下标 启用/禁用 (上限 200, 同票号上限) */
     /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲 */
     ACT_TSAVE = 2000,            /* 表格保存 (按当前分类下发 文件分类/别名) */
     ACT_TADD  = 2001,            /* 表格添加一行 (按当前分类; 分类行自动预填下一个空闲类型号) */
@@ -479,7 +479,7 @@ static void XjsSetAppendMdPage(int pageIdx, const wchar_t* cardTitle, const wcha
 
 /* ==================== 插件页 (全局分类, 2026-09-19) ==================== */
 
-/* 权限/能力徽章文本 (用户视角审计; 行模型与启用确认框共用) */
+/* 权限/能力徽章文本 (用户视角审计; 声明性说明, 宿主不强制) */
 static std::wstring XjsSetPluginPermsText(unsigned m) {
     std::wstring s;
     auto add = [&s](bool on, const wchar_t* key) {
@@ -524,8 +524,8 @@ static std::wstring XjsSetPluginStatusText(const XjsPluginBrief& b) {
 }
 
 /* 启用开关执行端: 禁用=闸门关 (已注入菜单下次构建自然消失, 不置灰 — 照源样式口径), 即时落盘;
-   启用=首次/版本变化先过风险确认框 (原生插件与主程序同权限, 诚实口径原文必须出现),
-   通过后立即加载; 失败 toast + 状态列显示原因, 不写回启用态 (设计稿 §2.2) */
+   启用=直接生效并立即加载; 失败 toast + 状态列显示原因, 不写回启用态 (设计稿 §2.2)。
+   (风险确认框已随权限降级为纯声明移除 — manifest「权限」能力说明在管理页徽章展示) */
 static void XjsSetPluginToggle(int i) {
     XjsPluginBrief b;
     if (!XjsPluginBriefAt(i, &b)) return;
@@ -536,23 +536,6 @@ static void XjsSetPluginToggle(int i) {
         s_set.rowsDirty = true;
         InvalidateRect(s_set.hwnd, NULL, FALSE);
         return;
-    }
-    if (XjsPluginNeedsConfirm(i)) {
-        std::wstring dllPath = b.hasDll ? (b.dir + L"\\" + b.dllFile) : XjsT(L"设置.插件.确认.无DLL");
-        std::wstring nl = L"\n";
-        std::wstring desc = XjsT(L"设置.插件.确认.行版本") + (b.version.empty() ? L"-" : b.version) + nl
-                          + XjsT(L"设置.插件.确认.行作者") + (b.author.empty() ? L"-" : b.author) + nl
-                          + XjsT(L"设置.插件.确认.行DLL") + dllPath + nl
-                          + XjsT(L"设置.插件.确认.行权限") + XjsSetPluginPermsText(b.perms) + nl
-                          + XjsT(L"设置.插件.确认.行能力") + XjsSetPluginCapsText(b.caps) + nl + nl
-                          + XjsT(L"设置.插件.确认.风险原文");
-        int r = XjsShowAskDialog(s_set.hwnd,
-                                 (XjsT(L"设置.插件.确认.标题前缀") + b.name).c_str(),
-                                 desc.c_str(),
-                                 ("[{\"text\":\"" + XjsTUtf8(L"设置.插件.确认.启用按钮") + "\",\"style\":\"danger\"},{\"text\":\""
-                                  + XjsTUtf8(L"通用词.取消") + "\"}]").c_str());
-        if (r != 0) return;
-        XjsPluginMarkConfirmed(i);   /* 记"已确认版本", 同版本不再打扰 (调用方落盘) */
     }
     std::wstring err;
     if (!XjsPluginEnable(i, &err))
@@ -2523,7 +2506,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         case ACT_GLM:       ShellExecuteW(NULL, L"open", L"https://open.bigmodel.cn/", NULL, NULL, SW_SHOWNORMAL); break;  /* GLM 官网 (智谱开放平台 BigModel) */
         default:
             if (act >= ACT_PLUGINS_TOGGLE && act < ACT_PLUGINS_TOGGLE + 200) {
-                XjsSetPluginToggle(act - ACT_PLUGINS_TOGGLE);   /* 插件启用开关 (含首次启用确认框) */
+                XjsSetPluginToggle(act - ACT_PLUGINS_TOGGLE);   /* 插件启用开关 */
                 break;
             }
             if (act >= ACT_MATCH && act < ACT_MATCH + 8) {

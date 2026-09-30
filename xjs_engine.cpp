@@ -602,11 +602,11 @@ static const char* const K_ENGINE = "绘制引擎";              /* 顶层: "d2d
 static const char* const K_WINRECT = "窗口矩形";             /* 窗口条目内: {横坐标,纵坐标,宽,高,DPI}; 曾为顶层共享键(已迁入槽0后废弃) */
 static const char* const K_REBUILD = "重建记忆";             /* 顶层: 重建对话框记忆 */
 static const char* const K_COLSG = "列布局";                 /* 顶层: 全局列默认 (旧扁平键, 兜底用) */
-static const char* const K_PLUGINS = "插件";                 /* 顶层: 插件用户状态数组 [{标识,启用,已确认版本}]
-                                                                (目录发现/清单/加载状态不落盘 — 运行时扫 plugins\) */
+static const char* const K_PLUGINS = "插件";                 /* 顶层: 插件用户状态数组 [{标识,启用}]
+                                                                (目录发现/清单/加载状态不落盘 — 运行时扫 plugins\;
+                                                                 条目里的旧「已确认版本」键随风险确认框移除已废弃, 不读不写) */
 static const char* const K_P_ID = "标识";
 static const char* const K_P_ENABLED = "启用";
-static const char* const K_P_CONFIRMED = "已确认版本";
 /* 搜索模式条目内键 (共享/私有同一结构) */
 static const char* const K_M_ID = "标识";                    /* 曾为 "id", 2026-09-19 全配置中文主键 */
 static const char* const K_M_NAME = "名称";
@@ -1861,15 +1861,14 @@ void XjsLoadConfig() {
     g_doubleCtrlTarget = XjsConfig::Str(g_cfg.Root(), K_DOUBLECTRL, L"");
     g_gfxEngine = (XjsConfig::Str(g_cfg.Root(), K_ENGINE, L"d2d") == L"gdiplus") ? 1 : 0;   /* 绘制引擎 (重启生效) */
 
-    /* 插件用户状态 (顶层 "插件" 数组): 标识/启用/已确认版本 — 目录发现与清单在 XjsPluginStartup 扫描 */
+    /* 插件用户状态 (顶层 "插件" 数组): 标识/启用 — 目录发现与清单在 XjsPluginStartup 扫描 */
     if (auto pit = g_cfg.Root().find(K_PLUGINS); pit != g_cfg.Root().end() && pit->second.is<picojson::array>()) {
         for (auto& e : pit->second.get<picojson::array>()) {
             if (!e.is<picojson::object>()) continue;
             const picojson::object& po = e.get<picojson::object>();
             std::wstring id = XjsConfig::Str(po, K_P_ID, L"");
             if (!id.empty())
-                XjsPluginUserStateSet(id.c_str(), XjsConfig::Bool(po, K_P_ENABLED, false),
-                                      XjsConfig::Str(po, K_P_CONFIRMED, L"").c_str());
+                XjsPluginUserStateSet(id.c_str(), XjsConfig::Bool(po, K_P_ENABLED, false));
         }
     }
 
@@ -2230,12 +2229,11 @@ void XjsSaveConfig() {
     {
         picojson::array parr;
         for (int i = 0; i < XjsPluginUserStateCount(); i++) {
-            std::wstring id, ver; bool en = false;
-            if (!XjsPluginUserStateAt(i, &id, &en, &ver)) continue;
+            std::wstring id; bool en = false;
+            if (!XjsPluginUserStateAt(i, &id, &en)) continue;
             picojson::object po;
             po[K_P_ID] = picojson::value(Utf16ToUtf8(id.c_str()));
             po[K_P_ENABLED] = picojson::value(en);
-            po[K_P_CONFIRMED] = picojson::value(Utf16ToUtf8(ver.c_str()));
             parr.push_back(picojson::value(po));
         }
         g_cfg.Set(K_PLUGINS, picojson::value(parr));

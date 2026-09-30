@@ -1897,7 +1897,7 @@ struct XjsPluginBrief {
     std::wstring id, name, version, author, description;
     bool declared = false;        /* manifest 解析成功 */
     std::wstring manifestErr;
-    bool enabled = false;         /* 用户开关 (宿主闸门依据) */
+    bool enabled = false;         /* 用户开关 (禁用 = 宿主闸门依据) */
     bool loaded = false;          /* DLL 已加载 Init 成功 */
     bool staleDll = false;        /* 重扫发现 DLL 比加载时新 → "需重启生效" */
     std::wstring loadErr;
@@ -1905,20 +1905,19 @@ struct XjsPluginBrief {
     unsigned caps = 0, perms = 0;
     int type = 0;
     bool hasDll = false;
-    std::wstring dllFile;         /* DLL 文件名 (确认框展示完整路径用; 纯声明式 = 空) */
+    std::wstring dllFile;         /* DLL 文件名 (状态列展示; 纯声明式 = 空) */
 };
 int  XjsPluginCount();
 bool XjsPluginBriefAt(int i, XjsPluginBrief* out);
-bool XjsPluginNeedsConfirm(int i);                 /* 首次启用或版本变化 → 启用前弹风险确认框 */
-void XjsPluginMarkConfirmed(int i);                /* 记当前版本为已确认 (调用方随后 XjsSaveConfig) */
 bool XjsPluginEnable(int i, std::wstring* err);    /* 闸门开 + 有 DLL 时立即加载; 失败=false+原因, 不写回启用态 */
 void XjsPluginDisable(int i);                      /* 闸门关 (不卸载); 其搜索模式/托管来源由调用方剔除并重搜 */
 void XjsPluginOpenDir(int i);
 
-/* 用户状态 (启用/已确认版本) — XjsLoadConfig/XjsSaveConfig 经此读写顶层 "插件" 键 (picojson 留 engine 文件) */
-void XjsPluginUserStateSet(const wchar_t* id, bool enabled, const wchar_t* confirmedVer);
+/* 用户状态 (启用) — XjsLoadConfig/XjsSaveConfig 经此读写顶层 "插件" 键 (picojson 留 engine 文件)
+   (旧配置条目里的「已确认版本」键随风险确认框移除已废弃, 读到忽略即可) */
+void XjsPluginUserStateSet(const wchar_t* id, bool enabled);
 int  XjsPluginUserStateCount();
-bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled, std::wstring* confirmedVer);
+bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled);
 
 /* 文件右键 / 搜索框右键菜单追加 (无活跃插件 = 零痕迹; 项 id = IDM_PLUGIN_BASE+票号, 回传进 OnMenuTicket)。
    ids = 文件上下文 (引擎 FileId, v3 口径: 宿主与插件的文件引用一律 ID, 路径各自直连引擎自取) */

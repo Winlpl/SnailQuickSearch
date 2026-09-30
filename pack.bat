@@ -98,7 +98,6 @@ if errorlevel 8 goto :fail
 rem ---- 插件默认启用种子: 仅含"插件"状态数组, 进包改名为 xjs_config.json = 全新安装插件即启用 ----
 copy /y "Config\release_default_config.json" "!TMPD!\Config\xjs_config.json" >nul
 if errorlevel 1 goto :fail
-powershell -NoProfile -Command "$seed = Get-Content 'Config\release_default_config.json' -Raw -Encoding UTF8 | ConvertFrom-Json; $bad=@(); foreach($p in Get-ChildItem 'plugins' -Directory){ $mf='plugins\'+$p.Name+'\manifest.json'; if(!(Test-Path $mf)){continue}; $mv=(Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json).'版本'; $e=$seed.'插件' | Where-Object { $_.'标识' -eq $p.Name }; if(!$e -or $e.'已确认版本' -ne $mv){ $bad += $p.Name } }; if($bad.Count -gt 0){ Write-Output ('[WARN] seed confirmed-version mismatch vs manifest: ' + ($bad -join ', ') + ' (first start will show confirm dialog; sync Config\release_default_config.json)') }"
 :dozip
 rem 逐文件写入: 条目名用 / 分隔 (CreateFromDirectory 会写 \ 分隔, 跨平台不兼容)
 powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::Open('!CD!\!OUT!','Create'); Get-ChildItem -LiteralPath '!TMPD!' -Recurse -File | ForEach-Object { $r=$_.FullName.Substring(('!TMPD!').Length+1) -replace '\\','/'; [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($z, $_.FullName, $r, 'Optimal') | Out-Null }; $z.Dispose()" >nul 2>&1

@@ -4,9 +4,9 @@
  * 插件侧入口 = 宿主表尾追加的 host->QueryApi(name) 名称解析 (xjs_plugin_sdk.h):
  * 拿到函数指针后按 XjsApi* 类型调用。设计口径:
  *   - 宿主表自此冻结 (v4 只追加纪律的最后一件), 以后新 API 一律"加名字 + 加类型", 不再扩表。
- *   - 权限: 读免权限 (照 GetSkinJson 口径); 写设置/增删模式 = 清单 "权限" 加 "settings";
- *     界面动作/按模式执行 = "ui"。闸门唯一入口 = xjs_plugin.cpp 的 XjsPluginApiGate
- *     (PluginApiCheck 薄包装), 本文件不做任何旁路校验。
+ *   - 权限: manifest "权限" 字段只是能力声明 (管理页展示), 宿主不运行期强制。
+ *     闸门唯一入口 = xjs_plugin.cpp 的 XjsPluginApiGate (PluginApiCheck 薄包装,
+ *     只查 启用闸+UI 线程+可选能力位), 本文件不做任何旁路校验。
  *   - 全部仅 UI 线程 (摸的都是窗口/UI 状态; 引擎数据照旧直连 xunjieso, 不在本表面)。
  *     每窗状态一律先 XjsWindowScope 认窗再动 (可维护性红线: 禁依赖"当前窗"隐式状态)。
  *   - 设置写入 = 改窗口字段 / 调既有应用入口 (与设置页同一落点) + XjsSaveConfig 落盘
@@ -187,7 +187,7 @@ static void ApplyPreviewVisible(XjsSearchWindow* w, bool v) {
 
 static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* membersJsonUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_SETTINGS)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     std::vector<XjsJsonMember> ms;
     if (!XjsPluginJsonMembers(membersJsonUtf8, &ms) || ms.empty()) return XJS_PLUGIN_ERR_ARG;
     XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
@@ -286,7 +286,7 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
 /* ==================== settings.global.get / settings.global.set ==================== */
 
 static int ApiGlobalGet(XjsPluginCtx* ctx, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     std::string j = "{";
     j += "\"双击Ctrl目标\":" + PluginJsonStr(Utf16ToUtf8(g_doubleCtrlTarget.c_str()));
@@ -297,7 +297,7 @@ static int ApiGlobalGet(XjsPluginCtx* ctx, char* buf, int cap) {
 
 static int ApiGlobalSet(XjsPluginCtx* ctx, const char* membersJsonUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_SETTINGS)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     std::vector<XjsJsonMember> ms;
     if (!XjsPluginJsonMembers(membersJsonUtf8, &ms) || ms.empty()) return XJS_PLUGIN_ERR_ARG;
     for (auto& m : ms) {
@@ -334,7 +334,7 @@ static int ApiGlobalSet(XjsPluginCtx* ctx, const char* membersJsonUtf8) {
 /* ==================== windows.enum / window.state / window.cmd / window.create ==================== */
 
 static int ApiWindowsEnum(XjsPluginCtx* ctx, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     std::string j = "[";
     for (int i = 0; i < XjsSearchWindow::Count(); i++) {
@@ -385,7 +385,7 @@ static int ApiWindowState(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, i
    "openSettings"=打开设置窗并绑定本窗口 */
 static int ApiWindowCmd(XjsPluginCtx* ctx, XjsWindowToken window, const char* cmdUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_UI)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     if (!cmdUtf8 || !*cmdUtf8) return XJS_PLUGIN_ERR_ARG;
     XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
     if (!w) return e;
@@ -411,7 +411,7 @@ static int ApiWindowCmd(XjsPluginCtx* ctx, XjsWindowToken window, const char* cm
 static int ApiWindowCreate(XjsPluginCtx* ctx, XjsWindowToken inheritFrom,
                            const char* profileNameUtf8, XjsWindowToken* tokenOut) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_UI)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     if (g_isScanning.load()) return XJS_PLUGIN_ERR_STATE;   /* 遍历中禁止创建新窗口 */
     int slot = -1;
     if (profileNameUtf8 && *profileNameUtf8) {
@@ -490,7 +490,7 @@ static int ApiModesList(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, int
    回传 {"标识":"p:<插件id>:<序>"} — modes.remove / modes.appy 就吃这个 id。 */
 static int ApiModesAdd(XjsPluginCtx* ctx, XjsWindowToken window, const char* defJsonUtf8,
                        char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, XPP_SETTINGS, XPC_SEARCHMODES);   /* 权限 + 声明过搜索模式能力 */
+    int e = XjsPluginApiGate(ctx, XPC_SEARCHMODES);   /* 需声明过搜索模式能力 */
     if (e != XJS_PLUGIN_OK) return e;
     (void)window;   /* 运行时模式一律全局生效 (与清单模式同口径), 窗口参数仅预留 */
     std::vector<XjsJsonMember> ms;
@@ -535,7 +535,7 @@ static int ApiModesAdd(XjsPluginCtx* ctx, XjsWindowToken window, const char* def
    标签链里引用它的来源一并剔除并重搜 (XjsHostedPurgeMode, 模式菜单 ✕ 同口径)。 */
 static int ApiModesRemove(XjsPluginCtx* ctx, const char* modeIdUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_SETTINGS)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     if (!modeIdUtf8 || !*modeIdUtf8) return XJS_PLUGIN_ERR_ARG;
     std::wstring id = Utf8ToUtf16(modeIdUtf8);
     std::wstring owner;
@@ -558,7 +558,7 @@ static int ApiModesRemove(XjsPluginCtx* ctx, const char* modeIdUtf8) {
 static int ApiModesApply(XjsPluginCtx* ctx, XjsWindowToken window, const char* modeIdUtf8,
                          const char* inputUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, XPP_UI)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     if (!modeIdUtf8 || !*modeIdUtf8) return XJS_PLUGIN_ERR_ARG;
     XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
     if (!w) return e;
@@ -579,12 +579,12 @@ static int ApiModesApply(XjsPluginCtx* ctx, XjsWindowToken window, const char* m
 }
 
 /* ==================== 插件互操作桥梁: plugins.list / plugins.state / msg.send / msg.broadcast ====================
- * 发现 + 消息全部免权限; 消息经宿主中转 (xjs_plugin.cpp 的派发落点), 插件之间不直连 —
+ * 发现 + 消息全开放; 消息经宿主中转 (xjs_plugin.cpp 的派发落点), 插件之间不直连 —
  * 启停闸门 / fromId 身份 (不可伪造) / 线程契约宿主统一把守。收信口 = 插件可选导出
  * XjsPlugin_OnPluginMessage; 同伴上线/下线经 XJS_PLUGIN_EVT_PLUGINS 纯信号通知 (重查 list)。 */
 
 static int ApiPluginsList(XjsPluginCtx* ctx, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     std::string j = "[";
     for (int i = 0; i < XjsPluginCount(); i++) {
@@ -607,7 +607,7 @@ static int ApiPluginsList(XjsPluginCtx* ctx, char* buf, int cap) {
 
 /* id 未扫描到也返回 OK ({"存在":false}) — "有没有"本身是查询结果, 不走异常错误码 */
 static int ApiPluginsState(XjsPluginCtx* ctx, const char* idUtf8, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     if (!idUtf8 || !*idUtf8) return XJS_PLUGIN_ERR_ARG;
     std::wstring want = Utf8ToUtf16(idUtf8);
@@ -630,13 +630,13 @@ static int ApiPluginsState(XjsPluginCtx* ctx, const char* idUtf8, char* buf, int
 
 static int ApiMsgSend(XjsPluginCtx* ctx, const char* targetIdUtf8, const char* jsonUtf8, char* buf, int cap) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, 0)) != XJS_PLUGIN_OK) return e;   /* 免权限: 启用闸 + UI 线程照查 */
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;   /* 启用闸 + UI 线程照查 */
     return XjsPluginApiMsgSend(ctx, targetIdUtf8, jsonUtf8, buf, cap);
 }
 
 static int ApiMsgBroadcast(XjsPluginCtx* ctx, const char* jsonUtf8) {
     int e;
-    if ((e = XjsPluginApiGate(ctx, 0)) != XJS_PLUGIN_OK) return e;
+    if ((e = XjsPluginApiGate(ctx)) != XJS_PLUGIN_OK) return e;
     return XjsPluginApiMsgBroadcast(ctx, jsonUtf8);
 }
 
@@ -646,7 +646,7 @@ static int ApiMsgBroadcast(XjsPluginCtx* ctx, const char* jsonUtf8) {
  * 有效名再写, 免得对未知名盲试 (settings.set 对未知名整体拒绝 ERR_NOTFOUND)。 */
 
 static int ApiSkinsList(XjsPluginCtx* ctx, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     std::string j = "[";
     for (auto& k : XjsSkinEnumerate()) {
@@ -658,7 +658,7 @@ static int ApiSkinsList(XjsPluginCtx* ctx, char* buf, int cap) {
 }
 
 /* ==================== window.selection ====================
- * 某窗口当前选中集 (免权限读面)。FileId 直出 (引擎为事实源, 照 OnCommand 的 FileId
+ * 某窗口当前选中集 (开放读面)。FileId 直出 (引擎为事实源, 照 OnCommand 的 FileId
  * 口径 — 路径/名称插件自取), maxIds 截断防巨选区 (全选 451 万时全量拼 JSON 必爆缓冲);
  * "选中数" 恒为全量, 调用方按它与 len(文件ID) 自知是否截断。 */
 static int ApiWindowSelection(XjsPluginCtx* ctx, XjsWindowToken window, int maxIds, char* buf, int cap) {
@@ -694,10 +694,10 @@ static int ApiWindowSelection(XjsPluginCtx* ctx, XjsWindowToken window, int maxI
 }
 
 /* ==================== langs.list ====================
- * 可用界面语言清单 (免权限读面; 名称恒母语)。与 skins.list 同分工: 这里查有效代码,
+ * 可用界面语言清单 (开放读面; 名称恒母语)。与 skins.list 同分工: 这里查有效代码,
  * 读写走 settings.get / settings.set 的 "语言" 键 ("auto"=跟随系统, 恒合法不在此列)。 */
 static int ApiLangsList(XjsPluginCtx* ctx, char* buf, int cap) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) return e;
     std::string j = "[";
     for (int l = XLANG_ZH; l < XLANG_N; l++) {
@@ -715,7 +715,7 @@ static int ApiLangsList(XjsPluginCtx* ctx, char* buf, int cap) {
  * 只发指针不做包装 — 行缓存/重绘链是引擎结果对象自身的变化事件链, 宿主不代劳。 */
 static xjs_result* ApiWindowResult(XjsPluginCtx* ctx, XjsWindowToken window) {
     int e;
-    if (XjsPluginApiGate(ctx, XPP_UI) != XJS_PLUGIN_OK) return NULL;
+    if (XjsPluginApiGate(ctx) != XJS_PLUGIN_OK) return NULL;
     XjsSearchWindow* w = XjsPluginApiWindow(ctx, window, &e);
     if (!w) return NULL;
     XjsWindowScope scope(w);
@@ -723,10 +723,10 @@ static xjs_result* ApiWindowResult(XjsPluginCtx* ctx, XjsWindowToken window) {
 }
 
 /* ==================== drag.lastPaths ====================
- * 最近一次列表拖出会话的路径快照 (免权限读面; 快照本体与时效基准在 xjs_util,
+ * 最近一次列表拖出会话的路径快照 (开放读面; 快照本体与时效基准在 xjs_util,
  * 名称匹配/时效判定在插件侧)。指针表静态复用 — 本 API 契约仅 UI 线程, 无并发。 */
 static unsigned long ApiDragPaths(XjsPluginCtx* ctx, const wchar_t* const** paths, unsigned long* count) {
-    int e = XjsPluginApiGate(ctx, 0);
+    int e = XjsPluginApiGate(ctx);
     if (e != XJS_PLUGIN_OK) {
         if (paths) *paths = NULL;
         if (count) *count = 0;

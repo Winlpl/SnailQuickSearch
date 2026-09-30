@@ -28,10 +28,10 @@ struct XjsPluginCtx;   /* 完整定义在 xjs_plugin_sdk.h (只有两个插件 c
 void* XJS_PLUGIN_CALL XjsPluginApiQuery(XjsPluginCtx* ctx, const char* name);
 
 /* ---- 闸门/身份 (xjs_plugin.cpp 实现: 注册表细节不外泄, 只给窄口) ---- */
-/* 统一闸门 = PluginApiCheck(ctx, perm, uiOnly=true) 薄包装 (全部扩展 API 仅 UI 线程);
-   perm = XPP_* 位 (0 = 免权限, 只查启用闸); cap = 需同时声明的能力位 (0 = 不查)。
-   返回 XJS_PLUGIN_OK 或错误码 (禁用/未授权 = ERR_PERM, 错线程 = ERR_THREAD)。 */
-int  XjsPluginApiGate(XjsPluginCtx* ctx, unsigned perm, unsigned cap = 0);
+/* 统一闸门 = PluginApiCheck(ctx, uiOnly=true) 薄包装 (全部扩展 API 仅 UI 线程);
+   cap = 需同时声明的能力位 (0 = 不查); manifest「权限」只是能力声明, 宿主不强制。
+   返回 XJS_PLUGIN_OK 或错误码 (禁用 = ERR_PERM, 错线程 = ERR_THREAD)。 */
+int  XjsPluginApiGate(XjsPluginCtx* ctx, unsigned cap = 0);
 /* 窗口令牌 → 窗口 (0 = 主窗缺省; 失效 = NULL, *err = ERR_NOTFOUND) */
 XjsSearchWindow* XjsPluginApiWindow(XjsPluginCtx* ctx, unsigned long long token, int* err);
 /* 调用插件身份 id (目录名; 归属标记用, 运行时模式的 owner) */

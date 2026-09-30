@@ -38,7 +38,6 @@ struct XjsPluginCtx {
 struct XjsPluginUserState {
     std::wstring id;
     bool enabled = false;
-    std::wstring confirmedVer;
 };
 
 struct XjsPluginEntry {
@@ -46,7 +45,6 @@ struct XjsPluginEntry {
     std::wstring dir;             /* plugins\<id> 绝对路径 */
     std::wstring dllPath;         /* 空 = 纯声明式插件 */
     bool enabled = false;         /* 用户开关 (宿主闸门依据; 加载失败不写回 false — 设计稿 §2.2) */
-    std::wstring confirmedVer;    /* 已确认版本 (风险确认框记忆) */
     bool loaded = false;          /* DLL 已加载且 Init 成功 (纯声明式插件随 enabled 视为可用) */
     std::wstring loadErr;         /* 最近一次加载失败原因 */
     bool staleDll = false;        /* 重扫发现 DLL 比加载时新 → "需重启生效" */
@@ -206,17 +204,17 @@ static XjsSearchWindow* PluginWindowOfToken(unsigned long long tok) {
 
 /* ---- 扩展 API (xjs_plugin_api.cpp) 的窄口: 闸门/令牌/身份唯一出口 (声明见 xjs_plugin_api.h) ----
    注册表/票号/令牌代是本文件实现细节, 扩展 API 一律经这四个包装取用, 不外泄条目指针 */
-static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPluginEntry** out);   /* 定义在下方 */
-int XjsPluginApiGate(XjsPluginCtx* ctx, unsigned perm, unsigned cap) {
+static int PluginApiCheck(XjsPluginCtx* ctx, bool uiOnly, XjsPluginEntry** out);   /* 定义在下方 */
+int XjsPluginApiGate(XjsPluginCtx* ctx, unsigned cap) {
     XjsPluginEntry* p;
-    int e = PluginApiCheck(ctx, perm, true, &p);   /* 扩展 API 全部仅 UI 线程 */
+    int e = PluginApiCheck(ctx, true, &p);   /* 扩展 API 全部仅 UI 线程 */
     if (e != XJS_PLUGIN_OK) return e;
     if (cap && !(p->mf.caps & cap)) return XJS_PLUGIN_ERR_PERM;
     return XJS_PLUGIN_OK;
 }
 XjsSearchWindow* XjsPluginApiWindow(XjsPluginCtx* ctx, unsigned long long token, int* err) {
     XjsPluginEntry* p;
-    if (PluginApiCheck(ctx, 0, true, &p) != XJS_PLUGIN_OK) { if (err) *err = XJS_PLUGIN_ERR_PERM; return NULL; }
+    if (PluginApiCheck(ctx, true, &p) != XJS_PLUGIN_OK) { if (err) *err = XJS_PLUGIN_ERR_PERM; return NULL; }
     XjsSearchWindow* w = PluginWindowOfToken(token);
     if (err) *err = w ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_NOTFOUND;
     return w;
@@ -224,7 +222,7 @@ XjsSearchWindow* XjsPluginApiWindow(XjsPluginCtx* ctx, unsigned long long token,
 void XjsPluginApiPluginId(XjsPluginCtx* ctx, std::wstring* out) {
     XjsPluginEntry* p;
     if (out) out->clear();
-    if (PluginApiCheck(ctx, 0, true, &p) == XJS_PLUGIN_OK && out) *out = p->mf.id;
+    if (PluginApiCheck(ctx, true, &p) == XJS_PLUGIN_OK && out) *out = p->mf.id;
 }
 unsigned long long XjsPluginApiTokenOf(XjsSearchWindow* w) {
     return (w && w->hWnd) ? PluginTokenOf(w->hWnd) : 0;
@@ -235,8 +233,10 @@ unsigned long long XjsPluginApiTokenOf(XjsSearchWindow* w) {
    退役注册表保活, 解锁后 p 的后续读取内存安全; 锁绝不横跨插件代码, 无重入死锁面 */
 static SRWLOCK s_regLock = SRWLOCK_INIT;
 
-/* 宿主 API 入口统一校验: ctx 身份 → 宿主闸门(enabled) → 权限位 → 线程 */
-static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPluginEntry** out) {
+/* 宿主 API 入口统一校验: ctx 身份 → 宿主闸门(enabled) → 线程。
+   manifest「权限」只是插件对自身能力的声明 (管理页展示供用户了解), 宿主不运行期强制 —
+   插件与主程序同地址空间同权限, 权限闸防不住绕道的 DLL, 真正防线 = 默认禁用 + 用户知情。 */
+static int PluginApiCheck(XjsPluginCtx* ctx, bool uiOnly, XjsPluginEntry** out) {
     *out = NULL;
     if (!ctx || ctx->magic != XJS_CTX_MAGIC) return XJS_PLUGIN_ERR_ARG;
     AcquireSRWLockShared(&s_regLock);   /* 护取下标瞬间: 重扫 (PluginScan 排他锁) 不得并发读 vector 本体 */
@@ -246,7 +246,6 @@ static int PluginApiCheck(XjsPluginCtx* ctx, unsigned perm, bool uiOnly, XjsPlug
     /* 解锁后读 p 安全: 条目缓冲重扫时整体移入退役注册表保活 (值可能已 stale, ctx↔下标双向对表兜底) */
     if (!p || p->ctx != ctx) return XJS_PLUGIN_ERR_ARG;  /* 指针↔下标双向对表 (重扫后 idx 刷新前的旧 ctx) */
     if (!p->enabled) return XJS_PLUGIN_ERR_PERM;       /* 禁用 = 宿主强制闸门 (照正式版口径) */
-    if (perm && !(p->mf.perms & perm)) return XJS_PLUGIN_ERR_PERM;
     if (uiOnly && !PluginUiThread()) return XJS_PLUGIN_ERR_THREAD;
     *out = p;
     return XJS_PLUGIN_OK;
@@ -278,7 +277,7 @@ int XjsPluginApiMsgSend(XjsPluginCtx* sender, const char* targetIdUtf8, const ch
     if (!target) return XJS_PLUGIN_ERR_NOTFOUND;                            /* 没这个插件 (未扫描到) */
     if (!PluginActive(*target) || !target->fnOnPluginMessage) return XJS_PLUGIN_ERR_STATE;   /* 禁用/未加载/没导出收信口 */
     XjsPluginEntry* sp;
-    int ge = PluginApiCheck(sender, 0, true, &sp);
+    int ge = PluginApiCheck(sender, true, &sp);
     if (ge != XJS_PLUGIN_OK) return ge;
     if (!sp) return XJS_PLUGIN_ERR_ARG;
     std::string from8 = Utf16ToUtf8(sp->mf.id.c_str());
@@ -296,7 +295,7 @@ int XjsPluginApiMsgBroadcast(XjsPluginCtx* sender, const char* jsonUtf8) {
     if (!jsonUtf8 || strlen(jsonUtf8) > XJS_MSG_MAX) return XJS_PLUGIN_ERR_ARG;
     if (s_msgDepth >= 16) return XJS_PLUGIN_ERR_STATE;
     XjsPluginEntry* sp;
-    int ge = PluginApiCheck(sender, 0, true, &sp);
+    int ge = PluginApiCheck(sender, true, &sp);
     if (ge != XJS_PLUGIN_OK) return ge;
     if (!sp) return XJS_PLUGIN_ERR_ARG;
     std::string from8 = Utf16ToUtf8(sp->mf.id.c_str());
@@ -317,24 +316,24 @@ int XjsPluginApiMsgBroadcast(XjsPluginCtx* sender, const char* jsonUtf8) {
     return XJS_PLUGIN_OK;
 }
 
-static void PluginUserSync(const XjsPluginEntry& e) {   /* 开关/确认版本 → 配置镜像 (调用方随后 XjsSaveConfig) */
+static void PluginUserSync(const XjsPluginEntry& e) {   /* 开关 → 配置镜像 (调用方随后 XjsSaveConfig) */
     for (auto& u : s_user)
-        if (u.id == e.mf.id) { u.enabled = e.enabled; u.confirmedVer = e.confirmedVer; return; }
-    s_user.push_back({ e.mf.id, e.enabled, e.confirmedVer });
+        if (u.id == e.mf.id) { u.enabled = e.enabled; return; }
+    s_user.push_back({ e.mf.id, e.enabled });
 }
 
 /* ==================== 配置用户状态 (Load/Save 经此) ==================== */
 
-void XjsPluginUserStateSet(const wchar_t* id, bool enabled, const wchar_t* confirmedVer) {
+void XjsPluginUserStateSet(const wchar_t* id, bool enabled) {
     if (!id || !*id) return;
     for (auto& u : s_user)
-        if (u.id == id) { u.enabled = enabled; u.confirmedVer = confirmedVer ? confirmedVer : L""; return; }
-    s_user.push_back({ id, enabled, confirmedVer ? confirmedVer : L"" });
+        if (u.id == id) { u.enabled = enabled; return; }
+    s_user.push_back({ id, enabled });
 }
 int  XjsPluginUserStateCount() { return (int)s_user.size(); }
-bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled, std::wstring* confirmedVer) {
+bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled) {
     if (i < 0 || i >= (int)s_user.size()) return false;
-    *id = s_user[i].id; *enabled = s_user[i].enabled; *confirmedVer = s_user[i].confirmedVer;
+    *id = s_user[i].id; *enabled = s_user[i].enabled;
     return true;
 }
 
@@ -367,7 +366,7 @@ static void PluginScan() {
             }
             e.mf.id = id;   /* 解析失败也保目录名 (管理页列表能显示) */
             for (auto& u : s_user)
-                if (u.id == id) { e.enabled = u.enabled; e.confirmedVer = u.confirmedVer; break; }
+                if (u.id == id) { e.enabled = u.enabled; break; }
             if (!e.mf.dllName.empty()) {
                 e.dllPath = e.dir + L"\\" + e.mf.dllName;
                 FILETIME now = PluginFileWriteTime(e.dllPath);
@@ -466,9 +465,6 @@ void XjsPluginStartup() {
     for (int i = 0; i < (int)s_plugins.size(); i++) {
         XjsPluginEntry& e = s_plugins[i];
         if (!e.enabled || !e.mf.ok) continue;
-        /* 版本确认只在设置页启用开关路径强制 (首次启用/版本变化弹确认框) — 启动对已启用
-           插件照常加载: 用户点了启用就是持久授权, 升级插件后重启拒载会让插件无声消失
-           (2026-09-29 实锤: 配置里确认版本落后于清单版本的用户, 两个插件全部拒载) */
         std::wstring err;
         if (!PluginLoadOne(e, &err)) e.loadErr = err;   /* 失败不写回 enabled (设计稿 §2.2), 状态列显示原因 */
     }
@@ -495,7 +491,7 @@ void XjsPluginRescan() {
         XjsPluginEntry& e = s_plugins[i];
         if (!e.enabled || !e.mf.ok || e.loaded) continue;
         std::wstring err;
-        if (!PluginLoadOne(e, &err)) e.loadErr = err;   /* 启动加载不做版本确认闸 (同 XjsPluginStartup 注) */
+        if (!PluginLoadOne(e, &err)) e.loadErr = err;
     }
     XjsPluginApiPruneOwners();   /* 重扫可能移除插件: 运行时模式的失效 owner 整条剪掉 */
     XjsPluginPanelValidateOwners();   /* 重扫可能移除/清空能力: owner 失效的接管会话立即结束 */
@@ -517,16 +513,6 @@ void XjsPluginOnWindowsCompacted(int fromSlot) {
 
 /* ==================== 启用 / 禁用 (设置页) ==================== */
 
-bool XjsPluginNeedsConfirm(int i) {
-    if (i < 0 || i >= (int)s_plugins.size()) return false;
-    const XjsPluginEntry& e = s_plugins[i];
-    return e.confirmedVer.empty() || e.confirmedVer != e.mf.version;
-}
-void XjsPluginMarkConfirmed(int i) {
-    if (i < 0 || i >= (int)s_plugins.size()) return;
-    s_plugins[i].confirmedVer = s_plugins[i].mf.version;
-    PluginUserSync(s_plugins[i]);
-}
 bool XjsPluginEnable(int i, std::wstring* err) {
     if (i < 0 || i >= (int)s_plugins.size()) { if (err) *err = L"插件不存在"; return false; }
     XjsPluginEntry& e = s_plugins[i];
@@ -585,7 +571,7 @@ bool XjsPluginBriefAt(int i, XjsPluginBrief* out) {
 
 static int FnPathInfo(XjsPluginCtx* ctx, const char* path, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_READ, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!path || !*path) return XJS_PLUGIN_ERR_ARG;
     std::wstring w = Utf8ToUtf16(path);
     WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -606,7 +592,7 @@ static int FnPathInfo(XjsPluginCtx* ctx, const char* path, char* buf, int cap) {
 static int FnReadFile(XjsPluginCtx* ctx, const char* path, long long offset, int len,
                       char* buf, int cap, int* eof) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_READ, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!path || !*path || len < 0 || !buf || cap <= 0 || len > cap) return XJS_PLUGIN_ERR_ARG;
     if (eof) *eof = 0;
     HANDLE h = CreateFileW(Utf8ToUtf16(path).c_str(), GENERIC_READ,
@@ -628,7 +614,7 @@ static int FnReadFile(XjsPluginCtx* ctx, const char* path, long long offset, int
 
 static int FnWriteFile(XjsPluginCtx* ctx, const char* path, const void* data, int len) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_WRITE, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!path || !*path || len < 0 || (!data && len > 0)) return XJS_PLUGIN_ERR_ARG;
     HANDLE h = CreateFileW(Utf8ToUtf16(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                            NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -642,7 +628,7 @@ static int FnWriteFile(XjsPluginCtx* ctx, const char* path, const void* data, in
 
 static int FnListDir(XjsPluginCtx* ctx, const char* path, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_READ, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!path || !*path) return XJS_PLUGIN_ERR_ARG;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((Utf8ToUtf16(path) + L"\\*").c_str(), &fd);
@@ -676,7 +662,7 @@ static bool PluginPathsFromJson(const char* pathsJson, std::vector<std::wstring>
 
 static int FnDeleteRecycle(XjsPluginCtx* ctx, const char* pathsJson, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_WRITE, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     std::vector<std::wstring> paths;
     if (!PluginPathsFromJson(pathsJson, &paths)) return XJS_PLUGIN_ERR_ARG;
     std::wstring from;
@@ -694,7 +680,7 @@ static int FnDeleteRecycle(XjsPluginCtx* ctx, const char* pathsJson, char* buf, 
 
 static int FnMoveCopy(XjsPluginCtx* ctx, const char* pathsJson, const char* destDir, int copy, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_WRITE, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     std::vector<std::wstring> paths;
     if (!PluginPathsFromJson(pathsJson, &paths) || !destDir || !*destDir) return XJS_PLUGIN_ERR_ARG;
     std::wstring from, dest = Utf8ToUtf16(destDir);
@@ -714,7 +700,7 @@ static int FnMoveCopy(XjsPluginCtx* ctx, const char* pathsJson, const char* dest
 
 static int FnRenameTo(XjsPluginCtx* ctx, const char* path, const char* newPath, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_WRITE, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!path || !*path || !newPath || !*newPath) return XJS_PLUGIN_ERR_ARG;
     std::wstring wNew = Utf8ToUtf16(newPath);
     if (GetFileAttributesW(wNew.c_str()) != INVALID_FILE_ATTRIBUTES) return XJS_PLUGIN_ERR_NOTFOUND;   /* 不覆盖 */
@@ -727,7 +713,7 @@ static int FnRenameTo(XjsPluginCtx* ctx, const char* path, const char* newPath, 
 static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, const char* cwd,
                   int timeoutMs, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_EXEC, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!exe || !*exe) return XJS_PLUGIN_ERR_ARG;
     std::vector<std::wstring> args;
     if (argsJson && *argsJson) XjsJsonStringArray(argsJson, &args);
@@ -814,7 +800,7 @@ static int FnExec(XjsPluginCtx* ctx, const char* exe, const char* argsJson, cons
 
 static int FnClipGet(XjsPluginCtx* ctx, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_READ, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!OpenClipboard(NULL)) return XJS_PLUGIN_ERR_STATE;
     std::string utf8;
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
@@ -828,7 +814,7 @@ static int FnClipGet(XjsPluginCtx* ctx, char* buf, int cap) {
 
 static int FnClipSet(XjsPluginCtx* ctx, const char* utf8) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_WRITE, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!utf8) return XJS_PLUGIN_ERR_ARG;
     std::wstring w = Utf8ToUtf16(utf8);
     size_t bytes = (w.size() + 1) * sizeof(wchar_t);
@@ -849,7 +835,7 @@ static int FnClipSet(XjsPluginCtx* ctx, const char* utf8) {
 
 static int FnDialog(XjsPluginCtx* ctx, const char* kind, const char* optsJson, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     if (!kind || !*kind) return XJS_PLUGIN_ERR_ARG;
     XjsPluginDialogOpts o;
     if (optsJson && *optsJson) XjsPluginDialogOptsParse(optsJson, &o);
@@ -946,7 +932,7 @@ static int FnDialog(XjsPluginCtx* ctx, const char* kind, const char* optsJson, c
 
 static int FnSearchSetText(XjsPluginCtx* ctx, XjsWindowToken window, const char* kw, const char* mode, int execute) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_UI, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
     XjsWindowScope scope(w);
@@ -968,7 +954,7 @@ static int FnSearchSetText(XjsPluginCtx* ctx, XjsWindowToken window, const char*
 
 static int FnOpenFile(XjsPluginCtx* ctx, XjsWindowToken window, int fileId, int reveal) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_UI, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     if (fileId < 0) return XJS_PLUGIN_ERR_ARG;
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
@@ -982,7 +968,7 @@ static int FnOpenFile(XjsPluginCtx* ctx, XjsWindowToken window, int fileId, int 
 
 static int FnShowMain(XjsPluginCtx* ctx) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, XPP_UI, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     HWND h = XjsSearchWindow::MainHwnd();
     if (!h) return XJS_PLUGIN_ERR_STATE;
     XjsSummonActivate(h);
@@ -991,7 +977,7 @@ static int FnShowMain(XjsPluginCtx* ctx) {
 
 static int FnToast(XjsPluginCtx* ctx, XjsWindowToken window, const char* utf8, int type) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;   /* 免权限 (照正式版 notify) */
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     if (!utf8) return XJS_PLUGIN_ERR_ARG;
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
@@ -1003,7 +989,7 @@ static int FnToast(XjsPluginCtx* ctx, XjsWindowToken window, const char* utf8, i
 
 static int FnSummon(XjsPluginCtx* ctx, void* hwnd) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     HWND h = (HWND)hwnd;
     if (!h || !IsWindow(h)) return XJS_PLUGIN_ERR_NOTFOUND;
     XjsSummonActivate(h);
@@ -1034,7 +1020,7 @@ static int SkinJsonOfWindow(XjsSearchWindow* cur, char* buf, int cap) {
 
 static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;   /* 免权限: 只读色板 */
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* cur = XjsSearchWindow::Alive(XjsSearchWindow::Cur()) ? XjsSearchWindow::Cur()
                                                                           : XjsSearchWindow::Main();
     return SkinJsonOfWindow(cur, buf, cap);
@@ -1042,13 +1028,13 @@ static int FnSkinJson(XjsPluginCtx* ctx, char* buf, int cap) {
 
 static int FnSkinJsonOf(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     return SkinJsonOfWindow(PluginWindowOfToken(window), buf, cap);   /* window=0 = 默认窗口 (PluginWindowOfToken 缺省) */
 }
 
 static int FnPrevBitmap(XjsPluginCtx* ctx, int requestId, int w, int h, const void* bgra, int stride) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     /* 外部输入硬上限: 先限 w/h 再算 stride (先判 stride < w*4 时 w 大会符号溢出),
        总字节数再封顶 — 曾只挡下限, stride=h=大开可击出数百 GB 分配直接压垮宿主 */
     if (!bgra || w <= 0 || h <= 0 || w > 32768 || h > 32768) return XJS_PLUGIN_ERR_ARG;
@@ -1058,7 +1044,7 @@ static int FnPrevBitmap(XjsPluginCtx* ctx, int requestId, int w, int h, const vo
 }
 static int FnPrevText(XjsPluginCtx* ctx, int requestId, const char* utf8) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     if (!utf8) return XJS_PLUGIN_ERR_ARG;
     return XjsPreviewPluginDeliverText(requestId, utf8) ? XJS_PLUGIN_OK : XJS_PLUGIN_ERR_STATE;
 }
@@ -1067,7 +1053,7 @@ static int FnPrevText(XjsPluginCtx* ctx, int requestId, const char* utf8) {
 
 static int FnPanelOpen(XjsPluginCtx* ctx, XjsWindowToken window) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     if (!(p->mf.caps & XPC_PANEL) || !p->fnOnPanelEvent) return XJS_PLUGIN_ERR_PERM;   /* 未声明面板能力不得开 */
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
@@ -1077,7 +1063,7 @@ static int FnPanelOpen(XjsPluginCtx* ctx, XjsWindowToken window) {
 
 static int FnPanelClose(XjsPluginCtx* ctx, XjsWindowToken window) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* w = PluginWindowOfToken(window);
     if (!w) return XJS_PLUGIN_ERR_NOTFOUND;
     if (!w->plugPanelOn || w->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;   /* 不是本插件的会话 */
@@ -1088,7 +1074,7 @@ static int FnPanelClose(XjsPluginCtx* ctx, XjsWindowToken window) {
 
 static int FnPanelGetInfo(XjsPluginCtx* ctx, XjsWindowToken window, long long* serial, int* w, int* h, float* scale) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式渲染前取尺寸) */
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式渲染前取尺寸) */
     /* 窗口解析必须落进面板锁内: DestroyAndFree 持锁跨 delete, 锁外拿指针后 UI 线程可在
        "已解析、未进锁"的间隙拆窗 → 锁内解引用悬垂指针 (UAF)。锁内解析+调用同锁互斥拆窗
        (Info/Deliver 内层 XjsPanelLock 同线程可重入); 拆窗先改注册表再进锁, 锁内解析看到
@@ -1105,7 +1091,7 @@ static int FnPanelGetInfo(XjsPluginCtx* ctx, XjsWindowToken window, long long* s
 static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long long serial,
                                 int w, int h, const void* bgra, int stride) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式交付) */
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;   /* 任意线程 (流式交付) */
     XjsPreviewPanelLockEnter();   /* 同 FnPanelGetInfo: 解析+交付与拆窗同锁互斥 (尺寸/字节校验在 Deliver 内) */
     XjsSearchWindow* win = PluginWindowOfToken(window);
     bool ok = win && XjsPreviewPanelDeliver(win, p->mf.id.c_str(), serial, w, h, bgra, stride);
@@ -1115,7 +1101,7 @@ static int FnPanelDeliverBitmap(XjsPluginCtx* ctx, XjsWindowToken window, long l
 
 static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* win = PluginWindowOfToken(window);
     if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
     XjsWindowScope scope(win);
@@ -1130,7 +1116,7 @@ static int FnPanelSetFocus(XjsPluginCtx* ctx, XjsWindowToken window, int want) {
 
 static int FnPanelSetCaret(XjsPluginCtx* ctx, XjsWindowToken window, int x, int y) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* win = PluginWindowOfToken(window);
     if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
     win->plugPanelCaretX = x;
@@ -1144,7 +1130,7 @@ static int FnPanelSetCaret(XjsPluginCtx* ctx, XjsWindowToken window, int x, int 
 static int FnPanelGetRect(XjsPluginCtx* ctx, XjsWindowToken window, void** hwnd,
                           int* x, int* y, int* w, int* h) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, true, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, true, &p)) != XJS_PLUGIN_OK) return e;
     XjsSearchWindow* win = PluginWindowOfToken(window);
     if (!win || !win->plugPanelOn || win->plugPanelPluginId != p->mf.id) return XJS_PLUGIN_ERR_STATE;
     XjsWindowScope scope(win);
@@ -1164,7 +1150,7 @@ static int FnPanelGetRect(XjsPluginCtx* ctx, XjsWindowToken window, void** hwnd,
 
 static int FnSubscribe(XjsPluginCtx* ctx, unsigned mask) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     p->evtMask = mask;
     return XJS_PLUGIN_OK;
 }
@@ -1201,7 +1187,7 @@ static bool PluginStorageKeyOk(const char* k) {
 
 static int FnStorageGet(XjsPluginCtx* ctx, const char* key, char* buf, int cap) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;   /* 免权限 (照正式版 storage) */
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!PluginStorageKeyOk(key)) return XJS_PLUGIN_ERR_ARG;
     std::string data;
     HANDLE h = CreateFileW((p->dir + L"\\data\\" + Utf8ToUtf16(key)).c_str(), GENERIC_READ,
@@ -1215,7 +1201,7 @@ static int FnStorageGet(XjsPluginCtx* ctx, const char* key, char* buf, int cap) 
 
 static int FnStorageSet(XjsPluginCtx* ctx, const char* key, const char* data, int len) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!PluginStorageKeyOk(key) || len < 0 || (!data && len > 0)) return XJS_PLUGIN_ERR_ARG;
     std::wstring dir = p->dir + L"\\data";
     CreateDirectoryW(dir.c_str(), NULL);   /* 已存在 = 忽略 */
@@ -1236,7 +1222,7 @@ static int FnStorageSet(XjsPluginCtx* ctx, const char* key, const char* data, in
 
 static int FnStorageRemove(XjsPluginCtx* ctx, const char* key) {
     XjsPluginEntry* p; int e;
-    if ((e = PluginApiCheck(ctx, 0, false, &p)) != XJS_PLUGIN_OK) return e;
+    if ((e = PluginApiCheck(ctx, false, &p)) != XJS_PLUGIN_OK) return e;
     if (!PluginStorageKeyOk(key)) return XJS_PLUGIN_ERR_ARG;
     DeleteFileW((p->dir + L"\\data\\" + Utf8ToUtf16(key)).c_str());
     return XJS_PLUGIN_OK;
@@ -1244,7 +1230,7 @@ static int FnStorageRemove(XjsPluginCtx* ctx, const char* key) {
 
 static void FnLog(XjsPluginCtx* ctx, int level, const char* utf8) {
     XjsPluginEntry* p = NULL;
-    if (PluginApiCheck(ctx, 0, false, &p) != XJS_PLUGIN_OK || !p || !utf8) return;
+    if (PluginApiCheck(ctx, false, &p) != XJS_PLUGIN_OK || !p || !utf8) return;
     /* 只进调试器: 无调试器时连输出都不构造 — OutputDebugString 无接管会以
        DBG_PRINTEXCEPTION_C 走一轮异常派发, 被 XjsVecStackLogger 之外的采集点记成异常事件 */
     if (!IsDebuggerPresent()) return;

@@ -1739,7 +1739,7 @@ static std::wstring AgentToolCopyPaths() {
  * 编码: cmd 前缀 chcp 65001 统一输出编码 (/d 跳过 AutoRun 脚本); powershell 用
  * -EncodedCommand (base64 UTF-16LE) 免引号转义地狱 + [Console]::OutputEncoding 前导;
  * 解码先按 UTF-8 严格试, 失败回落 OEM 页 (老工具不理会控制台码页时仍能读)。
- * 权限三道闸: ① manifest "exec" 权限 (宿主启用确认框告知) ② execPolicy 用户档位
+ * 权限三道闸: ① manifest "exec" 声明 (能力声明, 设置页展示) ② execPolicy 用户档位
  * (禁用/询问/允许, 询问 = 每条命令出确认卡) ③ 高危特征扫描 (ExecRiskText, 结果挂卡)。
  * "允许一次"只放行完全相同的调用键一次 (AiJob::execGrant), 不持久放权 — dsh 审批
  * 全部一次性 (allowed-once) 的口径。 */

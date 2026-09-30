@@ -16,7 +16,7 @@
  *   宿主表按"只追加"纪律扩了 6 个 Panel* 指针, 插件取用前先校验 host->size。
  *
  * 形态 = 清单 + DLL 双件:
- *   plugins\<插件id>\manifest.json   声明 (权限/能力/菜单/搜索模式…)
+ *   plugins\<插件id>\manifest.json   声明 (权限=能力声明/能力/菜单/搜索模式…)
  *   plugins\<插件id>\<名称>.dll      代码 (manifest "动态库" 字段指名; 可缺省 = 纯声明式插件)
  *
  * 硬契约 (违反必崩必返工):
@@ -40,7 +40,9 @@
  *   加载器按模块名绑定到同一实例; xjs_GetDefaultEngine() 即取引擎句柄。
  *   注意: 结果对象要在引擎空闲态创建 (xjs_db_GetEngineState()==0), 库未就绪时创建的
  *   结果对象会被永久定成文件名序。
- *   权限闸只作用于本表宿主 API; 引擎直连物理上不经权限闸 (原生插件非沙箱, 诚实口径)。
+ *   manifest「权限」= 插件对自身能力的声明 (设置页展示供用户了解), 宿主不运行期强制 —
+ *   插件与主程序同地址空间同权限, 声明闸防不住绕道的 DLL (原生插件非沙箱, 诚实口径);
+ *   真正防线 = 新插件默认禁用 + 用户知情。
  * ============================================================================ */
 
 #define XJS_PLUGIN_ABI_VERSION 4
@@ -56,7 +58,7 @@ typedef unsigned long long XjsWindowToken;     /* 不透明窗口令牌 (只在�
 enum {
     XJS_PLUGIN_OK = 0,
     XJS_PLUGIN_ERR_ARG = -1,        /* 参数非法 (路径/键名/JSON 越界) */
-    XJS_PLUGIN_ERR_PERM = -2,       /* 未声明所需权限 (宿主闸门, 照 manifest "权限") */
+    XJS_PLUGIN_ERR_PERM = -2,      /* 插件被禁用 (宿主闸门) 或未声明所需能力位 */
     XJS_PLUGIN_ERR_THREAD = -3,     /* 错线程调用 (仅 UI 线程的 API) */
     XJS_PLUGIN_ERR_STATE = -4,      /* 状态不允许 (如引擎忙) */
     XJS_PLUGIN_ERR_NOTFOUND = -5,   /* 目标不存在 (路径/窗口令牌失效) */
@@ -162,7 +164,7 @@ struct XjsPluginHost {
        返回 {"paths":[…]} / {"path":".."} (save) / {} = 取消 */
     int (XJS_PLUGIN_CALL *DialogJson)(XjsPluginCtx*, const char* kind, const char* optsJson, char* buf, int cap);
 
-    /* ---- 界面 (仅 UI 线程; 标注者需 ui 权限, 其余免权限) ---- */
+    /* ---- 界面 (仅 UI 线程) ---- */
     /* 置入搜索词并触发搜索; kw=NULL 保持现词; execute=0 只填不搜;
        mode = "wildcard|regex|sql|lua" 切换该窗口搜索模式 (与 settings.set "搜索模式" 同口径:
        非法名 = ERR_ARG; 写入即落盘, 配合 execute=0 时模式在下次搜索生效); window=0 = 主窗 */
@@ -227,7 +229,7 @@ struct XjsPluginHost {
     /* IME 组字/候选窗锚点 (仅 UI 线程; x/y = 面板内容区内像素坐标, 光标移动时调用) */
     int (XJS_PLUGIN_CALL *PanelSetCaret)(XjsPluginCtx*, XjsWindowToken window, int x, int y);
 
-    /* 指定窗口的皮肤 (v4 追加, 与 Panel* 同口径: 取用前先校验 host->size; 免权限, 仅 UI 线程):
+    /* 指定窗口的皮肤 (v4 追加, 与 Panel* 同口径: 取用前先校验 host->size; 仅 UI 线程):
        window=0 = 默认窗口, 其余 = 窗口令牌; JSON 同 GetSkinJson。
        自建窗口要"跟随某窗口皮肤"用它取色, 再订阅 EVT_SKIN 在皮肤变化后重取重绘 */
     int (XJS_PLUGIN_CALL *GetSkinJsonOf)(XjsPluginCtx*, XjsWindowToken window, char* buf, int cap);
@@ -244,7 +246,7 @@ struct XjsPluginHost {
        拿"设置读写 / 界面操作 / 搜索模式管理"等扩展回调: name → 函数指针, 未知名或旧宿主
        (host->size 不够) = NULL, 插件干净降级。取用前照例校验:
          host->size >= offsetof(XjsPluginHost, QueryApi) + sizeof(void*)
-       返回的指针终身有效; 全部仅 UI 线程 (错线程 ERR_THREAD), 权限闸在各 API 入口照常生效。
+       返回的指针终身有效; 全部仅 UI 线程 (错线程 ERR_THREAD), 启用闸在各 API 入口照常生效。
        名称常量 (XJS_API_*) 与函数指针类型 (XjsApi*) 见下方专节。此后新增宿主能力一律
        "在这里加名字 + 在 SDK 头加类型", 不再扩本表、不再动 ABI 号。 */
     void* (XJS_PLUGIN_CALL *QueryApi)(XjsPluginCtx*, const char* name);
@@ -256,11 +258,7 @@ struct XjsPluginHost {
  *   auto settingsGet = (XjsApiSettingsGet)host->QueryApi(ctx, XJS_API_SETTINGS_GET);
  *   if (settingsGet) { char j[2048]; settingsGet(ctx, 0, j, sizeof(j)); }   // 0 = 默认窗口
  *
- * 权限 (清单 "权限"; 未声明调用 = ERR_PERM):
- *   免权限    = settings.get / settings.global.get / windows.enum / window.state /
- *               modes.list / skins.list / window.selection / langs.list
- *   "ui"      = window.cmd / window.create / modes.apply / window.result
- *   "settings"= settings.set / settings.global.set / modes.add / modes.remove
+ * manifest「权限」= 能力声明 (设置页展示), 宿主不运行期强制 — 全部 API 只过启用闸+线程闸;
  * JSON 键为中文主键 (与 manifest/配置文件口径一致); 输出 = 调用方缓冲约定; 窗口令牌照旧
  * (0 = 默认窗口)。设置写入即时生效并落盘; 未知键/非法值 = ERR_ARG (不静默半套)。
  * 运行时搜索模式 (modes.add) 是会话级的, 不写进配置文件 — 要持久模式用清单 "搜索模式" 声明。 */
@@ -317,7 +315,7 @@ typedef int (XJS_PLUGIN_CALL *XjsApiModesRemove)(XjsPluginCtx*, const char* mode
 typedef int (XJS_PLUGIN_CALL *XjsApiModesApply)(XjsPluginCtx*, XjsWindowToken window,
                                                 const char* modeIdUtf8, const char* inputUtf8);
 
-/* ---- 插件互操作桥梁 (2026-09-24; 全部免权限, 恒 UI 线程; 经 QueryApi 解析) ----
+/* ---- 插件互操作桥梁 (2026-09-24; 恒 UI 线程; 经 QueryApi 解析) ----
  * 发现: plugins.list / plugins.state — "有没有某个插件 / 启用没有" 查这两个;
  * 消息: msg.send (点对点同步, 带回复) / msg.broadcast (广播, 不收集回复)。
  * 收信 = 可选导出 XjsPlugin_OnPluginMessage (见导出面节)。消息一律经宿主中转:
@@ -343,13 +341,13 @@ typedef int (XJS_PLUGIN_CALL *XjsApiMsgSend)(XjsPluginCtx*, const char* targetId
 /* msg.broadcast: 送达全部"启用且已加载且导出 OnPluginMessage"的插件 (不含自己), 不收集回复 */
 typedef int (XJS_PLUGIN_CALL *XjsApiMsgBroadcast)(XjsPluginCtx*, const char* jsonUtf8);
 
-/* skins.list: 可用皮肤名清单 (免权限, 仅 UI 线程; 2026-09-24 表尾追加的名字式扩展 API)
+/* skins.list: 可用皮肤名清单 (仅 UI 线程; 2026-09-24 表尾追加的名字式扩展 API)
    → ["名称",…] (扫描 skin 目录)。换肤走 settings.set 的 "皮肤" 键, 名字必须取自这里
    (未知名 = ERR_NOTFOUND 整体拒绝), 插件先查清单再写 */
 #define XJS_API_SKINS_LIST      "skins.list"
 typedef int (XJS_PLUGIN_CALL *XjsApiSkinsList)(XjsPluginCtx*, char* buf, int cap);
 
-/* window.selection: 某窗口当前选中集 (免权限, 仅 UI 线程; 2026-09-24 表尾追加)
+/* window.selection: 某窗口当前选中集 (仅 UI 线程; 2026-09-24 表尾追加)
    → {"窗口名称":"..","选中数":n,"文件ID":[id,…]}
    选中按 FileId 记在引擎结果对象里 (与列表顺序无关), 引擎数据即事实源 —
    路径/名称/大小插件经 xjs_db_GetPath/GetName 自取 (照 OnCommand 的 FileId 口径)。
@@ -358,7 +356,7 @@ typedef int (XJS_PLUGIN_CALL *XjsApiSkinsList)(XjsPluginCtx*, char* buf, int cap
 typedef int (XJS_PLUGIN_CALL *XjsApiWindowSelection)(XjsPluginCtx*, XjsWindowToken window,
                                                      int maxIds, char* buf, int cap);
 
-/* langs.list: 可用界面语言清单 (免权限, 仅 UI 线程; 2026-09-24 表尾追加)
+/* langs.list: 可用界面语言清单 (仅 UI 线程; 2026-09-24 表尾追加)
    → [{"代码":"zh","名称":"简体中文"},…] (名称恒母语显示; 代码 = settings.set
    "语言" 键的合法值; "auto"=跟随系统不在此列但任何时刻可写)。
    查询当前值/切换走 settings.get / settings.set 的 "语言" 键 — 与换肤 (skins.list
@@ -366,7 +364,7 @@ typedef int (XJS_PLUGIN_CALL *XjsApiWindowSelection)(XjsPluginCtx*, XjsWindowTok
 #define XJS_API_LANGS_LIST      "langs.list"
 typedef int (XJS_PLUGIN_CALL *XjsApiLangsList)(XjsPluginCtx*, char* buf, int cap);
 
-/* window.result: 某窗口的结果对象裸指针 ("ui" 权限, 仅 UI 线程; 2026-09-26 表尾追加)
+/* window.result: 某窗口的结果对象裸指针 (仅 UI 线程; 2026-09-26 表尾追加)
    → 所属窗口的 xjs_result* (列表数据即它)。直连引擎的插件拿它自己调引擎 (照 OnEvent
    的 result 口径: xjs_result_GetCount/GetFileId/ResetFileId…), 典型用法 = 在私有结果
    的 XJS_RESULT_EVENT_COMPLETE 回调里把 ID 全集 xjs_result_ResetFileId 进窗口列表。
@@ -376,7 +374,7 @@ typedef int (XJS_PLUGIN_CALL *XjsApiLangsList)(XjsPluginCtx*, char* buf, int cap
 struct xjs_result;   /* 引擎结果对象 (typedef struct xjs_result xjs_result, 完整定义 xunjieso.h) */
 typedef xjs_result* (XJS_PLUGIN_CALL *XjsApiWindowResult)(XjsPluginCtx*, XjsWindowToken window);
 
-/* drag.lastPaths: 最近一次宿主列表拖出会话的文件路径快照 (免权限, 仅 UI 线程; 2026-09-29 表尾追加)
+/* drag.lastPaths: 最近一次宿主列表拖出会话的文件路径快照 (仅 UI 线程; 2026-09-29 表尾追加)
    → 返回值 = 该会话结束时刻 (GetTickCount 刻度; 0 = 宿主从未拖出过/旧宿主/插件被禁);
    *paths/*count 传出只读路径数组 (宿主持有, 下次拖出前有效, 插件不得长期缓存)。
    用途 = AI 面板接收文件拖放: CF_HDROP 过了 WebView2 沙箱页面里只剩文件名, 按名匹配
