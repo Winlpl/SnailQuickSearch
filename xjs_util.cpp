@@ -1002,7 +1002,7 @@ bool XjsPickFolder(HWND owner, std::wstring& folder) {
  * 开启时才注册 键盘+鼠标两个 LL 钩子 (独立线程, 自带消息循环, 回调在该线程串行被调):
  * 任意前台窗口下都能触发, 且不占 UI 线程输入路径。全局钩子易被杀毒软件误报,
  * 故默认关闭且关闭期一个钩子都不挂 (设置里关掉 = 立即摘钩子)。
- * 判双击口径 = 两次"干净"的 Ctrl 按下 (间隔<1000ms): Ctrl 按住期间或两次按下之间
+ * 判双击口径 = 两次"干净"的 Ctrl 按下 (间隔<500ms): Ctrl 按住期间或两次按下之间
  * 混入过 任何其它按键 (Ctrl+V/Alt+Tab 等) 或 鼠标点击 (Ctrl+点击/拖选), 即视为组合
  * 用途, 本次抬起不武装、下次按下不触发 —— 否则连按两次 Ctrl+V、两次 Ctrl+点击
  * 都会被误判成双击 Ctrl (2026-09-15 实锤)。 */
@@ -1032,7 +1032,7 @@ static LRESULT CALLBACK XjsDcKeyProc(int code, WPARAM wp, LPARAM lp) {
                 s_dcCtrlDown = true;
                 s_dcDirty = false;               /* 新的一次按住: 先视为干净, 混入组合再污染 */
                 ULONGLONG now = GetTickCount64();
-                if (s_dcLastCleanUp != 0 && now - s_dcLastCleanUp < 1000) {
+                if (s_dcLastCleanUp != 0 && now - s_dcLastCleanUp < 500) {
                     s_dcLastCleanUp = 0;         /* 触发即清: 新一轮双击须重新走"干净抬起→按下" */
                     s_dcFired = true;
                     HWND main = XjsSearchWindow::MainHwnd();   /* 跨线程读: 最坏过期句柄, PostMessage 无害失败 */

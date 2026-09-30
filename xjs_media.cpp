@@ -3,12 +3,14 @@
  * 系统自带 Media Foundation Media Engine 帧服务器模式 (无窗口、无浏览器组件、按需加载):
  *   - 音频由引擎自己渲染; 视频帧经 OnVideoStreamTick + TransferVideoFrame 搬进 WIC 位图
  *     (引擎内做缩放与信箱黑边), Lock 后 CPU 拷贝成 BGRA 字节 — 绘制端与图片/插件交付同路
- *     (UI 线程零解码, 解码在引擎线程; 本线程只做 GPU→CPU 帧拷贝)
+ *     (UI 线程零解码, 解码在引擎线程; 本线程只做像素拷贝)
+ *   - 全程软解, 零 D3D 设备 (2026-09-30 用户口径: D3D11 设备初始化后驱动线程与显存分配
+ *     常驻进程, 线程/内存上去不回落 — 硬解路径整体移除): 引擎不带 DXGI 管理器即自动软解,
+ *     帧目标 WIC 位图 (2026-09-30 探针 case B 实锤可用; 硬解引擎对 WIC 目标恒 E_NOINTERFACE,
+ *     见 test\test_media_leak.cpp 历史探针矩阵)
  *   - 本地文件经 IStream → IMFByteStream 装载 (中文路径零 URL 编码; SHARE_DENY_NONE 不锁文件,
- *     预览期间照常改名/删除); 无 DXGI 管理器时引擎自动软解, 硬解只是增益不是依赖
- *   - 会话 = XjsSearchWindow::media (每窗一份, 可维护性红线), 引擎对象懒建于首次媒体预览;
- *     D3D11 设备/DXGI 管理器 = 进程共享一份 (渲染资源, 非窗口状态; 每窗独立设备实测
- *     "多会话并存→逐窗关闭"驱动层释放不全, 每会话漏 ~50MB, 见 test\test_media_leak.cpp)
+ *     预览期间照常改名/删除)
+ *   - 会话 = XjsSearchWindow::media (每窗一份, 可维护性红线), 引擎对象懒建于首次媒体预览
  *   - 会话生命周期 = 装载/播放期: 停播/换选中/藏面板即 Shutdown+释放 (MediaUnload),
  *     窗口析构同; 不随窗常驻 — 多窗各预览视频不再叠加常驻引擎
  *   - 泵 = ID_TIMER_MEDIA (40ms): 装载期轮询就绪态 / 播放期取帧与进度 / 音量浮标收尾,
@@ -26,13 +28,12 @@
 #include <mfidl.h>
 #include <evr.h>
 #include <mfmediaengine.h>
-#include <d3d11_4.h>   /* ID3D11Multithread 在 d3d11_4.h (d3d11.h 无此接口) */
+#include <dxgi.h>      /* DXGI_FORMAT_B8G8R8A8_UNORM (输出格式标记; 不再引 d3d11) */
 #include <shlwapi.h>
 #include <oleauto.h>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
-#pragma comment(lib, "d3d11.lib")
 
 /* 帧搬运目标尺寸上限 (面板显示矩形等比缩到此内; 控制每帧 GPU→CPU 回读量, 播放期 25fps) */
 static const int XJS_MEDIA_FRAME_CAP_W = 1280;
@@ -110,15 +111,10 @@ struct XjsMediaCtx {
     bool wantPoster = false;          /* 需要补抓一帧 (首帧海报/暂停寻位后) */
     int posterTries = 0;              /* 补帧尝试次数 (放弃线 250 拍 ≈10s) */
 
-    /* 帧搬运 (UI 线程)。
-       目标面二选一, 由"引擎是否带 DXGI 管理器 (硬解)"决定 (2026-09-30 探针实锤):
-       硬解引擎 → TransferVideoFrame 只认 DXGI surface (WIC 目标恒 E_NOINTERFACE, 静默不出图
-       = "有声无画"根因), 走 目标纹理+staging 回读; 软解引擎 (D3D 建不成, 无 DXGI 管理器) →
-       WIC 位图目标可用。两条路产出都是 BGRA 字节, 绘制端无感 */
-    ID3D11Texture2D* frameTex = NULL;     /* 硬解: TransferVideoFrame 目标 (BIND_RENDER_TARGET) */
-    ID3D11Texture2D* stageTex = NULL;     /* 硬解: staging 回读 (CPU_READ) */
-    IDXGISurface* frameSurf = NULL;       /* frameTex 的 surface 视图 (引擎入参) */
-    IWICBitmap* frameBmp = NULL;          /* 软解: WIC 位图目标 */
+    /* 帧搬运 (UI 线程): 目标面恒 WIC 位图 — 引擎软解渲染进系统内存, TransferVideoFrame
+       缩放+信箱黑边后搬入 (硬解引擎对此目标恒 E_NOINTERFACE, 2026-09-30 探针实锤, 故不给
+       引擎挂 DXGI 管理器 = 恒软解, 目标面只有一种) */
+    IWICBitmap* frameBmp = NULL;          /* WIC 位图目标 */
     bool wicPbgra = false;                /* WIC BGRA 被拒时的一次性格式回退 */
     int frameW = 0, frameH = 0;
     std::vector<uint8_t> bits;            /* BGRA 字节 (stride = frameW*4) */
@@ -149,14 +145,6 @@ struct XjsMediaCtx {
 
 static bool s_mfUp = false;   /* MFStartup 一次 (进程级; 配对 MFShutdown 在主窗销毁) */
 
-/* 进程共享硬解设备 (渲染资源, 非窗口状态 — 每窗独立设备实测多会话并存后逐窗关闭
-   驱动层释放不全: 每会话 ~50MB 永久留渣, 共享一份则任何操作序列零累积,
-   实验矩阵见 test\test_media_leak.cpp 模式C/E/F/G)。懒建于首个媒体会话,
-   释放只随 XjsMediaGlobalShutdown (主窗销毁) */
-static ID3D11Device* s_d3d = NULL;
-static ID3D11DeviceContext* s_d3dc = NULL;
-static IMFDXGIDeviceManager* s_dxgi = NULL;
-
 static void MediaDropFrameTarget(XjsMediaCtx* c);   /* 帧搬运节; 装载/卸载路径先用到 */
 
 /* ==================== 引擎生命周期 ==================== */
@@ -168,29 +156,12 @@ static bool MediaEnsureEngine(XjsMediaCtx* c) {
         s_mfUp = true;
     }
     if (!c->notify) c->notify = new XjsMediaNotify();
-    /* 进程共享 D3D11 设备 (VIDEO_SUPPORT 供硬解; 失败不阻断 — 无 DXGI 管理器 = 引擎软解) */
-    if (!s_d3d) {
-        UINT flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-        D3D_FEATURE_LEVEL got{};
-        if (SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags, NULL, 0,
-                                        D3D11_SDK_VERSION, &s_d3d, &got, &s_d3dc)) ||
-            SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, flags, NULL, 0,
-                                        D3D11_SDK_VERSION, &s_d3d, &got, &s_d3dc))) {
-            ID3D11Multithread* mt = NULL;   /* MF 引擎线程与本线程共用立即上下文, 多线程保护必开 */
-            if (SUCCEEDED(s_d3dc->QueryInterface(&mt))) { mt->SetMultithreadProtected(TRUE); mt->Release(); }
-            UINT token = 0;
-            if (SUCCEEDED(MFCreateDXGIDeviceManager(&token, &s_dxgi)))
-                s_dxgi->ResetDevice(s_d3d, token);
-        } else {
-            s_d3d = NULL;
-            s_d3dc = NULL;
-        }
-    }
+    /* 不设 MF_MEDIA_ENGINE_DXGI_MANAGER = 引擎自动软解 (零 D3D 设备/驱动线程/显存常驻;
+       2026-09-30 用户口径摘除硬解) — 输出格式 BGRA, TransferVideoFrame 目标用 WIC 位图 */
     IMFAttributes* at = NULL;
     if (FAILED(MFCreateAttributes(&at, 4))) return false;
     at->SetUnknown(MF_MEDIA_ENGINE_CALLBACK, c->notify);
     at->SetUINT32(MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, (UINT32)DXGI_FORMAT_B8G8R8A8_UNORM);
-    if (s_dxgi) at->SetUnknown(MF_MEDIA_ENGINE_DXGI_MANAGER, s_dxgi);
     IMFMediaEngineClassFactory* f = NULL;
     HRESULT hr = CoCreateInstance(CLSID_MFMediaEngineClassFactory, NULL, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&f));
@@ -254,7 +225,7 @@ static void MediaLoadFile(XjsMediaCtx* c, int fileId, const std::wstring& path) 
 /* 停播并卸载源; 引擎会话随之彻底拆毁 (Shutdown+Release)。
    不再随窗常驻: 每窗一套 MediaEngine 会话 (解码器+帧池, 百 MB 级) 若只在关窗才释放,
    多窗各预览视频 = 常驻内存逐窗叠加; 换选中/藏面板/关窗后把会话还给系统,
-   下次选中媒体经 MediaEnsureEngine 重建 (共享设备已就绪, 异步装载体验不变) */
+   下次选中媒体经 MediaEnsureEngine 重建 (异步装载体验不变) */
 static void MediaUnload(XjsMediaCtx* c) {
     if (c->eng) {
         c->eng->Shutdown();   /* 先停引擎 (断掉全部回调线程) 再释放; 卸源由 Shutdown 一并完成 */
@@ -293,41 +264,16 @@ static void MediaInvalidate(XjsSearchWindow* w) {
 
 /* 释放帧目标面 (换源/尺寸变化/析构; frameW/H 一并归零 = 下次重建) */
 static void MediaDropFrameTarget(XjsMediaCtx* c) {
-    if (c->frameSurf) { c->frameSurf->Release(); c->frameSurf = NULL; }
-    if (c->frameTex) { c->frameTex->Release(); c->frameTex = NULL; }
-    if (c->stageTex) { c->stageTex->Release(); c->stageTex = NULL; }
     if (c->frameBmp) { c->frameBmp->Release(); c->frameBmp = NULL; }
     c->frameW = c->frameH = 0;
 }
 
 /* 确保帧目标面存在且匹配显示尺寸 (±3px 滞回, 拖宽面板不逐帧重建):
-   硬解引擎 = D3D 纹理对 (目标 BIND_RENDER_TARGET + staging CPU_READ) + surface 视图;
-   软解引擎 (无 DXGI 管理器) = WIC 位图。硬解引擎建不出纹理 = 无备胎 (WIC 对它恒拒绝),
-   返回假等下拍重试 */
+   恒 WIC 位图 (BGRA 被拒的个别系统经 wicPbgra 回退 PBGRA), 建不出 = 返回假等下拍重试 */
 static bool MediaEnsureFrameTarget(XjsMediaCtx* c, int w, int h) {
     bool sized = c->frameW > 0 && abs(c->frameW - w) <= 3 && abs(c->frameH - h) <= 3;
-    if (sized && (c->frameSurf || c->frameBmp)) return true;
+    if (sized && c->frameBmp) return true;
     MediaDropFrameTarget(c);
-    if (s_dxgi && s_d3d && s_d3dc) {
-        D3D11_TEXTURE2D_DESC d = {};
-        d.Width = (UINT)w;
-        d.Height = (UINT)h;
-        d.MipLevels = 1;
-        d.ArraySize = 1;
-        d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        d.SampleDesc.Count = 1;
-        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(s_d3d->CreateTexture2D(&d, NULL, &c->frameTex))) return false;
-        if (FAILED(c->frameTex->QueryInterface(&c->frameSurf))) { MediaDropFrameTarget(c); return false; }
-        d.BindFlags = 0;
-        d.Usage = D3D11_USAGE_STAGING;
-        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(s_d3d->CreateTexture2D(&d, NULL, &c->stageTex))) { MediaDropFrameTarget(c); return false; }
-        c->frameW = w;
-        c->frameH = h;
-        return true;
-    }
-    /* 软解引擎: WIC 位图目标 (2026-09-30 探针 case B 实锤可用) */
     if (!g_wic) return false;
     const GUID& fmt = c->wicPbgra ? GUID_WICPixelFormat32bppPBGRA : GUID_WICPixelFormat32bppBGRA;
     if (FAILED(g_wic->CreateBitmap((UINT)w, (UINT)h, fmt, WICBitmapCacheOnDemand, &c->frameBmp)))
@@ -347,26 +293,8 @@ static bool MediaPullFrame(XjsMediaCtx* c) {
     MFVideoNormalizedRect src = { 0, 0, 1, 1 };
     RECT dst = { 0, 0, c->frameW, c->frameH };
     MFARGB border = { 0, 0, 0, 0 };
-    if (c->frameSurf) {
-        /* 硬解: GPU 内缩放进目标纹理 → staging 回读 (同 UI 线程; 共享设备已开多线程保护) */
-        if (FAILED(c->eng->TransferVideoFrame(c->frameSurf, &src, &dst, &border))) return false;
-        s_d3dc->CopyResource(c->stageTex, c->frameTex);
-        D3D11_MAPPED_SUBRESOURCE m = {};
-        if (FAILED(s_d3dc->Map(c->stageTex, 0, D3D11_MAP_READ, 0, &m))) return false;
-        bool ok = false;
-        if (m.pData && m.RowPitch >= (UINT)c->frameW * 4) {
-            c->bits.resize((size_t)c->frameW * 4 * c->frameH);
-            const UINT rowBytes = (UINT)c->frameW * 4;
-            for (int y = 0; y < c->frameH; y++)
-                memcpy(&c->bits[(size_t)y * rowBytes], (const BYTE*)m.pData + (size_t)y * m.RowPitch, rowBytes);
-            c->rev++;
-            ok = true;
-        }
-        s_d3dc->Unmap(c->stageTex, 0);
-        return ok;
-    }
     if (!c->frameBmp) return false;
-    /* 软解: WIC 位图目标 */
+    /* WIC 位图目标 (引擎软解, 缩放+信箱黑边在引擎内完成) */
     HRESULT hr = c->eng->TransferVideoFrame(c->frameBmp, &src, &dst, &border);
     if (FAILED(hr) && !c->wicPbgra) {   /* 一次性格式回退 (个别系统对 BGRA 目标挑剔) */
         c->wicPbgra = true;
@@ -661,20 +589,16 @@ XjsMediaCtx* XjsMediaCreate(HWND hwnd) {
 
 void XjsMediaFree(XjsMediaCtx* c) {
     if (!c) return;
-    MediaDropFrameTarget(c);   /* 帧目标面 (DXGI 纹理对/surface/WIC 位图) 先于会话释放 */
+    MediaDropFrameTarget(c);   /* 帧目标面 (WIC 位图) 先于会话释放 */
     if (c->eng) c->eng->Shutdown();   /* 先停引擎 (断掉全部回调线程) 再释放 */
     if (c->eng) c->eng->Release();
     if (c->engEx) c->engEx->Release();
     if (c->notify) c->notify->Release();
     if (c->cache) c->cache->Release();
     delete c;
-    /* 共享设备 (s_d3d/s_d3dc/s_dxgi) 是进程级, 不随会话释放 — 配对释放在 XjsMediaGlobalShutdown */
 }
 
 void XjsMediaGlobalShutdown() {
-    if (s_dxgi) { s_dxgi->Release(); s_dxgi = NULL; }
-    if (s_d3dc) { s_d3dc->Release(); s_d3dc = NULL; }
-    if (s_d3d) { s_d3d->Release(); s_d3d = NULL; }
     if (s_mfUp) {
         MFShutdown();
         s_mfUp = false;
