@@ -314,7 +314,8 @@ struct XjsGfxApi {
     void  (*FreeLayout)(void* native);
 };
 extern XjsGfxApi* g_gfx;     /* 当前绘图后端函数表 (XjsGfxStartup 选边) */
-extern int g_gfxEngine;      /* 绘制引擎选择 (设置-通用, 重启生效): 0=D2D 1=GDI+ */
+extern int g_gfxEngine;      /* 绘制引擎选择 (设置-通用, 重启生效): 0=D2D 1=GDI+; 用户改档时立即变"待生效"值, 与运行中实际后端可错位 */
+extern int g_gfxEngineActive; /* 本次运行实际初始化的后端 (启动定型后不变); 运行期按后端分流 (收尾清理/RT 建 Dc 视角等) 一律读它 */
 
 /* 句柄薄类: 成员只有一个后端原生态指针; 方法内联转发 g_gfx (名与 D2D 同形, 调用点零改动) */
 struct XjsRt {
@@ -1760,6 +1761,7 @@ void XjsClampScroll();
 void XjsListHoverChanged(int oldRow, bool wasInList);  /* 悬停行变化: 旧行高亮进渐隐拖尾并启动时钟 */
 float XjsListHoverAlpha(int idx);                      /* 该行当前悬停亮度 0..1 (量化; 0=无) */
 bool XjsListHoverTick();                               /* WM_TIMER(ID_TIMER_HOVERFADE): 修剪过期, 假=应 KillTimer */
+void XjsListHoverSyncCursor();                         /* 滚动后按当前光标重算悬停行 (鼠标没动不来 WM_MOUSEMOVE) */
 void XjsScrollTo(double top);
 void XjsEnsureVisible(int idx);
 int XjsRowAtY(double yInList);

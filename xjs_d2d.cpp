@@ -335,7 +335,7 @@ void XjsDeviceCreate() {
     /* 同一 RT 取设备上下文视角 (Win8.1+ QI 必成): DrawText 系列才能带
        ENABLE_COLOR_FONT 画 emoji 的 COLR 彩色字形; 失败(老系统)退单色轮廓。
        仅 D2D 后端执行 (GDI+ 模式的 hwndRt 原生是 GpSurface, 瞎 QI = AV, 白窗元凶之一) */
-    if (g_gfxEngine == 0) {
+    if (g_gfxEngineActive == 0) {
         ID2D1DeviceContext* dcp = NULL;
         if (SUCCEEDED(D2(g_hwndRt)->QueryInterface(__uuidof(ID2D1DeviceContext), (void**)&dcp)) && dcp)
             g_dc = new XjsDc(dcp);
@@ -401,7 +401,9 @@ bool XjsD2DInit() {
 }
 
 void XjsD2DShutdown() {
-    if (g_dw) { D2(g_dw)->Release(); delete g_dw; g_dw = NULL; }
+    /* h 判空兜底: 兼容模式启动时 g_dw 也是本类但 h=NULL (无原生态); 调用方按 g_gfxEngineActive 分流,
+       若再有错位路径摸到这里, 对空 COM 指针虚调 Release = AV (2026-10-01 托盘退出崩溃实锤) */
+    if (g_dw) { if (g_dw->h) D2(g_dw)->Release(); delete g_dw; g_dw = NULL; }
     if (g_d2d) { g_d2d->Release(); g_d2d = NULL; }
     if (g_wic) { g_wic->Release(); g_wic = NULL; }
     g_gfx = NULL;

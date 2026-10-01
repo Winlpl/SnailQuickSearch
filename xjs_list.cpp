@@ -73,6 +73,10 @@ void XjsScrollTo(double top) {
     if (rowH > 0) top = floor(top / rowH + 0.5) * rowH;
     g_scrollTop = top;
     XjsClampScroll();
+    /* 滚动后悬停行按当前光标位置重算 (行下标整体位移, 鼠标没动也必须跟上, 否则高亮跟着
+       旧行矩形滚走、直到再动鼠标才追上 = "高亮跟随有延迟"); 重算会把旧行记进残影拖尾,
+       而行已位移的残影只会叠错行, 紧随其后与旧拖尾一并清掉 (滚动态不出余晖) */
+    XjsListHoverSyncCursor();
     /* 滚动后同一行下标对应的文件已变: 拖尾高亮按行下标记忆, 不清会叠在不相关行上成重影 */
     if (!g_hoverTraces.empty()) g_hoverTraces.clear();
     XjsSearchWindow::Cur()->Invalidate();
@@ -136,6 +140,8 @@ void XjsSetViewMode(int m) {
     if (newOff < 0) newOff = 0;
     g_scrollTop = (double)newOff * newRowH;
     XjsClampScroll();
+    XjsListHoverSyncCursor();   /* 换视图行高/列数变了, 鼠标下的行号同样位移, 按光标重算 */
+    if (!g_hoverTraces.empty()) g_hoverTraces.clear();   /* 行号全错位, 残影拖尾一并清 (同滚动口径) */
     XjsSaveConfig();
     XjsSearchWindow::Cur()->Invalidate();
 }
@@ -1413,6 +1419,16 @@ bool XjsListHoverTick() {
         if (now - g_hoverTraces[i].start >= 280.0) g_hoverTraces.erase(g_hoverTraces.begin() + i);
     }
     return !g_hoverTraces.empty();
+}
+
+/* 滚动收口 (XjsScrollTo / 切视图锚点) 调: 滚动改变"屏幕位置↔行下标"映射, 但鼠标没动就
+   不会来 WM_MOUSEMOVE, g_hoverRow 停在旧行号上 = 高亮跟着旧行滚走, 直到再动鼠标才追上。
+   此处取实时光标位置走 XjsUpdateHoverState 同一条更新链 (行变化才失效), 不起定时器 */
+void XjsListHoverSyncCursor() {
+    POINT pt;
+    if (!g_hWnd || !GetCursorPos(&pt)) return;
+    ScreenToClient(g_hWnd, &pt);
+    XjsUpdateHoverState(pt);
 }
 
 bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样式 col-resize:hover 背景条); 变化才失效重画 */

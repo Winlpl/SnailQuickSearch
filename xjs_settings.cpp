@@ -1185,7 +1185,7 @@ static bool XjsSetBuildRows() {
             std::wstring env = XjsOsVersionText() + L" · "
                              + (sizeof(void*) == 8 ? XjsT(L"设置.关于.64位") : XjsT(L"设置.关于.32位")) + L" · "
                              + (XjsIsRunningAsAdmin() ? XjsT(L"设置.关于.管理员权限") : XjsT(L"设置.关于.标准权限")) + L" · "
-                             + (g_gfxEngine == 1 ? XjsT(L"通用词.兼容模式") : XjsT(L"通用词.标准模式"));
+                             + (g_gfxEngineActive == 1 ? XjsT(L"通用词.兼容模式") : XjsT(L"通用词.标准模式"));
             addRow(ACT_NONE, CT_INFO, XjsT(L"设置.关于.运行环境"), env.c_str(), L"", false, false);
             addRow(ACT_COPYVER, CT_BUTTON, XjsT(L"设置.关于.复制版本信息"),
                    XjsT(L"设置.关于.复制版本信息.说明"),
@@ -2496,7 +2496,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                              + XjsT(L"设置.关于.换行运行环境") + XjsOsVersionText()
                              + (sizeof(void*) == 8 ? XjsT(L"设置.关于.后缀64位") : XjsT(L"设置.关于.后缀32位"))
                              + (XjsIsRunningAsAdmin() ? XjsT(L"设置.关于.换行权限管理员") : XjsT(L"设置.关于.换行权限标准"))
-                             + (g_gfxEngine == 1 ? XjsT(L"设置.关于.换行模式兼容") : XjsT(L"设置.关于.换行模式标准"));
+                             + (g_gfxEngineActive == 1 ? XjsT(L"设置.关于.换行模式兼容") : XjsT(L"设置.关于.换行模式标准"));
             XjsCopyClipboard(txt);
             XjsToastShow(s_set.hwnd, XjsT(L"设置.关于.版本已复制"), XTOAST_SUCCESS, SS(1));
             break;

@@ -1877,6 +1877,7 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
         g_gfxEngine = 0;
         gfxOk = XjsD2DInit();
     }
+    g_gfxEngineActive = g_gfxEngine;   /* 实际后端在此定型; 此后 g_gfxEngine 只是设置页的"待生效选择" */
     if (!gfxOk) {
         MessageBoxW(NULL, XjsT(L"错误.绘图引擎初始化失败"), XjsT(L"通用词.错误"), MB_OK | MB_ICONERROR);
         return 0;
@@ -1941,7 +1942,9 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
         DispatchMessageW(&msg);
     }
     XjsSetPhase(L"shutdown");
-    if (g_gfxEngine == 1) XjsGdiplusShutdown();
+    /* 按"启动时实际初始化的后端"分流, 不读 g_gfxEngine — 设置页切档会把它提前改写成待生效值,
+       兼容模式运行中切标准再退出时曾按它误走 D2D 清理: 对 GDI+ 建的 g_dw(h=NULL) 虚调 Release = AV */
+    if (g_gfxEngineActive == 1) XjsGdiplusShutdown();
     else XjsD2DShutdown();
     OleUninitialize();   /* 配对启动时的 OleInitialize */
     return (int)msg.wParam;

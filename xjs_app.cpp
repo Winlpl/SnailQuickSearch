@@ -426,7 +426,8 @@ DWORD g_clipSeqOurs = 0;       /* 自己最后一次写剪贴板后的序列号 
 
 /* 渲染设备资源 (句柄包装见 xjs_app.h "渲染句柄与后端分发"; g_d2d 是 D2D 后端私有, 在 xjs_d2d.cpp) */
 XjsGfxApi* g_gfx = NULL;      /* 当前绘图后端函数表 */
-int g_gfxEngine = 0;          /* 绘制引擎 (设置-通用, 重启生效): 0=D2D 1=GDI+ */
+int g_gfxEngine = 0;          /* 绘制引擎选择 (设置-通用, 重启生效): 0=D2D 1=GDI+; 切换档位时立即被改写为"待生效"值, 运行期分流禁用 */
+int g_gfxEngineActive = 0;    /* 本次运行实际初始化成功的绘制后端 (wWinMain 图形初始化处定型, 此后不变; 运行期按后端分流的代码一律读它) */
 XjsDwFactory* g_dw = NULL;
 IWICImagingFactory* g_wic = NULL;
 XjsFormat* g_tfTitle = NULL;
