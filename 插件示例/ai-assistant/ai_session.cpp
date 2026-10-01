@@ -497,6 +497,9 @@ static LRESULT CALLBACK AiMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         case XJS_AI_MANUALWRITE:
             AgentManualWriteDrain((long long)(intptr_t)lParam, (long)wParam);
             return 0;   /* 手动重放 lua_exec 的写盘收口 (完成事件回调转投; UI 线程执行确认框/Toast) */
+        case XJS_AI_TESTDONE:
+            WebConnTestDone((void*)lParam);
+            return 0;   /* 接口测试完成: UI 线程推 testResult (所有权随消息移交, 内部 delete) */
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

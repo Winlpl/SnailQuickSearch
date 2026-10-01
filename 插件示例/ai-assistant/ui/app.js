@@ -1,1067 +1,4 @@
-/*
- * ai_web_ui.cpp — 嵌入式前端: 整套 AI 对话 UI 的单文件 HTML+CSS+JS (NavigateToString 装载)。
- * 内容 = 一个完整 HTML 文档, 按多段相邻宽原始字面量拼接 (段界只是拼接缝)。
- * 结构/样式/交互与参考实现的 AI 助手页同源 (类名同源: ai-msg/ai-bubble/ai-reasoning/
- * ai-cmd-policy/ai-usage/ai-jumpbar/ai-history-*), 颜色 = CSS 变量 (运行时由 C++
- * 推送的皮肤调色注入, 派生色一律 color-mix 从变量现算)。
- * 交互: C++→JS 推送 (boot/pal/cfg/convs/msgs/last/usage/status/toast), JS→C++ 命令 (send/stop/
- * close/settings/policy/new/load/del/clearHist/copy/openurl/pallow/pdeny/retry/ready/
- * search/searchfill/open/reveal/copypath)。toast = 页面内提示浮层: 面板被浏览器子窗盖住,
- * 宿主 Toast 画不进来, 面板打开期间的提示一律走这条 (C++ WebToast 推送 / 页内 showToast)。
- * 可点击交互 (AI 决定点击的类型, 一律标准 Markdown 链接语法): 模型输出 [指引](xjs://search?text=..&mode=..)
- * 渲染成搜索卡片 (单击=置入搜索框并按模式执行, 右键=只填入/复制); 文件动作 [文件名](xjs://open|reveal?id=<FileId>)
- * 只带引擎 FileId — 路径由程序按 ID 解析, 前端不接触路径 (2026-09-25 用户口径); path 参数 =
- * 旧历史消息的路径版链接, 继续受理; 正文里确有绝对路径 (旧消息/ai.row 的路径字段) 仍自动识别为文件链接
- * (单击=打开, 右键=打开/定位/复制); 工具卡片 (.step, C++ 生成带 data-q=查询全文) 右键=
- * 执行语句 (搜索卡 data-mode 在, 重放语句并把结果同步进窗口列表) + 复制查询语句
- * (2026-09-26; 头部 .scmd 只显示前 200 字, 复制走 data-q 全文); lua/luau/sql 代码块做词法级语法高亮 (.tok-*)。
- * 安全面: CSP 关 fetch/XHR/表单/外域; 模型输出永不产生活 HTML (C++ md4c 层转义裁剪);
- * <a> 点击拦截转 openurl 命令; 选区/复制/右键/输入法 = 浏览器原生能力 (右键菜单只在
- * 卡片/路径上接管为自绘菜单, 其余区域保留原生菜单 = 选区复制入口)。
- * 维护口径: 改内容直接在下方字面量里编辑, 段超限就再切一刀 (段界只是拼接缝)。
- */
-#include "ai_assistant.h"
 
-const wchar_t* AiWebUiHtml() {
-    return
-           LR"AIWEBUI(<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'unsafe-inline' https://aiassets.snailqs.local; style-src 'unsafe-inline' https://aiassets.snailqs.local; img-src data:; font-src https://aiassets.snailqs.local; connect-src 'none'; form-action 'none'; base-uri 'none'">
-<title>AI 助手</title>
-<style>
-/* ============================================================
-   设计语言对齐参考实现 (AI 助手页):
-   中性 · 克制 · 专业 — 单一蓝主色 + 中性灰表面, 语义色仅用于状态指示。
-   所有颜色经 CSS 变量注入 (运行时由 C++ 推送的皮肤调色写入 :root),
-   其余派生色全部用 color-mix 从变量现算, 深浅皮肤两用。
-   ============================================================ */
-:root{
-  --bg:#14171f; --surface-raised:#1b2030;
-  --text-primary:#e8eaf0; --text-secondary:#9aa3b5; --text-tertiary:#5c6577;
-  --accent-violet:#4f7cff; --accent-cyan:#0ea5e9; --accent-emerald:#10b981;
-  --accent-amber:#f59e0b; --accent-pink:#ef4444;
-  --glass-border:#e8eaf02e; --overlay-border:#e8eaf05e;
-  --divider:#e8eaf026; --btn-secondary-hover:#e8eaf01f;
-  --ai-user-accent:#f97316;
-  --scrollbar-thumb:rgba(128,128,128,.38);
-  --scrollbar-thumb-hover:rgba(112,112,112,.58);
-  --scrollbar-thumb-pressed:rgba(96,96,96,.78);
-  /* AI 对话区三个面板框 (思考过程 / 输出内容 / 授权卡) 共用的圆角与边框浓度 */
-  --ai-surface-radius:8px;
-  --ai-surface-border:color-mix(in srgb,var(--text-primary) 12%,transparent);
-  /* 用户气泡 (暖橙, 与助手侧的中性底互补; 明度接近才是和谐的关键) */
-  --ai-user-bubble-bg:color-mix(in srgb,var(--ai-user-accent) 18%,var(--surface-raised));
-  --ai-user-bubble-border:color-mix(in srgb,var(--ai-user-accent) 34%,transparent);
-  --ai-user-bubble-text:color-mix(in srgb,var(--ai-user-accent) 6%,var(--text-primary));
-  /* 消息内容列左右各让出的宽度 = 头像 26 + 行内间距 10 (气泡与授权卡同源) */
-  --ai-msg-gutter:36px;
-  --ai-composer-radius:12px;
-}
-*{margin:0;padding:0;box-sizing:border-box}
-[hidden]{display:none!important}
-html,body{height:100%}
-body{background:var(--bg);color:var(--text-primary);overflow:hidden;position:relative;cursor:default;
-     user-select:none;-webkit-user-select:none;
-     font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Segoe UI',sans-serif;font-size:12px}
-textarea,input{user-select:text;-webkit-user-select:text}
-.glyph{font-family:'Segoe Fluent Icons','Segoe MDL2 Assets',sans-serif;font-style:normal;line-height:1}
-.ellipsis-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-
-/* ---- 全局滚动条 (对话流内 16px 大号覆盖, 见 .ai-thread) ---- */
-*::-webkit-scrollbar{width:12px;height:12px}
-*::-webkit-scrollbar-track{background:transparent}
-*::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:999px;border:3px solid transparent;background-clip:padding-box}
-*::-webkit-scrollbar-thumb:hover{background:var(--scrollbar-thumb-hover);border:3px solid transparent;background-clip:padding-box}
-*::-webkit-scrollbar-thumb:active{background:var(--scrollbar-thumb-pressed);border:3px solid transparent;background-clip:padding-box}
-*::-webkit-scrollbar-corner{background:transparent}
-
-#app{display:flex;height:100%;min-height:0;position:relative}
-.ai-main{display:flex;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0}
-
-/* ==================== 工具栏 (标题 + 连接状态 + 按钮) ==================== */
-.ai-toolbar{display:flex;align-items:center;gap:12px;flex:0 0 auto;padding:16px 20px;border-bottom:1px solid var(--glass-border)}
-.ai-toolbar-title{color:var(--text-primary);font-size:20px;font-weight:600;white-space:nowrap;
-        flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.ai-toolbar-status{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:11px;color:var(--text-secondary)}
-.ai-status-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--text-tertiary)}
-.ai-status-dot[data-state="ready"]{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
-.ai-status-dot[data-state="missing"]{background:var(--accent-amber)}
-.ai-status-dot[data-state="busy"]{background:var(--accent-violet)}
-.ai-status-dot[data-state="error"]{background:var(--accent-pink)}
-.ai-toolbar-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
-.ai-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--glass-border);
-        border-radius:4px;background:var(--surface-raised);color:var(--text-secondary);font:inherit;font-size:12px;
-        cursor:default;transition:background-color 120ms ease,color 120ms ease,border-color 120ms ease}
-.ai-btn:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-.ai-btn:disabled{opacity:.45;pointer-events:none}
-.ai-btn.icononly{padding:0 9px}
-.ai-btn .glyph{font-size:11px}
-.ai-btn-primary{border-color:transparent;background:var(--accent-violet);color:#fff}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-btn-primary:hover{background:color-mix(in srgb,var(--accent-violet) 84%,#fff);color:#fff}
-
-/* ---- 接口设置 (折叠面板) ---- */
-.ai-config-panel{display:grid;gap:10px;flex:0 0 auto;padding:14px 20px 16px;border-bottom:1px solid var(--glass-border);
-                 background:color-mix(in srgb,var(--surface-raised) 70%,var(--bg))}
-.ai-config-row{display:grid;grid-template-columns:72px minmax(0,1fr);align-items:center;gap:12px}
-.ai-config-label{font-size:12px;color:var(--text-secondary)}
-.ai-config-input{height:28px;min-width:0;padding:0 8px;border:1px solid var(--glass-border);border-radius:4px;
-                 background:var(--surface-raised);color:var(--text-primary);font:inherit;font-size:12px;
-                 transition:border-color 120ms ease}
-.ai-config-input:hover{border-color:var(--overlay-border)}
-.ai-config-input:focus{outline:none;border-color:var(--accent-violet)}
-.ai-config-hint{font-size:11px;line-height:1.6;color:var(--text-tertiary)}
-.ai-config-actions{display:flex;justify-content:flex-end;gap:8px}
-/* 设置面板两标签页 (接口 / Agent): 下划线选中态, 同一浮层分页 */
-.ai-cfg-tabs{display:flex;gap:2px;border-bottom:1px solid var(--glass-border);margin-bottom:2px}
-.ai-cfg-tab{border:0;background:transparent;padding:5px 12px 7px;color:var(--text-tertiary);font:inherit;
-            font-size:12px;cursor:default;border-bottom:2px solid transparent;transition:color 120ms ease}
-.ai-cfg-tab:hover{color:var(--text-secondary)}
-.ai-cfg-tab[aria-selected="true"]{color:var(--accent-violet);border-bottom-color:var(--accent-violet)}
-/* 自定义指令多行输入框 (单行 ai-config-input 的放高版) */
-.ai-config-area{height:auto;min-height:64px;padding:6px 8px;resize:vertical;line-height:1.55}
-/* 深度思考开关 (参考实现无此行; 本插件的 reasoning.effort 功能保留, 样式随面板) */
-.ai-reason-toggle{display:inline-flex;align-items:center;gap:7px;border:0;background:transparent;padding:0;
-                  color:var(--text-secondary);font:inherit;font-size:12px;cursor:default}
-.ai-reason-toggle:hover{color:var(--text-primary)}
-.ai-reason-box{position:relative;flex:0 0 auto;width:13px;height:13px;border:1px solid color-mix(in srgb,var(--text-tertiary) 70%,transparent);
-               border-radius:3px;background:transparent}
-.ai-reason-toggle[aria-pressed="true"] .ai-reason-box{border-color:color-mix(in srgb,var(--accent-violet) 60%,transparent);
-               background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
-.ai-reason-toggle[aria-pressed="true"] .ai-reason-box::after{content:'';position:absolute;left:3px;top:.5px;width:3.5px;height:6.5px;
-               border-right:1.6px solid var(--accent-violet);border-bottom:1.6px solid var(--accent-violet);transform:rotate(42deg)}
-/* 多模态能力勾选行 (图片/视频/音频 三档, 同一开关语言横排) */
-.ai-caps-row{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;min-width:0}
-)AIWEBUI"
-           LR"AIWEBUI(/* 档案下拉与"新建/复制/删除"并排: 下拉吞掉剩余宽度, 按钮各自保持内容宽 */
-.ai-config-profile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;align-items:center;gap:8px}
-.ai-config-profile-row .ai-btn{height:28px;padding:0 10px}
-.ai-config-profile-row select{cursor:default}
-/* 待确认删除: 两步确认语言 (删除模型档案 / 清空历史记录共用) */
-.ai-config-profile-row .ai-btn[data-armed="true"],.ai-history-clear[data-armed="true"]{border-color:color-mix(in srgb,var(--accent-pink) 55%,transparent);
-               color:var(--accent-pink)}
-/* 工具栏模型切换下拉 (管理动作都在接口设置面板里, 末项固定是"管理模型…") */
-.ai-model-picker{position:relative;display:flex;flex:0 1 auto;min-width:0}
-.ai-model-picker-button{max-width:190px}
-.ai-model-caret{flex:0 0 auto;font-size:9px;line-height:1;transition:transform 120ms ease}
-.ai-model-picker-button[aria-expanded="true"] .ai-model-caret{transform:rotate(180deg)}
-.ai-model-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:17;display:grid;gap:2px;width:max-content;
-          min-width:190px;max-width:300px;max-height:320px;overflow-y:auto;padding:4px;border-radius:7px;
-          background:var(--surface-raised);box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.28);
-          cursor:default;opacity:1;transform:translateY(0) scale(1);transform-origin:right top;
-          transition:opacity 120ms ease,transform 140ms cubic-bezier(.2,0,0,1)}
-.ai-model-menu[hidden]{display:none}
-.ai-model-menu.opening,.ai-model-menu.closing{opacity:0;transform:translateY(-5px) scale(.98);pointer-events:none}
-.ai-model-menu.closing{transition-duration:90ms}
-.ai-model-option{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:6px;width:100%;
-          padding:5px 8px;border:0;border-radius:4px;background:transparent;color:var(--text-secondary);
-          font:inherit;font-size:12px;line-height:1.5;text-align:left;cursor:default;outline:none}
-.ai-model-option:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-.ai-model-option[aria-checked="true"]{background:color-mix(in srgb,var(--accent-violet) 14%,transparent);color:var(--text-primary)}
-.ai-model-option-check{color:transparent;font-size:11px;line-height:1.6}
-.ai-model-option[aria-checked="true"] .ai-model-option-check{color:var(--accent-violet)}
-/* 档案名与其模型名: 两条档案显示名撞车时, 靠第二行才分得清 */
-.ai-model-option-text{display:flex;flex-direction:column;min-width:0}
-.ai-model-option-name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.ai-model-option-hint{overflow:hidden;color:var(--text-tertiary);font-size:10.5px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
-.ai-model-option[aria-checked="true"] .ai-model-option-hint{color:var(--text-secondary)}
-/* 管理入口不是"一个可选模型", 用一条分隔线划开 */
-.ai-model-option-manage{display:block;margin-top:4px;padding-top:8px;border-top:1px solid var(--divider);
-               border-radius:0 0 4px 4px;color:var(--text-tertiary)}
-
-/* ==================== 对话流 ==================== */
-.ai-thread-wrap{position:relative;display:flex;flex:1 1 auto;min-width:0;min-height:0}
-/* 左内边距 40px 给左缘轮次跳转条留位 */
-.ai-thread{position:relative;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:18px 20px 14px 40px}
-.ai-thread::-webkit-scrollbar,.ai-thread *::-webkit-scrollbar{width:16px;height:16px}
-.ai-thread::-webkit-scrollbar-thumb,.ai-thread *::-webkit-scrollbar-thumb{border:4px solid transparent;background-clip:padding-box}
-.ai-thread::-webkit-scrollbar-thumb:hover,.ai-thread *::-webkit-scrollbar-thumb:hover{border:4px solid transparent;background-clip:padding-box}
-.ai-thread::-webkit-scrollbar-thumb:active,.ai-thread *::-webkit-scrollbar-thumb:active{border:4px solid transparent;background-clip:padding-box}
-.ai-thread-inner{display:flex;flex-direction:column;gap:16px;width:100%;max-width:min(1600px,100%);margin:0 auto;
-                 user-select:text;-webkit-user-select:text}
-/* 对话区里不参与文本选择的只有交互控件与图标 */
-.ai-thread-inner button,.ai-msg-avatar,.ai-reasoning-ic,.ai-reasoning-chevron,.ai-meta-btn,.ai-user-del{user-select:none;-webkit-user-select:none}
-
-.ai-msg{display:flex;gap:10px;min-width:0}
-.ai-msg-user{flex-direction:row-reverse}
-.ai-msg-avatar{display:grid;flex:0 0 auto;width:26px;height:26px;place-items:center;border-radius:50%;font-size:13px}
-.ai-msg-assistant .ai-msg-avatar{background:color-mix(in srgb,var(--accent-violet) 20%,transparent);color:var(--accent-violet)}
-.ai-msg-user .ai-msg-avatar{background:var(--btn-secondary-hover);color:var(--text-secondary)}
-.ai-msg-main{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 auto;max-width:calc(100% - var(--ai-msg-gutter)*2)}
-.ai-msg-user .ai-msg-main{align-items:flex-end}
-
-.ai-bubble{padding:9px 12px;border-radius:var(--ai-surface-radius);font-size:12.5px;line-height:1.72;
-           color:var(--text-primary);overflow-wrap:anywhere;min-width:44px;max-width:100%}
-.ai-msg-assistant .ai-bubble{border:1px solid var(--ai-surface-border);background:var(--surface-raised)}
-.ai-msg-assistant .ai-bubble.ai-bubble-short{align-self:flex-start;width:fit-content}
-.ai-msg-assistant .ai-bubble:empty{display:none}
-.ai-msg-user .ai-bubble{border:1px solid var(--ai-user-bubble-border);background:var(--ai-user-bubble-bg);color:var(--ai-user-bubble-text)}
-)AIWEBUI"
-           LR"AIWEBUI(/* 悬停删除 (删除单位 = 该提问+其后全部回复, 上下文同步精简); 两步确认: 首击进入
-   确认态 (变红"确认删除", 4s 内再击才发删除), 切换目标/整帧重绘/超时自动复位 */
-.ai-user-del{display:none;flex:0 0 auto;align-self:center;padding:4px 7px;border:0;border-radius:6px;
-             background:transparent;color:var(--text-tertiary);font-size:12px;cursor:pointer;opacity:.7}
-.ai-msg-user:hover .ai-user-del,.ai-user-del.arm{display:inline-flex;align-items:center}
-.ai-user-del:hover{background:var(--btn-secondary-hover);opacity:1}
-.ai-user-del.arm{color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 14%,transparent);
-                 font-size:11px;font-weight:600;opacity:1}
-.ai-msg-error .ai-bubble,.ai-bubble-error{border:1px solid color-mix(in srgb,var(--accent-pink) 42%,transparent)!important;
-           background:color-mix(in srgb,var(--accent-pink) 12%,var(--surface-raised))!important}
-
-/* ---- 过程区 (一个回合内, 回答气泡之前的全部中间产物) ----
- * 思考块 + 工具组 + 中间叙述合成**一块**面板: 各自只占一行, 行间细线分隔,
- * 不再每块自带边框各自成卡散开 (用户反馈"有思考的时候不放在一起") ——
- * 面板之下才是本轮回答气泡。--ai-reasoning-text 的取值与推理区同源: 过程是草稿, 比正文淡一档 */
-.ai-turn-log{display:flex;flex-direction:column;gap:0;width:100%;overflow:hidden;
-             border:1px solid var(--glass-border);border-radius:8px;
-             background:color-mix(in srgb,var(--text-primary) 3%,transparent);
-             --ai-reasoning-text:color-mix(in srgb,var(--text-secondary) 62%,var(--text-tertiary))}
-/* 面板整体可收起: 头部一行常驻 (图标+标签+状态+箭头), 体 = 各过程行 (2026-09-25 用户口径
- * "AI 开始回答正文时自动收缩" — 收起落账见 maybeAutoCollapseTurn; 点头部开合后手动覆写自动) */
-.ai-turn-log-head{display:flex;align-items:center;gap:7px;width:100%;padding:6px 10px;border:0;
-             background:transparent;color:var(--ai-reasoning-text);font:inherit;font-size:11px;
-             line-height:1.5;text-align:left;cursor:default}
-.ai-turn-log-head:hover{background:color-mix(in srgb,var(--accent-violet) 8%,transparent);color:var(--text-secondary)}
-.ai-turn-log-ic,.ai-turn-log-arr{flex:0 0 auto;font-size:11px}
-.ai-turn-log-arr{font-size:9px;transition:transform 120ms ease}
-.ai-turn-log.open .ai-turn-log-arr{transform:rotate(180deg)}
-.ai-turn-log-label{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.ai-turn-log-sum{flex:0 0 auto;color:color-mix(in srgb,var(--accent-amber) 82%,var(--text-primary))}
-.ai-turn-log-body{display:none;flex-direction:column;gap:0;border-top:1px solid var(--divider)}
-.ai-turn-log.open>.ai-turn-log-body{display:flex}
-/* 相邻行细分隔线; 行内元素在面板里脱掉自己的卡框 (圆角/边框/底色归面板所有) */
-.ai-turn-log-body>*+*{border-top:1px solid var(--divider)}
-.ai-turn-log .ai-reasoning,.ai-turn-log .ai-toolgrp{border:0;border-radius:0;background:transparent}
-.ai-turn-log-body>.ai-steps>.step{border:0;border-radius:0;background:transparent}
-/* 面板内各行的水平内边距统一 10px (推理头原样, 工具组头/单卡片行原本 8px 会错位) */
-.ai-turn-log-body>.ai-toolgrp>.ai-toolgrp-head,
-.ai-turn-log-body>.ai-steps>.step>.shead{padding-left:10px;padding-right:10px}
-.ai-turn-note{font-size:12px;line-height:1.68;color:var(--ai-reasoning-text);overflow-wrap:anywhere;padding:7px 10px}
-/* 中间叙述复用 C++ 的 ai-bubble 输出, 在过程区内脱掉气泡外框 (无边框无底色, 淡色小字) */
-.ai-turn-note>.ai-bubble{border:0;background:transparent;padding:0;min-width:0;
-             color:inherit;font-size:12px;line-height:1.68}
-.ai-turn-note>.ai-bubble p{margin:0 0 5px}
-.ai-turn-note>.ai-bubble p:last-child{margin-bottom:0}
-.ai-turn-note>.ai-bubble strong{color:var(--ai-reasoning-text)}
-
-/* ---- 每条回答结尾的信息行 (重试 / 复制) ---- */
-.ai-msg-meta{display:flex;align-items:center;gap:2px;align-self:flex-start;width:fit-content;min-width:0;
-             margin-top:-3px;color:var(--text-tertiary);font-size:11px;line-height:1.4}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-meta-btn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:0;
-             border-radius:4px;background:transparent;color:var(--text-tertiary);font-size:11px;cursor:default;
-             transition:background-color 120ms ease,color 120ms ease}
-.ai-meta-btn:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-
-/* ---- 气泡正文 (md) ---- */
-.ai-bubble p{margin:0 0 6px}
-.ai-bubble p:last-child{margin-bottom:0}
-.ai-bubble ul,.ai-bubble ol{margin:4px 0;padding-left:18px}
-.ai-bubble li{margin:2px 0}
-.ai-bubble li::marker{color:color-mix(in srgb,var(--accent-violet) 62%,var(--text-tertiary))}
-.ai-bubble strong{font-weight:600;color:var(--text-primary)}
-.ai-bubble em{color:var(--text-primary)}
-.ai-bubble s,.ai-bubble del{color:var(--text-tertiary);text-decoration:line-through}
-.ai-bubble a{color:var(--accent-cyan);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent-cyan) 40%,transparent);cursor:pointer}
-.ai-bubble a:hover{color:color-mix(in srgb,var(--accent-cyan) 80%,#fff);border-bottom-color:var(--accent-cyan)}
-.ai-bubble code{padding:1px 4px;border-radius:3px;background:color-mix(in srgb,var(--accent-violet) 13%,transparent);
-                color:color-mix(in srgb,var(--accent-violet) 80%,var(--text-primary));
-                font-family:Consolas,'Cascadia Mono',monospace;font-size:11.5px}
-.ai-bubble h1,.ai-bubble h2,.ai-bubble h3,.ai-bubble h4{margin:10px 0 6px;font-weight:600;line-height:1.4}
-.ai-bubble h1,.ai-bubble h2,.ai-bubble h3{color:color-mix(in srgb,var(--accent-violet) 80%,var(--text-primary))}
-.ai-bubble h4{color:var(--text-primary)}
-.ai-bubble h1{font-size:17px;border-bottom:1px solid var(--divider);padding-bottom:4px}
-.ai-bubble h2{font-size:15.5px}
-.ai-bubble h3{font-size:14px}
-.ai-bubble h4{font-size:13px}
-.ai-bubble h5{margin:8px 0 5px;color:var(--text-secondary);font-weight:600;font-size:12.5px;line-height:1.4}
-.ai-bubble h6{margin:8px 0 5px;color:var(--text-tertiary);font-weight:600;font-size:12px;line-height:1.4}
-.ai-bubble h1:first-child,.ai-bubble h2:first-child,.ai-bubble h3:first-child,.ai-bubble h4:first-child,
-.ai-bubble h5:first-child,.ai-bubble h6:first-child{margin-top:0}
-/* 加粗短句小标题 (C++ md 层改写为 p.ai-md-sub) */
-.ai-bubble p.ai-md-sub{margin:9px 0 5px;color:color-mix(in srgb,var(--accent-violet) 78%,var(--text-primary));font-weight:600}
-.ai-bubble p.ai-md-sub:first-child{margin-top:0}
-.ai-bubble blockquote{margin:6px 0;padding:6px 10px;border-left:3px solid color-mix(in srgb,var(--accent-violet) 55%,transparent);
-                      border-radius:0 4px 4px 0;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);color:var(--text-secondary)}
-.ai-bubble blockquote blockquote{margin:4px 0;background:transparent}
-.ai-bubble blockquote p{margin:0}
-.ai-bubble hr{margin:10px 0;border:0;height:1px;background:var(--divider)}
-/* 表格 */
-.ai-bubble .ai-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--glass-border);border-radius:5px}
-.ai-bubble table{width:100%;border-collapse:collapse;font-size:12px;line-height:1.5}
-.ai-bubble th,.ai-bubble td{padding:5px 9px;border-bottom:1px solid var(--divider);color:var(--text-primary);text-align:left;
-                           overflow-wrap:break-word;word-break:normal}   /* break-word: "10" 这类短词不被 anywhere 拆成 "1 0" */
-.ai-bubble th{background:color-mix(in srgb,var(--accent-violet) 12%,transparent);
-              color:color-mix(in srgb,var(--accent-violet) 72%,var(--text-primary));font-weight:600;white-space:nowrap}
-.ai-bubble tr:last-child td{border-bottom:0}
-.ai-bubble tbody tr:hover td{background:var(--btn-secondary-hover)}
-/* 嵌套列表层级符号 */
-.ai-bubble ul ul{list-style:circle}
-.ai-bubble ul ul ul{list-style:square}
-/* 任务列表 */
-.ai-bubble li.ai-task{display:flex;align-items:flex-start;gap:6px;margin:3px 0;list-style:none}
-.ai-task-box{position:relative;flex:0 0 auto;box-sizing:border-box;width:12px;height:12px;margin-top:3px;
-             border:1.5px solid color-mix(in srgb,var(--text-tertiary) 70%,transparent);border-radius:3px}
-.ai-task-box.done{border-color:color-mix(in srgb,var(--accent-emerald) 76%,transparent);
-                  background:color-mix(in srgb,var(--accent-emerald) 24%,transparent)}
-.ai-task-box.done::after{content:'';position:absolute;top:.5px;left:3px;width:3px;height:5.5px;
-             border-right:1.6px solid var(--accent-emerald);border-bottom:1.6px solid var(--accent-emerald);transform:rotate(42deg)}
-.ai-bubble li.ai-task .ai-task-text{flex:1 1 auto;min-width:0}
-.ai-bubble li.ai-task .ai-task-box.done+.ai-task-text{color:var(--text-tertiary);text-decoration:line-through}
-/* 代码块 (带语言标注 + 复制按钮) */
-.ai-bubble .ai-code{margin:6px 0;overflow:hidden;border:1px solid var(--glass-border);border-radius:6px;background:var(--bg)}
-.ai-code-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px 5px 10px;
-              border-bottom:1px solid var(--divider);background:var(--btn-secondary-hover)}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-code-lang{font-family:Consolas,'Cascadia Mono',monospace;font-size:10.5px;letter-spacing:.4px;
-              text-transform:uppercase;color:var(--text-tertiary)}
-.ai-code-copy{padding:3px 8px;border:1px solid var(--glass-border);border-radius:4px;background:transparent;
-              color:var(--text-secondary);font-size:11px;font-family:inherit;cursor:default;
-              transition:background 120ms ease,color 120ms ease,border-color 120ms ease}
-.ai-code-copy:hover{background:var(--btn-secondary-hover);color:var(--text-primary);border-color:var(--overlay-border)}
-.ai-code-copy.ai-code-copied{color:var(--accent-emerald);border-color:color-mix(in srgb,var(--accent-emerald) 45%,transparent)}
-.ai-bubble .ai-code pre{margin:0;padding:8px 10px;overflow-x:auto}
-.ai-bubble .ai-code pre code{padding:0;background:transparent;color:var(--text-primary);font-size:11.5px;line-height:1.6;white-space:pre}
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- mermaid 图表卡 (```mermaid 围栏; 源码态=代码块样式, 出图后源码隐藏) ---- */
-.ai-bubble .ai-code pre.ai-mermaid-src{white-space:pre;color:var(--text-secondary)}
-.ai-mermaid[data-done] pre.ai-mermaid-src{display:none}
-.ai-mermaid-out{overflow-x:auto}
-.ai-mermaid-out:not(:empty){padding:10px 12px}
-/* mermaid 给 svg 写内联 max-width (原图像素宽, 可能超过卡宽) — 必须 !important 压成随容器缩放 */
-.ai-mermaid-out svg{max-width:100% !important;height:auto;display:block;margin:0 auto}
-.ai-mermaid-err{margin:0;padding:5px 10px;font-size:11.5px;line-height:1.5;color:var(--accent-amber)}
-/* ---- mermaid 图表灯箱 (点击图表整面板放大: 滚轮缩放/按住拖动/原地点击·Esc·✕ 收) ---- */
-.ai-mm-lb{position:fixed;inset:0;z-index:15000;background:color-mix(in srgb,var(--bg) 88%,transparent);
-          user-select:none;-webkit-user-select:none}
-.ai-mm-lb .mm-vp{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none}
-.ai-mm-lb .mm-vp:active{cursor:grabbing}
-.ai-mm-lb .mm-holder{position:absolute;left:0;top:0;transform-origin:0 0;
-                     filter:drop-shadow(0 12px 40px rgba(0,0,0,.45))}
-.ai-mm-lb .mm-holder svg{display:block;background:var(--surface-raised);
-                         border:1px solid var(--glass-border);border-radius:8px}
-.ai-mm-lb .mm-x{position:absolute;top:10px;right:12px;width:30px;height:30px;border-radius:8px;
-                border:1px solid var(--glass-border);background:var(--surface-raised);
-                color:var(--text-secondary);font-size:14px;cursor:pointer}
-.ai-mm-lb .mm-x:hover{color:var(--text-primary);border-color:var(--overlay-border)}
-.ai-mm-lb .mm-hint{position:absolute;bottom:12px;left:0;right:0;text-align:center;
-                   font-size:11px;color:var(--text-tertiary);pointer-events:none}
-/* 卡内图表 = 点击放大的入口 (不可拖选; 放大交互在灯箱里) */
-.ai-mermaid-out{cursor:zoom-in;user-select:none;-webkit-user-select:none}
-/* ---- GitHub 提示块 ([!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]) ---- */
-.ai-gq{border-left:3px solid var(--accent-violet);border-radius:0 6px 6px 0;padding:6px 10px;margin:6px 0;
-       background:color-mix(in srgb,var(--accent-violet) 10%,transparent)}
-.ai-gq.gq-note{border-color:var(--accent-cyan);background:color-mix(in srgb,var(--accent-cyan) 10%,transparent)}
-.ai-gq.gq-tip{border-color:var(--accent-emerald);background:color-mix(in srgb,var(--accent-emerald) 10%,transparent)}
-.ai-gq.gq-important{border-color:var(--accent-violet);background:color-mix(in srgb,var(--accent-violet) 10%,transparent)}
-.ai-gq.gq-warning{border-color:var(--accent-amber);background:color-mix(in srgb,var(--accent-amber) 10%,transparent)}
-.ai-gq.gq-danger{border-color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 10%,transparent)}
-/* ---- 中文强调框 (注意/提示/重要/警告/危险 粗体开头段落) ---- */
-.ai-cnote{border-left:3px solid var(--accent-cyan);border-radius:6px;padding:6px 10px;margin:7px 0;
-          background:color-mix(in srgb,var(--accent-cyan) 9%,transparent)}
-.ai-cnote.cn-tip{border-color:var(--accent-emerald);background:color-mix(in srgb,var(--accent-emerald) 9%,transparent)}
-.ai-cnote.cn-important{border-color:var(--accent-violet);background:color-mix(in srgb,var(--accent-violet) 9%,transparent)}
-.ai-cnote.cn-warning{border-color:var(--accent-amber);background:color-mix(in srgb,var(--accent-amber) 9%,transparent)}
-.ai-cnote.cn-danger{border-color:var(--accent-pink);background:color-mix(in srgb,var(--accent-pink) 9%,transparent)}
-/* ---- 折叠卡 (<details> 归一化; 默认收起, open 变体默认展开) ---- */
-.ai-fold{margin:7px 0;border:1px solid var(--glass-border);border-radius:6px;overflow:hidden;background:var(--bg)}
-.ai-fold-head{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border:0;
-              background:var(--btn-secondary-hover);color:var(--text-primary);font-size:12.5px;
-              font-family:inherit;text-align:left;cursor:pointer}
-.ai-fold-head:hover{background:color-mix(in srgb,var(--btn-secondary-hover) 60%,var(--overlay-border))}
-.ai-fold-arrow{display:inline-block;transition:transform 120ms ease;color:var(--text-tertiary);font-size:10px}
-.ai-fold.open>.ai-fold-head .ai-fold-arrow{transform:rotate(90deg)}
-.ai-fold-body{display:none;padding:2px 10px 6px}
-.ai-fold.open>.ai-fold-body{display:block}
-/* ---- 数学公式 (KaTeX 渲染目标; 库未就绪时按源码文本显示, 块级居中可横滚) ---- */
-.ai-math-disp{display:block;text-align:center;margin:8px 0;overflow-x:auto;padding:4px 0}
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- 可点击交互: 搜索卡片 (xjs-search 围栏渲染) ---- */
-.ai-chip{display:flex;align-items:center;gap:8px;width:fit-content;max-width:100%;margin:7px 0;
-         padding:7px 11px;border:1px solid color-mix(in srgb,var(--accent-violet) 40%,var(--glass-border));
-         border-radius:8px;background:color-mix(in srgb,var(--accent-violet) 8%,var(--surface-raised));
-         color:var(--text-primary);font-size:12px;line-height:1.5;cursor:pointer;
-         user-select:none;-webkit-user-select:none;
-         transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease}
-.ai-chip:hover{background:color-mix(in srgb,var(--accent-violet) 15%,var(--surface-raised));
-               border-color:color-mix(in srgb,var(--accent-violet) 62%,transparent);
-               box-shadow:0 2px 10px rgba(0,0,0,.16)}
-.ai-chip:active{transform:translateY(1px)}
-.ai-chip-ic{flex:0 0 auto;font-size:13px;color:var(--accent-violet)}
-.ai-chip-text{flex:0 1 auto;min-width:0;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-              font-family:Consolas,'Cascadia Mono',monospace;font-size:11.5px}
-.ai-chip-mode{flex:0 0 auto;padding:1px 7px;border-radius:999px;
-              background:color-mix(in srgb,var(--accent-violet) 20%,transparent);
-              color:color-mix(in srgb,var(--accent-violet) 82%,var(--text-primary));
-              font-size:10px;letter-spacing:.4px;text-transform:uppercase}
-.ai-chip-go{flex:0 0 auto;font-size:10px;color:var(--text-tertiary);transition:color 120ms ease}
-.ai-chip:hover .ai-chip-go{color:var(--accent-violet)}
-/* 点击已发命令的瞬时确认 (600ms): 区分"命令没发出"与"宿主侧没执行" */
-.ai-chip.sent{border-color:var(--accent-violet);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-violet) 28%,transparent)}
-.ai-chip.sent .ai-chip-go{color:var(--accent-violet)}
-/* ---- 文件路径链接 (气泡正文自动识别 + 工具卡片样本): 单击打开, 右键菜单 ---- */
-.ai-path{color:var(--accent-cyan);border-bottom:1px dashed color-mix(in srgb,var(--accent-cyan) 48%,transparent);
-         cursor:pointer;transition:color 120ms ease,border-bottom-color 120ms ease}
-.ai-path:hover{color:color-mix(in srgb,var(--accent-cyan) 80%,#fff);border-bottom-style:solid}
-.ai-path-ic{width:14px;height:14px;vertical-align:-2px;margin-right:4px;border-radius:2px}
-/* ---- 右键菜单 (文件路径 / 搜索卡片的操作项) ---- */
-.ai-ctx{position:fixed;left:0;top:0;z-index:13000;display:flex;flex-direction:column;min-width:150px;padding:4px;
-        border-radius:7px;background:var(--surface-raised);
-        box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.3);cursor:default}
-.ai-ctx-item{display:block;width:100%;padding:6px 10px;border:0;border-radius:4px;background:transparent;
-             color:var(--text-primary);font:inherit;font-size:12px;text-align:left;cursor:pointer;white-space:nowrap}
-.ai-ctx-item:hover{background:var(--btn-secondary-hover)}
-.ai-ctx-sep{height:1px;margin:3px 6px;background:var(--divider)}
-/* ---- 代码语法高亮 (Lua / SQL; 颜色取皮肤语义色, 深浅皮肤两用) ---- */
-.tok-k{color:color-mix(in srgb,var(--accent-violet) 72%,var(--text-primary));font-weight:600}
-.tok-s{color:var(--accent-emerald)}
-.tok-c{color:var(--text-tertiary);font-style:italic}
-.tok-n{color:var(--accent-amber)}
-.tok-f{color:var(--accent-cyan)}
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- 推理过程 (可折叠; 挂在 .ai-msg-main 里, 气泡之前) ---- */
-.ai-reasoning{margin:0;overflow:hidden;width:100%;border:1px solid var(--ai-surface-border);border-radius:var(--ai-surface-radius);
-              background:color-mix(in srgb,var(--accent-violet) 5%,transparent);
-              --ai-reasoning-text:color-mix(in srgb,var(--text-secondary) 62%,var(--text-tertiary));
-              --ai-reasoning-strong:color-mix(in srgb,var(--text-secondary) 58%,var(--text-primary))}
-.ai-reasoning-head{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border:0;background:transparent;
-                   color:var(--text-secondary);font-size:11.5px;font-family:inherit;text-align:left;cursor:default;
-                   transition:color 120ms ease,background 120ms ease}
-.ai-reasoning-head:hover{background:color-mix(in srgb,var(--accent-violet) 8%,transparent);color:var(--text-primary)}
-.ai-reasoning-ic{flex:0 0 auto;font-size:12px;color:var(--accent-violet)}
-.ai-reasoning-label{flex:1 1 auto}
-.ai-reasoning-chevron{flex:0 0 auto;font-size:10px;color:var(--text-tertiary);transition:transform 160ms ease}
-.ai-reasoning[data-open="true"] .ai-reasoning-chevron{transform:rotate(90deg)}
-.ai-reasoning-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows 200ms cubic-bezier(.2,0,0,1)}
-.ai-reasoning-inner{overflow:hidden;min-height:0;opacity:0;font-size:12px;line-height:1.68;overflow-wrap:anywhere;
-                    color:var(--ai-reasoning-text);white-space:pre-wrap;
-                    transition:padding 200ms ease,opacity 150ms ease}
-.ai-reasoning[data-open="true"] .ai-reasoning-body{grid-template-rows:1fr}
-.ai-reasoning[data-open="true"] .ai-reasoning-inner{padding:2px 10px 8px;opacity:1;
-                    border-top:1px solid color-mix(in srgb,var(--accent-violet) 20%,transparent)}
-/* 思考中: 图标与标题缓慢呼吸 */
-.ai-reasoning[data-thinking="true"] .ai-reasoning-ic{animation:ai-reasoning-think 1.5s ease-in-out infinite}
-.ai-reasoning[data-thinking="true"] .ai-reasoning-label{animation:ai-reasoning-title-think 1.5s ease-in-out infinite}
-@keyframes ai-reasoning-think{0%,100%{opacity:.4;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}
-@keyframes ai-reasoning-title-think{0%,100%{opacity:.7}50%{opacity:1}}
-
-/* ---- 工具执行卡片 (role==2 消息; 过程记录外观与参考实现的命令记录同源) ----
- * 折叠口径: 头部恒一行 (徽标 + 单行省略的查询摘要 + 状态 + 箭头),
- * 点击展开才看完整查询与样本列表 —— 长查询默认全展示会把过程区撑满整屏 (用户反馈) */
-.ai-steps{display:flex;flex-direction:column;gap:6px;width:100%}
-/* ---- 连续工具组 (≥2 张卡片聚一组, 整组折叠; 对齐参考实现的推理区折叠语言) ---- */
-.ai-toolgrp{border:1px solid var(--glass-border);border-radius:5px;
-            background:color-mix(in srgb,var(--text-primary) 3%,transparent);overflow:hidden}
-.ai-toolgrp-head{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;background:transparent;
-            color:var(--text-secondary);font-size:11px;font-family:inherit;text-align:left;cursor:pointer;
-            transition:color 120ms ease,background 120ms ease}
-.ai-toolgrp-head:hover{background:color-mix(in srgb,var(--accent-violet) 8%,transparent);color:var(--text-primary)}
-.ai-toolgrp-label{flex:0 0 auto;font-weight:600}
-.ai-toolgrp-sum{flex:1 1 auto;min-width:0;text-align:right;color:var(--text-tertiary);font-size:10px;
-            font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ai-toolgrp-sum.bad{color:color-mix(in srgb,var(--accent-pink) 78%,var(--text-primary))}
-.ai-toolgrp-sum.wait{color:color-mix(in srgb,var(--accent-amber) 82%,var(--text-primary))}
-.ai-toolgrp-arr{flex:0 0 auto;font-size:9px;color:var(--text-tertiary);transition:transform 120ms ease}
-.ai-toolgrp.open .ai-toolgrp-arr{transform:rotate(180deg)}
-.ai-toolgrp-body{display:none;flex-direction:column;gap:6px;padding:6px;border-top:1px solid var(--glass-border)}
-.ai-toolgrp.open .ai-toolgrp-body{display:flex}
-.step{border:1px solid var(--glass-border);border-radius:5px;background:color-mix(in srgb,var(--text-primary) 5%,transparent);overflow:hidden}
-.step.failed{border-color:color-mix(in srgb,var(--accent-pink) 38%,transparent)}
-.shead{display:flex;align-items:baseline;gap:6px;padding:5px 8px;font-size:11px;cursor:pointer;overflow:hidden}
-.sbadge{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-violet) 16%,transparent);
-        color:color-mix(in srgb,var(--accent-violet) 80%,var(--text-primary));font-size:10px;line-height:1.6}
-.sflt{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-cyan) 16%,transparent);
-      color:color-mix(in srgb,var(--accent-cyan) 80%,var(--text-primary));font-size:10px;line-height:1.6}
-.scmd{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-      color:var(--text-secondary);font-family:Consolas,'Cascadia Mono',monospace;font-size:11px}
-.sst{flex:0 0 auto;color:var(--text-tertiary);font-size:10px;font-variant-numeric:tabular-nums}
-.sst.bad{color:color-mix(in srgb,var(--accent-pink) 78%,var(--text-primary))}
-.sarr{flex:0 0 auto;font-size:9px;color:var(--text-tertiary);transition:transform 120ms ease}
-.step.open .sarr{transform:rotate(180deg)}
-.sout,.ssamples{margin:0;padding:6px 8px;max-height:200px;overflow:auto;border-top:1px solid var(--glass-border);
-        background:color-mix(in srgb,var(--text-primary) 4%,transparent);font-family:Consolas,'Cascadia Mono',monospace;
-        font-size:11px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
-/* 网搜卡片样本行 (web_search): 标题=可点链接走 openurl, 完整地址挂在 href; 尾部域名弱化 */
-.ssch-link{color:var(--accent-cyan);text-decoration:none}
-.ssch-link:hover{text-decoration:underline}
-.ssch-u{margin-left:6px;color:var(--text-tertiary);font-size:10px}
-/* lua 脚本导出的文件 (常显块 — 不随卡片折叠收起, 会话结束后仍可见; 路径 .ai-path 可点击) */
-.swrote{margin:6px 8px 8px;padding:6px 9px;border:1px solid color-mix(in srgb,var(--accent-violet) 35%,var(--glass-border));
-        border-radius:7px;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);
-        font-size:11px;line-height:1.6;color:var(--text-secondary)}
-.swrote-it{margin-top:3px;word-break:break-all}
-/* 本轮导出的文件 (挂在导出发生的回合组末尾 — 归属清晰, 继续对话不漂移; 路径可点击) */
-.sess-exports{margin:6px 0 2px;padding:7px 11px;border:1px dashed color-mix(in srgb,var(--accent-violet) 38%,var(--glass-border));
-        border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 6%,transparent);
-        font-size:11.5px;line-height:1.65;color:var(--text-secondary)}
-.sess-exports .se-head{color:var(--text-tertiary);margin-bottom:4px}
-.sess-exports .se-it{word-break:break-all}
-)AIWEBUI"
-           LR"AIWEBUI(
-/* file_op 文件更改记录 (卡片常显块 .schg + 回合级聚合块 .sess-chg): 每行 = 独立小气泡
-   (圆角底 + 行间距 + 悬停反馈, 不再连成一片); 行首动作签 min-width 对齐, 箭头强调色。
-   同目录改名只显文件名 — 完整路径恒留在 data-path 供点击/右键复制 */
-.schg{margin:6px 8px 8px;padding:7px 8px 8px;border:1px solid color-mix(in srgb,var(--accent-violet) 35%,var(--glass-border));
-      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 7%,transparent);
-      font-size:11px;line-height:1.6;color:var(--text-secondary)}
-.schg-it{display:flex;align-items:baseline;gap:7px;margin-top:4px;padding:4px 9px;border-radius:7px;
-      background:color-mix(in srgb,var(--glass-border) 30%,transparent)}
-.schg-it:hover{background:color-mix(in srgb,var(--glass-border) 55%,transparent)}
-.schg-it .ai-path{min-width:0;word-break:break-all}
-.schg-w{flex:0 0 auto;display:inline-block;padding:0 5px;border-radius:5px;white-space:nowrap;min-width:44px;text-align:center;
-      background:color-mix(in srgb,var(--accent-violet) 16%,transparent);color:var(--text-tertiary)}
-.chg-arr{flex:0 0 auto;color:var(--accent-violet);font-weight:600}
-/* 失败项: 红底行 + 红签 + 原因 (操作失败的文件也要记录, 不静默丢弃) */
-.schg-it.schg-bad,.sess-chg .se-bad{background:color-mix(in srgb,var(--accent-pink) 13%,transparent)}
-.schg-w.bad,.sess-chg .se-bad .schg-w{background:color-mix(in srgb,var(--accent-pink) 22%,transparent);
-      color:color-mix(in srgb,var(--accent-pink) 80%,var(--text-primary))}
-.chg-err{color:var(--accent-pink);font-size:10.5px}
-.sess-chg .se-fail{color:var(--accent-pink);font-style:normal;margin-left:4px}
-.sess-chg{margin:6px 0 2px;padding:5px 9px 8px;border:1px dashed color-mix(in srgb,var(--accent-violet) 38%,var(--glass-border));
-      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 6%,transparent);
-      font-size:11.5px;line-height:1.65;color:var(--text-secondary)}
-.sess-chg .sess-chg-head{display:flex;align-items:center;gap:6px;width:100%;padding:2px 2px;border:0;background:none;
-      color:inherit;font:inherit;text-align:left;cursor:default}
-.sess-chg .sess-chg-head .se-head{flex:1;color:var(--text-tertiary)}
-.sess-chg .sess-chg-head .sarr{flex:0 0 auto;font-size:9px;color:var(--text-tertiary);transition:transform 120ms ease}
-.sess-chg.open .sess-chg-head .sarr{transform:rotate(180deg)}
-.sess-chg .sess-chg-body{display:none;margin-top:3px}
-.sess-chg.open .sess-chg-body{display:block}
-.sess-chg .se-it{display:flex;align-items:baseline;gap:7px;margin-top:4px;padding:4px 9px;border-radius:7px;
-      background:color-mix(in srgb,var(--glass-border) 30%,transparent)}
-.sess-chg .se-it:hover{background:color-mix(in srgb,var(--glass-border) 55%,transparent)}
-.sess-chg .se-it .ai-path{min-width:0;word-break:break-all}
-.sess-chg .schg-w{flex:0 0 auto;display:inline-block;padding:0 5px;border-radius:5px;white-space:nowrap;min-width:46px;text-align:center;
-      background:color-mix(in srgb,var(--accent-violet) 16%,transparent);color:var(--text-tertiary)}
-/* 挂起确认常驻条 (输入框上方): 标题行 = 摘要 + 允许/拒绝按钮; 下方明细区 = 确认正文
-   (逐项清单/风险提示, 与卡上 confirm 文本同源) — 过程面板收起/滚走也能直接裁决 */
-.ai-pendbar{display:flex;flex-direction:column;gap:6px;margin:0 10px 6px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--accent-violet) 50%,var(--glass-border));
-      border-radius:9px;background:color-mix(in srgb,var(--accent-violet) 13%,transparent);font-size:11.5px}
-.ai-pendbar[hidden]{display:none}
-.ai-pendbar .pendbar-row{display:flex;align-items:center;gap:8px}
-.ai-pendbar .pendbar-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary)}
-.ai-pendbar .pendbar-b{flex:0 0 auto;padding:4px 13px;border-radius:7px;border:1px solid var(--glass-border);background:none;
-      color:var(--text-secondary);font:inherit;line-height:1.4;cursor:default}
-.ai-pendbar .pendbar-b.primary{background:var(--accent-violet);border-color:transparent;color:#fff}
-.ai-pendbar .pendbar-d{max-height:118px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--text-secondary);word-break:break-all}
-)AIWEBUI"
-           LR"AIWEBUI(
-/* 策略询问 (卡上确认): 上分隔线 + 说明文字 + 允许/拒绝按钮 */
-.sask{padding:7px 8px 8px;border-top:1px solid var(--divider);color:var(--text-tertiary);font-size:11px;line-height:1.5}
-/* 待应用的调整 (AI 提案, 用户逐项 应用/忽略; 源样式对齐 .sask 一族) */
-.sadj{padding:7px 8px 8px;border-top:1px solid var(--divider);font-size:11px;line-height:1.6}
-.sadj-head{color:var(--text-tertiary);margin-bottom:3px}
-.sadj-it{display:flex;align-items:center;gap:6px;padding:2px 0;min-width:0}
-.sadj-k{flex:0 0 auto;color:var(--text-secondary)}
-.sadj-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-weight:600}
-.sadj-st{flex:0 0 auto;margin-left:auto;color:var(--text-tertiary);white-space:nowrap}
-.sadj-it.done .sadj-st{color:var(--accent-emerald)}
-.sadj-it.bad .sadj-st{color:var(--accent-pink)}
-.sadj-btns{flex:0 0 auto;display:flex;gap:4px;margin-left:8px;white-space:nowrap}
-.sadj-foot{display:flex;align-items:center;gap:6px;margin-top:4px;color:var(--text-tertiary)}
-.sadj-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.abtn{display:inline-flex;align-items:center;height:22px;margin:6px 6px 0 0;padding:0 9px;border:1px solid var(--glass-border);
-)AIWEBUI"
-           LR"AIWEBUI(      border-radius:4px;background:var(--surface-raised);color:var(--text-secondary);font-size:11px;cursor:default;
-      transition:background-color 120ms ease,color 120ms ease}
-.abtn:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-.abtn.primary{border-color:transparent;background:var(--accent-violet);color:#fff}
-.abtn.primary:hover{background:color-mix(in srgb,var(--accent-violet) 84%,#fff);color:#fff}
-
-/* ---- 生成指示 (三点跳动, 在气泡内) ---- */
-.ai-typing{display:inline-flex;align-items:center;gap:4px;height:20px}
-.ai-typing i{width:5px;height:5px;border-radius:50%;background:var(--text-tertiary);animation:ai-typing-bounce 900ms ease-in-out infinite}
-.ai-typing i:nth-child(2){animation-delay:150ms}
-.ai-typing i:nth-child(3){animation-delay:300ms}
-@keyframes ai-typing-bounce{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
-/* 过程状态条 (重试/自愈中; C++ 经 status.note 推): 淡色小字跟在打字点/过程面板摘要处 */
-.ai-note{font-size:12px;color:var(--text-tertiary);white-space:nowrap}
-
-/* ---- 会话内轮次跳转条 (左缘紧凑刻度组) ----
-   默认刻意压到很淡, 鼠标进入整组才提亮 —— 辅助导航, 不跟对话内容抢注意力 */
-.ai-jumpbar{--ai-jump-dot:color-mix(in srgb,var(--text-tertiary) 42%,transparent);
-            position:absolute;left:14px;top:50%;z-index:3;display:flex;width:13px;flex-direction:column;align-items:center;
-            transform:translateY(-50%);max-height:min(64%,520px)}
-.ai-jumpbar:hover{--ai-jump-dot:color-mix(in srgb,var(--text-tertiary) 78%,transparent)}
-.ai-jump-track{display:flex;flex:0 1 auto;min-height:0;overflow:hidden;flex-direction:column;align-items:center;
-               justify-content:space-between;width:100%}
-.ai-jump-item{display:grid;flex:0 1 12px;width:13px;min-height:4px;padding:0;place-items:center;border:none;
-              background:transparent;cursor:default}
-.ai-jump-item::before{content:'';width:7px;height:2px;border-radius:1px;background:var(--ai-jump-dot);
-              transition:width 120ms ease,background-color 120ms ease}
-.ai-jump-item:hover::before{width:11px;background:var(--text-primary)}
-.ai-jump-item.active::before{width:11px;background:color-mix(in srgb,var(--accent-violet) 78%,transparent)}
-/* 悬停预览浮层: 挂 body + fixed, 不被对话流裁剪 */
-.ai-jump-tip{position:fixed;left:0;top:0;z-index:12000;max-width:min(280px,calc(100vw - 24px));padding:8px 10px;
-             border:1px solid var(--glass-border);border-radius:6px;background:var(--surface-raised);
-             box-shadow:0 8px 24px rgba(0,0,0,.24);opacity:0;pointer-events:none;transition:opacity 120ms ease}
-.ai-jump-tip.visible{opacity:1}
-.ai-jump-tip-round{font-size:11px;color:var(--text-tertiary)}
-.ai-jump-tip-text{display:-webkit-box;margin-top:3px;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;
-                  font-size:12px;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere}
-/* 跳转后目标轮短暂高亮 */
-.ai-msg.ai-jump-flash .ai-bubble{animation:ai-jump-flash 1500ms ease-out}
-@keyframes ai-jump-flash{0%,12%{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-violet) 55%,transparent)}100%{box-shadow:0 0 0 2px transparent}}
-
-/* ---- 空态 ---- */
-.ai-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:52px 20px 40px;text-align:center}
-.ai-empty-icon{font-size:32px;color:var(--accent-violet);opacity:.62}
-.ai-empty-title{font-size:14px;color:var(--text-primary)}
-.ai-empty-desc{max-width:460px;font-size:12px;line-height:1.75;color:var(--text-secondary)}
-.ai-empty-feat{max-width:520px;font-size:11.5px;line-height:1.8;color:var(--text-tertiary);margin-top:-4px}
-.ai-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:6px}
-.ai-suggestion{padding:6px 11px;border:1px solid var(--glass-border);border-radius:999px;background:var(--surface-raised);
-               color:var(--text-secondary);font:inherit;font-size:12px;cursor:default;
-               transition:background-color 120ms ease,color 120ms ease,border-color 120ms ease}
-.ai-suggestion:hover{border-color:color-mix(in srgb,var(--accent-violet) 45%,var(--glass-border));
-                     background:var(--btn-secondary-hover);color:var(--text-primary)}
-/* 换一批: 淡文字小按钮, 与捐赠行同级的"低调可点"档 */
-.ai-sugg-refresh{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:3px 10px;border:none;
-               background:none;border-radius:999px;color:var(--text-tertiary);font:inherit;font-size:11px;
-               cursor:default;transition:color 120ms ease}
-.ai-sugg-refresh .glyph{font-size:12px}
-.ai-sugg-refresh:hover{color:var(--accent-violet)}
-/* 重抽后整组轻微上浮入场 (重开菜单式重触发: 移除 rolling → 强制回流 → 加回) */
-.ai-suggestions.rolling .ai-suggestion{animation:ai-sugg-in 220ms ease both}
-@keyframes ai-sugg-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-.ai-donate-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px}
-.ai-donate{padding:0 2px;background:none;border:none;color:var(--text-tertiary);
-           font:inherit;font-size:11px;cursor:default;text-decoration:underline dotted;
-           transition:color 120ms ease}
-.ai-donate:hover{color:var(--accent-violet)}
-.ai-donate-sep{color:var(--text-tertiary);font-size:11px}
-
-/* ---- 捐赠二维码 (AI 经 get_donate_qr 工具拿到引用语法, 回答里的 ![..](xjs://donate?kind=..)
-   由 C++ md 渲染层换成缓存真图; 这里只管样式: 块级竖排居中 (屏幕窄不并列), 白底保扫得动) ---- */
-.ai-donate-qr{display:block;margin:10px auto;width:min(220px,62%);object-fit:contain;
-              background:#fff;border-radius:8px;padding:6px;cursor:default}
-/* ---- 用户气泡里的多模态附件 (C++ AttsHtml 直出; 图片缩略可点开看原图, 视频/音频=文件签) ---- */
-.ai-atts{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
-.ai-att-img{display:block;max-width:240px;max-height:180px;width:auto;height:auto;border-radius:6px;
-            border:1px solid var(--glass-border);cursor:zoom-in;object-fit:cover}
-.ai-att-file{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--glass-border);
-             border-radius:6px;background:color-mix(in srgb,var(--text-primary) 5%,transparent);
-             color:var(--text-primary);font-size:11px;line-height:1.5;cursor:default}
-.ai-att-file .glyph{font-size:12px;color:var(--text-tertiary)}
-.ai-att-file.gone{opacity:.62}
-/* 附件图片点击放大 (点任意处/Esc 收; 选区/右键不与放大冲突 — mousedown 即关) */
-.ai-lightbox{position:fixed;inset:0;z-index:15000;display:grid;place-items:center;
-             background:color-mix(in srgb,var(--bg) 74%,transparent);cursor:zoom-out}
-.ai-lightbox img{max-width:92vw;max-height:92vh;width:auto;height:auto;border-radius:8px;
-                 box-shadow:0 12px 40px rgba(0,0,0,.4)}
-
-/* ==================== 输入区 ====================
-   整个区域文本指针: 留白也是"点一下就能继续打字"的地方 */
-.ai-composer{flex:0 0 auto;padding:12px 20px 14px;cursor:text}
-.ai-composer-inner{width:100%;max-width:min(1600px,100%);margin:0 auto}
-.ai-composer-box{--r:var(--ai-composer-radius);position:relative;display:flex;flex-direction:column;gap:6px;
-                 padding:9px 9px 7px 12px;border:1px solid var(--glass-border);border-radius:var(--r);
-                 background:var(--surface-raised);transition:border-color 120ms ease}
-.ai-composer-box:focus-within{border-color:color-mix(in srgb,var(--accent-violet) 55%,var(--glass-border))}
-/* 拖放文件悬停提示: 输入框染强调色, drop/拖离即撤 (drop 处理见 bind 尾部拖放监听) */
-body[data-dragover="true"] .ai-composer-box{border-color:var(--accent-violet);
-  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-violet) 40%,transparent)}
-/* 生成中: 边框流光 (聚焦染色让位 — 底色整圈变紫会把转动的亮弧抹平) */
-@property --ai-composer-flow-angle{syntax:"<angle>";inherits:false;initial-value:0deg}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-composer-box[data-streaming="true"]:focus-within{border-color:var(--glass-border)}
-.ai-composer-box[data-streaming="true"]::before{content:'';position:absolute;inset:-1px;border-radius:calc(var(--r) + 1px);padding:1px;
-  background:conic-gradient(from var(--ai-composer-flow-angle),transparent 0turn,transparent .58turn,
-    color-mix(in srgb,var(--accent-violet) 40%,transparent) .74turn,
-    color-mix(in srgb,var(--accent-violet) 85%,#fff) .86turn,
-    color-mix(in srgb,var(--accent-violet) 40%,transparent) .98turn,transparent 1turn);
-  -webkit-mask-image:linear-gradient(#000 0 0),linear-gradient(#000 0 0);
-  -webkit-mask-clip:content-box,border-box;-webkit-mask-composite:xor;
-  mask-image:linear-gradient(#000 0 0),linear-gradient(#000 0 0);
-  mask-clip:content-box,border-box;mask-composite:exclude;
-  pointer-events:none;animation:ai-composer-flow 1700ms linear infinite}
-@keyframes ai-composer-flow{to{--ai-composer-flow-angle:360deg}}
-.ai-input{flex:0 0 auto;min-width:0;min-height:22px;max-height:132px;resize:none;border:0;background:transparent;
-          color:var(--text-primary);font:inherit;font-size:12.5px;line-height:1.6;outline:none;overflow-y:hidden}
-.ai-input::placeholder{color:var(--text-tertiary)}
-/* ---- 待发送附件条 (粘贴/📎 进入, 发送后清空; 图片=缩略图, 视频/音频=图标+文件名) ---- */
-.ai-attrow{display:flex;flex-wrap:wrap;gap:6px}
-.ai-att{display:flex;align-items:center;gap:6px;padding:3px 4px 3px 3px;border:1px solid var(--glass-border);
-        border-radius:6px;background:color-mix(in srgb,var(--text-primary) 4%,transparent);min-width:0}
-.ai-att-thumb{flex:0 0 auto;width:34px;height:34px;border-radius:4px;object-fit:cover;background:var(--btn-secondary-hover)}
-.ai-att-thumb.glyph{display:grid;place-items:center;font-size:16px;color:var(--text-tertiary)}
-.ai-att-meta{display:flex;flex-direction:column;gap:1px;min-width:0;max-width:150px}
-.ai-att-name{overflow:hidden;font-size:11px;color:var(--text-primary);white-space:nowrap;text-overflow:ellipsis}
-.ai-att-size{font-size:10px;color:var(--text-tertiary)}
-.ai-att-x{display:grid;flex:0 0 auto;width:20px;height:20px;place-items:center;border:0;border-radius:4px;
-          background:transparent;color:var(--text-tertiary);font-size:11px;cursor:default}
-.ai-att-x:hover{background:color-mix(in srgb,var(--accent-pink) 14%,transparent);color:var(--accent-pink)}
-/* 工具条上的 📎 附件按钮 (模型没勾任何多模态能力时隐藏) */
-.ai-bar-ic{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:24px;height:24px;padding:0;
-           border:0;border-radius:5px;background:transparent;color:var(--text-tertiary);font-size:13px;cursor:default;
-           transition:background-color 120ms ease,color 120ms ease}
-.ai-bar-ic:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-/* ---- 工具条 (输入框容器内部底行): 左=对话级设置, 右=本轮状态与动作 ---- */
-.ai-composer-bar{display:flex;align-items:center;gap:6px;min-width:0}
-/* 发送/停止: 圆形图标按钮, 图标由 CSS 按 data-mode 绘制 */
-.ai-send{display:flex;flex:0 0 auto;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;
-         border-radius:50%;background:var(--accent-violet);color:#fff;font:inherit;cursor:default;
-         transition:background-color 120ms ease,color 120ms ease}
-.ai-send::before{content:'\E74A';font-family:'Segoe Fluent Icons','Segoe MDL2 Assets',sans-serif;font-size:13px;line-height:1}
-.ai-send:hover{background:color-mix(in srgb,var(--accent-violet) 84%,#fff)}
-.ai-send[data-mode="stop"]{background:var(--accent-pink)}
-.ai-send[data-mode="stop"]::before{content:'\E71A';font-size:12px}
-.ai-send[data-empty="true"]{background:var(--btn-secondary-hover);color:var(--text-tertiary)}
-.ai-send[data-empty="true"]:hover{background:var(--btn-secondary-hover)}
-.ai-send:disabled{pointer-events:none}
-/* ---- 文件操作权限下拉 (四档; 收起只留当前档位按钮, 向上弹出) ---- */
-.ai-cmd-policy{position:relative;display:flex;flex:0 0 auto}
-.ai-cmd-policy-button{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border:1px solid var(--glass-border);
-          border-radius:6px;background:transparent;color:var(--text-tertiary);font-family:inherit;font-size:11px;
-          line-height:1.5;white-space:nowrap;cursor:default;outline:none;
-          transition:background 120ms ease,color 120ms ease,border-color 120ms ease}
-.ai-cmd-policy-button:hover,.ai-cmd-policy-button[aria-expanded="true"]{background:var(--btn-secondary-hover);color:var(--text-primary)}
-.ai-cmd-policy-icon{flex:0 0 auto;font-size:11px}
-.ai-cmd-policy-chevron{flex:0 0 auto;font-size:9px;transition:transform 120ms ease}
-.ai-cmd-policy-button[aria-expanded="true"] .ai-cmd-policy-chevron{transform:rotate(180deg)}
-/* 风险提示染在收起状态的按钮上: 允许=警告色, 禁用=中性灰 */
-.ai-cmd-policy-button[data-policy="allow"]{border-color:color-mix(in srgb,var(--accent-amber) 45%,transparent);
-          background:color-mix(in srgb,var(--accent-amber) 16%,transparent);
-          color:color-mix(in srgb,var(--accent-amber) 82%,var(--text-primary))}
-.ai-cmd-policy-button[data-policy="off"]{color:var(--text-secondary)}
-/* 结果同步勾选 (复用权限按钮外观; 开启=强调色勾+描边, 关闭=灰) */
-.ai-sync-btn[aria-pressed="true"]{border-color:color-mix(in srgb,var(--accent-violet) 45%,transparent);
-          background:color-mix(in srgb,var(--accent-violet) 14%,transparent);color:var(--accent-violet)}
-.ai-sync-btn[aria-pressed="false"] .ai-cmd-policy-icon{color:var(--text-tertiary)}
-.ai-cmd-policy-menu{position:absolute;left:0;bottom:calc(100% + 6px);z-index:16;display:grid;gap:4px;width:max-content;
-          min-width:148px;max-width:280px;padding:4px;border-radius:7px;background:var(--surface-raised);
-          box-shadow:inset 0 0 0 1px var(--overlay-border),0 8px 24px rgba(0,0,0,.28);cursor:default;
-          opacity:1;transform:translateY(0) scale(1);transform-origin:left bottom;
-          transition:opacity 120ms ease,transform 140ms cubic-bezier(.2,0,0,1)}
-.ai-cmd-policy-menu.opening,.ai-cmd-policy-menu.closing{opacity:0;transform:translateY(5px) scale(.98);pointer-events:none}
-.ai-cmd-policy-menu.closing{transition-duration:90ms}
-.ai-cmd-policy-option{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:6px;width:100%;
-          padding:5px 8px;border:0;border-radius:4px;background:transparent;color:var(--text-secondary);
-          font:inherit;font-size:12px;line-height:1.5;text-align:left;cursor:default;outline:none}
-.ai-cmd-policy-option:hover{background:var(--btn-secondary-hover);color:var(--text-primary)}
-.ai-cmd-policy-option[aria-checked="true"]{background:color-mix(in srgb,var(--accent-violet) 14%,transparent);color:var(--text-primary)}
-.ai-cmd-policy-check{color:transparent;font-size:11px;line-height:1.6}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-cmd-policy-option[aria-checked="true"] .ai-cmd-policy-check{color:var(--accent-violet)}
-.ai-cmd-policy-option-text{display:flex;flex-direction:column;min-width:0}
-.ai-cmd-policy-option-label{white-space:nowrap}
-.ai-cmd-policy-option-hint{color:var(--text-tertiary);font-size:10.5px;line-height:1.4}
-.ai-cmd-policy-option[aria-checked="true"] .ai-cmd-policy-option-hint{color:var(--text-secondary)}
-/* ---- 用量简况 (上下文占用条 + 剩余比例; 点开看详情) ----
-   可收缩 (flex:0 1 auto): 窄宽时 brief 文本先省略号让位, 发送按钮不得被挤出可视区 */
-.ai-usage{display:inline-flex;flex:0 1 auto;align-items:center;gap:7px;min-width:0;margin-left:auto;padding:2px 6px;
-          border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text-tertiary);
-          font-family:inherit;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default;
-          transition:background 120ms ease,border-color 120ms ease,color 120ms ease}
-.ai-usage:hover,.ai-usage[aria-expanded="true"]{border-color:var(--glass-border);background:var(--btn-secondary-hover);
-          color:var(--text-secondary)}
-.ai-usage-bar{position:relative;display:inline-block;flex:0 0 auto;overflow:hidden;width:34px;height:3px;border-radius:2px;
-          background:color-mix(in srgb,var(--text-tertiary) 26%,transparent)}
-.ai-usage-bar-fill{position:absolute;top:0;bottom:0;left:0;width:0;border-radius:2px;
-          background:color-mix(in srgb,var(--accent-violet) 70%,transparent);transition:width 240ms ease,background-color 240ms ease}
-.ai-usage[data-warn="true"] .ai-usage-bar-fill{background:var(--accent-amber)}
-.ai-usage[data-warn="true"] .ai-usage-brief{color:color-mix(in srgb,var(--accent-amber) 85%,var(--text-secondary))}
-.ai-usage-brief{overflow:hidden;color:var(--text-secondary);white-space:nowrap;text-overflow:ellipsis}
-.ai-usage-caret{flex:0 0 auto;font-size:8px;color:var(--text-tertiary);transition:transform 160ms ease}
-.ai-usage[aria-expanded="true"] .ai-usage-caret{transform:rotate(180deg)}
-/* ---- 用量详情浮层 (fixed 贴按钮上方, 放不下翻下方) ---- */
-.ai-usage-panel{position:fixed;left:0;top:0;z-index:12000;min-width:200px;padding:8px 10px;border:1px solid var(--glass-border);
-          border-radius:6px;background:var(--surface-raised);box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:11.5px;
-          font-variant-numeric:tabular-nums;cursor:default;opacity:0;pointer-events:none;transition:opacity 120ms ease}
-.ai-usage-panel.visible{opacity:1;pointer-events:auto}
-.ai-usage-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:2px 0}
-.ai-usage-row + .ai-usage-row{border-top:1px solid color-mix(in srgb,var(--divider) 60%,transparent)}
-.ai-usage-group{margin:6px 0 2px;color:var(--text-secondary);font-size:10.5px;font-weight:600;letter-spacing:.3px}
-.ai-usage-group:first-child{margin-top:0}
-.ai-usage-group + .ai-usage-row{border-top:0}
-.ai-usage-row-label{color:var(--text-tertiary)}
-.ai-usage-row-value{color:var(--text-primary);font-weight:600}
-.ai-usage-row[data-empty="true"] .ai-usage-row-value{color:var(--text-tertiary);font-weight:400}
-.ai-usage-row-value[data-good="true"]{color:color-mix(in srgb,var(--accent-emerald) 80%,var(--text-primary))}
-.ai-usage-row-value[data-warn="true"]{color:var(--accent-amber)}
-.ai-usage-note{margin-top:5px;color:var(--text-tertiary);font-size:10.5px;line-height:1.45}
-
-/* ==================== 历史对话 (右侧边栏, 可折叠) ==================== */
-.ai-history-sidebar{display:flex;flex:0 0 232px;flex-direction:column;gap:8px;width:232px;min-height:0;
-          padding:14px 16px 14px 12px;border-left:1px solid var(--glass-border);
-          background:color-mix(in srgb,var(--surface-raised) 55%,var(--bg))}
-.ai-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}
-.ai-history-title{font-size:12px;color:var(--text-secondary)}
-.ai-history-clear{height:24px;padding:0 8px;font-size:11px}
-.ai-history-head-actions{display:flex;align-items:center;gap:4px;flex:0 0 auto}
-/* 头部关闭钮: 与条目删除钮同几何 (22px 方格), 悬停中性提亮 (红色只保留给删除) */
-.ai-history-close{display:grid;flex:0 0 auto;width:22px;height:22px;place-items:center;border:none;border-radius:4px;
-          background:transparent;color:var(--text-tertiary);cursor:default;font-size:11px;
-          transition:background 120ms ease,color 120ms ease}
-.ai-history-close:hover{background:color-mix(in srgb,var(--text-primary) 10%,transparent);color:var(--text-primary)}
-.ai-history-list{display:flex;flex:1 1 auto;flex-direction:column;gap:4px;min-height:0;overflow-y:auto}
-.ai-history-item{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 10px;border:1px solid transparent;
-          border-radius:6px;cursor:default;transition:background 120ms ease}
-.ai-history-item:hover{background:color-mix(in srgb,var(--accent-violet) 10%,transparent)}
-.ai-history-item-current{border-color:color-mix(in srgb,var(--accent-violet) 35%,transparent);
-          background:color-mix(in srgb,var(--accent-violet) 7%,transparent)}
-/* 正在生成的对话: 标题前一个脉冲点 */
-.ai-history-item-streaming .ai-history-item-title::before{content:'';display:inline-block;width:5px;height:5px;
-          margin-right:6px;border-radius:50%;background:var(--accent-violet);vertical-align:middle;
-          animation:ai-history-stream-pulse 1.2s ease-in-out infinite}
-@keyframes ai-history-stream-pulse{0%,100%{opacity:.35;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}
-.ai-history-item-text{flex:1 1 auto;min-width:0}
-)AIWEBUI"
-           LR"AIWEBUI(.ai-history-item-title{overflow:hidden;font-size:12px;color:var(--text-primary);text-overflow:ellipsis;white-space:nowrap}
-.ai-history-item-time{margin-top:2px;font-size:11px;color:var(--text-tertiary)}
-.ai-history-item-delete{display:grid;flex:0 0 auto;width:22px;height:22px;place-items:center;border:none;border-radius:4px;
-          background:transparent;color:var(--text-tertiary);cursor:default;font-size:12px;
-          transition:background 120ms ease,color 120ms ease}
-.ai-history-item-delete:hover{background:color-mix(in srgb,#e81123 14%,transparent);color:#e81123}
-.ai-history-empty{flex:0 0 auto;padding:18px 4px;font-size:12px;color:var(--text-tertiary);text-align:center}
-/* 窄面板分级收缩: ≤640 先隐状态文字 (保留连接色点) → ≤520 工具条按钮只留图标
-   (与 .icononly 同款内边距, 动作语义由 title 悬停提示保留); 标题可截断兜底,
-   任何宽度下右侧按钮都不得挤出可视区 */
-@media (max-width:640px){
-  #stText{display:none}
-}
-@media (max-width:520px){
-  .ai-toolbar{padding:12px;gap:10px}
-  .ai-btn{padding:0 9px}
-  .ai-btn .ellipsis-text{display:none}
-}
-/* 输入条窄宽分级收缩: 底行 = 📎+两个权限下拉+同步+用量+发送, 内容全是固定宽, 宽度不够时发送按钮
-   会被挤出圆框右侧 (实锤) — 与 toolbar 同口径分级收文字, 动作语义由 title 悬停提示保留;
-   发送按钮任何宽度都不得离屏 */
-@media (max-width:560px){
-  #ubrief,#syncLabel{display:none}   /* 用量只留 占用条+箭头; 同步只留勾 (开=紫描边可见) */
-}
-@media (max-width:440px){
-  #policyLabel,#epolicyLabel{display:none}   /* 两个权限下拉只留 图标+箭头 */
-}
-@media (max-width:360px){
-  #usageBtn{display:none}   /* 用量整块让位 (详情本就从对话里看不到精确值, 属极端窄宽) */
-  #sendB{margin-left:auto}  /* 右锚点 (margin-left:auto) 原本挂在用量钮上, 随之一起消失 — 补到发送钮, 恒贴右缘 */
-}
-/* 窄窗口: 侧边栏悬浮在对话区之上, 不再挤压主列 */
-@media (max-width:760px){
-  .ai-history-sidebar{position:absolute;z-index:40;width:260px;flex-basis:260px;top:0;bottom:0;right:0;
-          box-shadow:0 8px 28px rgba(0,0,0,.28)}
-}
-/* ==================== 页面内 Toast (宿主 Toast 被面板上的浏览器子窗盖住, 提示一律画在页面里;
-   顶部居中浮层: 设置面板/对话区两态都可见, 也不与 composer 向上弹的浮层相撞) ==================== */
-.ai-toast{position:fixed;left:50%;top:72px;transform:translateX(-50%) translateY(-8px);z-index:14000;
-          max-width:min(420px,calc(100vw - 32px));padding:8px 14px;border:1px solid var(--overlay-border);
-          border-radius:8px;background:color-mix(in srgb,var(--surface-raised) 94%,var(--bg));
-          box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:12px;line-height:1.5;color:var(--text-primary);
-          opacity:0;pointer-events:none;transition:opacity 160ms ease,transform 160ms ease}
-.ai-toast.visible{opacity:1;transform:translateX(-50%) translateY(0)}
-.ai-toast::before{content:'';display:inline-block;width:7px;height:7px;margin-right:8px;border-radius:50%;
-          background:var(--accent-violet);vertical-align:1px}
-.ai-toast[data-kind="ok"]::before{background:var(--accent-emerald)}
-.ai-toast[data-kind="warn"]::before{background:var(--accent-amber)}
-.ai-toast[data-kind="err"]::before{background:var(--accent-pink)}
-)AIWEBUI"
-           LR"AIWEBUI(</style>
-</head>
-<body>
-<div id="app">
-  <div class="ai-main">
-    <div class="ai-toolbar">
-      <h1 class="ai-toolbar-title">AI 助手</h1>
-      <span class="ai-toolbar-status">
-        <span class="ai-status-dot" id="stDot" data-state="missing" aria-hidden="true"></span>
-        <span class="ellipsis-text" id="stText">未配置接口</span>
-      </span>
-      <div class="ai-toolbar-actions">
-        <!-- 模型切换: 点开列出全部档案, 选中即生效; 管理动作在接口设置面板里 -->
-        <div class="ai-model-picker" id="modelPicker">
-          <button class="ai-btn ai-model-picker-button" id="modelBtn" type="button"
-            aria-haspopup="listbox" aria-expanded="false" title="模型">
-            <span class="glyph" aria-hidden="true">&#xE99A;</span><span class="ellipsis-text" id="modelBtnLabel"></span><span class="ai-model-caret glyph" aria-hidden="true">&#xE70D;</span>
-          </button>
-          <div class="ai-model-menu" id="modelMenu" role="listbox" hidden></div>
-        </div>
-        <button class="ai-btn" id="b-set" type="button" title="设置"><span class="glyph" aria-hidden="true">&#xE713;</span><span class="ellipsis-text">设置</span></button>
-        <button class="ai-btn" id="b-hist" type="button" title="历史对话"><span class="glyph" aria-hidden="true">&#xE81C;</span><span class="ellipsis-text">历史对话</span></button>
-        <button class="ai-btn" id="b-new" type="button" title="新对话"><span class="glyph" aria-hidden="true">&#xE72C;</span><span class="ellipsis-text">新对话</span></button>
-        <button class="ai-btn icononly" id="b-close" type="button" title="关闭"><span class="glyph" aria-hidden="true">&#xE8BB;</span></button>
-      </div>
-    </div>
-
-    <!-- 接口设置: 管理模型档案 (每条档案是一套完整接口配置, 跨服务商时地址与密钥随档案走) -->
-    <div class="ai-config-panel" id="cfgPanel" hidden>
-)AIWEBUI"
-           LR"AIWEBUI(      <div class="ai-cfg-tabs" role="tablist" aria-label="设置分类">
-        <button class="ai-cfg-tab" id="cfgTabApi" type="button" role="tab" aria-selected="true">接口</button>
-        <button class="ai-cfg-tab" id="cfgTabAgent" type="button" role="tab" aria-selected="false">Agent</button>
-      </div>
-      <div id="cfgPageApi">
-      <div class="ai-config-row"><label class="ai-config-label" for="f-prof">模型</label>
-        <div class="ai-config-profile-row">
-          <select class="ai-config-input" id="f-prof"></select>
-          <button class="ai-btn" id="f-prof-add" type="button">新建</button>
-          <button class="ai-btn" id="f-prof-dup" type="button">复制</button>
-          <button class="ai-btn" id="f-prof-del" type="button" data-armed="false">删除</button>
-        </div></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-name">名称</label>
-        <input class="ai-config-input" id="f-name" type="text" spellcheck="false" autocomplete="off" placeholder="例如：DeepSeek 官方"></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-url">接口地址</label>
-        <input class="ai-config-input" id="f-url" type="text" spellcheck="false" autocomplete="off" placeholder="https://api.deepseek.com"></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-key">API 密钥</label>
-        <input class="ai-config-input" id="f-key" type="password" spellcheck="false" autocomplete="off" placeholder="sk-..."></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-model">模型</label>
-        <input class="ai-config-input" id="f-model" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-flash"></div>
-      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true">多模态</span>
-        <div class="ai-caps-row">
-          <button class="ai-reason-toggle" id="f-img" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>图片 (可粘贴/附带)</button>
-          <button class="ai-reason-toggle" id="f-video" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>视频</button>
-          <button class="ai-reason-toggle" id="f-audio" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>音频</button>
-        </div></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-ctx">上下文长度</label>
-        <input class="ai-config-input" id="f-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则自动推断"></div>
-      <div class="ai-config-row"><label class="ai-config-label" for="f-max">最大输出</label>
-        <input class="ai-config-input" id="f-max" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则用服务端默认"></div>
-      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <button class="ai-reason-toggle" id="f-reason" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>深度思考 (reasoning.effort=high)</button></div>
-      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <span class="ai-config-hint">两个长度都填 token 数，支持 128K、1M 这类写法。上下文长度只影响用量的“剩余”显示（留空则按模型名推断）；最大输出留空时不发送该参数。</span></div>
-      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <span class="ai-config-hint">多模态能力按模型实际支持勾选：开启后输入区可粘贴/附带对应类型（图片处理为 ≤1568px，视频/音频按原样 data URL 发送，上限见输入区提示）；未开启的类型不会出现附件入口。</span></div>
-      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-        <span class="ai-config-hint">密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出；留空保存 = 保留已存密钥。接口需兼容 OpenAI Responses 协议 (/responses)。</span></div>
-      <div class="ai-config-actions">
-        <button class="ai-btn" id="b-cancel" type="button">取消</button>
-        <button class="ai-btn ai-btn-primary" id="b-save" type="button">保存</button>
-      </div>
-      </div>
-)AIWEBUI"
-           LR"AIWEBUI(      <div id="cfgPageAgent" hidden>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-turns">工具调用上限</label>
-          <input class="ai-config-input" id="a-turns" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="1-100"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-ctx">历史消息上限</label>
-          <input class="ai-config-input" id="a-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-200"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-sample">搜索样本条数</label>
-          <input class="ai-config-input" id="a-sample" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-50"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-readcap">读取内容上限</label>
-          <input class="ai-config-input" id="a-readcap" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-512 (KB)"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-cmdto">命令默认超时</label>
-          <input class="ai-config-input" id="a-cmdto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-600 (秒)"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-httpto">请求超时</label>
-          <input class="ai-config-input" id="a-httpto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="30-600 (秒)"></div>
-        <div class="ai-config-row"><label class="ai-config-label" for="a-instr">自定义指令</label>
-          <textarea class="ai-config-input ai-config-area" id="a-instr" rows="4" spellcheck="false" placeholder="例如：回答尽量简洁；找文件时优先按修改时间排序…（留空 = 不追加）"></textarea></div>
-        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-          <div class="ai-caps-row">
-            <button class="ai-reason-toggle" id="a-notify" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>后台完成时系统通知</button>
-            <button class="ai-reason-toggle" id="a-cardsopen" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>工具卡片默认展开</button>
-            <button class="ai-reason-toggle" id="a-web" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>联网搜索</button>
-            <button class="ai-reason-toggle" id="a-acompact" type="button" aria-pressed="true"><span class="ai-reason-box" aria-hidden="true"></span>自动压缩历史</button>
-          </div></div>
-)AIWEBUI"
-           LR"AIWEBUI(        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
-          <span class="ai-config-hint">工具调用上限 = 一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答（默认 30）。历史消息上限 = 每次请求携带的早期问答条数，仅在关闭「自动压缩历史」时生效（默认 30）。自动压缩历史 = 上下文接近模型上限时，自动把早期对话压缩成背景要点再继续（默认开），长对话不再丢开头、但偶尔多一次摘要耗时。搜索样本条数 = 每次搜索回传给 AI 的结果数（默认 20）。读取内容上限 = 单个文件/网页回传正文上限，超出部分留头 80% 尾 20% 并注明省略量，完整内容会存为外溢文件供 AI 分页读取（默认 30KB）。命令默认超时 = AI 执行命令/程序的最长等待（默认 120 秒）；请求超时 = 单轮对话等待（默认 120 秒）。自定义指令会拼进 AI 的系统提示词，保存后下一条消息生效。开关：后台完成提醒、工具卡片默认展开、自动压缩历史，以及联网搜索 = 允许 AI 联网搜索并读取网页（web_search / fetch_url，查询词会发给搜索引擎，只能访问公网地址；关闭后 AI 不再具备联网能力）。</span></div>
-        <div class="ai-config-actions">
-          <button class="ai-btn" id="b-agent-cancel" type="button">取消</button>
-          <button class="ai-btn ai-btn-primary" id="b-agent-save" type="button">保存</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="ai-thread-wrap">
-      <div class="ai-thread" id="thread">
-        <div class="ai-thread-inner" id="threadInner"></div>
-      </div>
-      <div class="ai-jumpbar" id="jumpbar" hidden><div class="ai-jump-track" id="jumpTrack"></div></div>
-    </div>
-
-    <div class="ai-pendbar" id="pendbar" hidden></div>
-
-    <div class="ai-composer">
-      <div class="ai-composer-inner">
-        <div class="ai-composer-box" id="cbox">
-          <div class="ai-attrow" id="attRow" hidden></div>
-          <textarea class="ai-input" id="inputT" rows="1" aria-label="给 AI 助手的消息"
-            placeholder="描述你的目标，例如：找出一周内修改过的文档"></textarea>
-          <div class="ai-composer-bar">
-            <button class="ai-bar-ic" id="attB" type="button" title="附带图片 / 视频 / 音频" hidden>
-              <span class="glyph" aria-hidden="true">&#xE8DA;</span></button>
-            <input type="file" id="attFile" multiple accept="image/*,video/*,audio/*" hidden>
-            <div class="ai-cmd-policy" id="policy">
-              <button class="ai-cmd-policy-button" id="policyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
-                <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE756;</span>
-                <span id="policyLabel"></span>
-                <span class="ai-cmd-policy-chevron glyph" aria-hidden="true">&#xE70D;</span>
-              </button>
-              <div class="ai-cmd-policy-menu" id="policyMenu" role="listbox" aria-label="文件操作权限" hidden>
-                <button class="ai-cmd-policy-option" type="button" data-policy="0" role="option" aria-checked="false">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-)AIWEBUI"
-           LR"AIWEBUI(                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-                <button class="ai-cmd-policy-option" type="button" data-policy="1" role="option" aria-checked="false">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-                <button class="ai-cmd-policy-option" type="button" data-policy="2" role="option" aria-checked="true">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-                <button class="ai-cmd-policy-option" type="button" data-policy="3" role="option" aria-checked="false">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-              </div>
-            </div>
-            <div class="ai-cmd-policy" id="epolicy">
-              <button class="ai-cmd-policy-button" id="epolicyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
-                <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE7EE;</span>
-                <span id="epolicyLabel"></span>
-                <span class="ai-cmd-policy-chevron glyph" aria-hidden="true">&#xE70D;</span>
-              </button>
-              <div class="ai-cmd-policy-menu" id="epolicyMenu" role="listbox" aria-label="命令执行权限" hidden>
-                <button class="ai-cmd-policy-option" type="button" data-epolicy="0" role="option" aria-checked="false">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-                <button class="ai-cmd-policy-option" type="button" data-epolicy="2" role="option" aria-checked="true">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-                <button class="ai-cmd-policy-option" type="button" data-epolicy="3" role="option" aria-checked="false">
-                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
-                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
-              </div>
-            </div>
-            <button class="ai-cmd-policy-button ai-sync-btn" id="syncBtn" type="button" aria-pressed="false">
-              <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE73E;</span>
-              <span id="syncLabel"></span>
-            </button>
-            <button class="ai-usage" id="usageBtn" type="button" aria-expanded="false">
-              <span class="ai-usage-bar" aria-hidden="true"><i class="ai-usage-bar-fill" id="ubarf"></i></span>
-              <span class="ai-usage-brief" id="ubrief"></span>
-              <span class="ai-usage-caret glyph" aria-hidden="true">&#xE70D;</span>
-            </button>
-            <button class="ai-send" id="sendB" type="button" data-mode="send" aria-label="发送"></button>
-          </div>
-          <div class="ai-usage-panel" id="usagePanel" role="dialog" aria-label="用量详情"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <aside class="ai-history-sidebar" id="side" aria-label="历史对话" hidden>
-    <div class="ai-history-head">
-      <span class="ai-history-title">历史对话</span>
-      <div class="ai-history-head-actions">
-        <button class="ai-btn ai-history-clear" id="clearb" type="button" title="清空全部对话记录" hidden>清空记录</button>
-        <button class="ai-history-close glyph" id="sideClose" type="button" title="关闭历史对话" aria-label="关闭历史对话">&#xE8BB;</button>
-      </div>
-    </div>
-    <div class="ai-history-list" id="sideList"></div>
-    <div class="ai-history-empty" id="sideEmpty" hidden>暂无历史对话</div>
-  </aside>
-
-  <!-- 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 恒在 DOM, 显隐走 .visible, pointer-events:none 不挡点击) -->
-  <div class="ai-toast" id="toast" role="status" aria-live="polite"></div>
-</div>
-<!-- 图表库 mermaid + 数学渲染 KaTeX: 本地文件经 C++ 虚拟主机映射载入 (缺文件/旧运行时加载失败 = 各自降级为源码/纯文本) -->
-<script defer src="https://aiassets.snailqs.local/mermaid.min.js"></script>
-<link rel="stylesheet" href="https://aiassets.snailqs.local/katex/katex.min.css"/>
-<script defer src="https://aiassets.snailqs.local/katex/katex.min.js"></script>
-<script>
 'use strict';
 /* ==================== 工具 ==================== */
 const $=id=>document.getElementById(id);
@@ -1082,8 +19,7 @@ function histTime(t){if(!t)return '';const d=new Date(t*1000),now=new Date();
   if(d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth()&&d.getDate()===now.getDate())
     return p(d.getHours())+':'+p(d.getMinutes());
   return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
-)AIWEBUI"
-           LR"AIWEBUI(
+
 /* ---- 空态示例提示词池 (46 条, 每次随机抽 6 条展示, 「换一批」重新抽取) ----
  * 只收语义/意图类提问 — "文件名条件"类提问搜索框直接打更快, 不收 (2026-09-25 用户口径)。
  * 条目可带 "文案->实际提示词" 映射: 按钮显示 -> 前的短文案, 填入 -> 后的完整提问 (无 -> 则原样);
@@ -1104,8 +40,7 @@ const SUGGS=[
   '版本太多分不清->找出名字里带 v1/v2/v3 或"旧版/新版"字样的文件，按名字分组列出，标出每组里最新修改的那份。','扫下敏感文件->找出文件名可能含 身份证/账号/密码/合同/简历 等字样的文件，列清单提醒我哪些要注意保管。',
   '我的发票和账单->找出文件名带 发票/收据/订单/账单 字样的文件，按年份月份归类列出。','我的电子书在哪->找出 epub/mobi/pdf 里属于书籍的文件，按所在文件夹归类，列出总数和最大的几本。',
   '装机要用的安装包->列出电脑里的安装程序（exe/msi 安装包），按所在文件夹分组，提醒哪些可能已经用不上了。','今天的电脑足迹->按小时整理今天新建或修改过的文件时间线，让我回顾这一天都处理了什么。','空的没用的->列出所有空文件夹和几乎为零的零散小文件，方便我一次清掉。',
-)AIWEBUI"
-           LR"AIWEBUI(
+
   '列出本月修改过的 Excel 表格','找出一年都没打开过的旧文档',
   '哪些临时文件可以清理掉','找出内容相同的重复大文件','找出文件名重复的文件',
   '统计每种扩展名的文件数量','找出图片文件夹里的旧截图','统计一下音乐文件总共占了多少空间',
@@ -1137,7 +72,6 @@ const EMPTY_HTML='<div class="ai-empty" id="empty">'
   +'<span class="ai-empty-icon glyph" aria-hidden="true">&#xE99A;</span>'
   +'<span class="ai-empty-title">用对话来查找和整理文件</span>'
   +'<span class="ai-empty-desc">我可以读取索引库的全部实时数据（文件名、路径、大小、时间、分类），直接执行搜索并打开文件；每一步工具调用都会以卡片展示。</span>'
-  +'<span class="ai-empty-feat">回答支持：📊 mermaid 图表（17 种 · 点击放大）&nbsp;📐 数学公式&nbsp;🎨 提示块&nbsp;📂 折叠块&nbsp;💻 代码高亮&nbsp;✅ emoji</span>'
   +'<div class="ai-suggestions" id="suggBox">'+suggsHtml()+'</div>'
   +'<button class="ai-sugg-refresh" id="suggRefresh" type="button"><span class="glyph" aria-hidden="true">&#xE72C;</span>换一批</button>'
   +'<span class="ai-donate-row">'
@@ -1150,8 +84,7 @@ const EMPTY_HTML='<div class="ai-empty" id="empty">'
 const POLICY=[
   {k:'off',    n:'禁用', h:'不允许 AI 执行任何文件操作'},
   {k:'readonly',n:'只读', h:'只自动执行读取类操作，其余拒绝'},
-)AIWEBUI"
-           LR"AIWEBUI(  {k:'ask',    n:'询问', h:'每次写入或删除前先询问，确认后才执行'},
+  {k:'ask',    n:'询问', h:'每次写入或删除前先询问，确认后才执行'},
   {k:'allow',  n:'允许', h:'所有文件操作都直接执行，不询问'},
 ];
 /* 命令执行权限三档 (run_command 外部程序; 没有"只读" — 执行类默认询问, 允许一次只放一条)。
@@ -1176,6 +109,7 @@ const S={
   sideOpen:false, cfgOpen:false, policyOpen:false, epolicyOpen:false, usageOpen:false, ctxOpen:false, modelOpen:false,
   cfgTab:'api',     /* 设置面板当前标签页: 'api' 接口 / 'agent' Agent */
   profDirty:false,  /* 表单里有未保存的编辑: 挡住 C++ 整包下发把正在敲的内容冲掉 */
+  testing:false,    /* 接口测试进行中 (防重复点击; 结果回来自动复位) */
   delArmed:false, delTimer:0, modelTimer:0,
   clearArmed:false, clearTimer:0,   /* 清空记录两步确认 (首击待确认, 4s 内再击才清) */
   openSteps:{},     /* 展开的工具卡片样本: convId+':'+msgIdx → true */
@@ -1304,8 +238,7 @@ function saveProf(){
   showToast('接口设置已保存','ok');
   cfgToggle(false);   /* 保存成功即收起面板 (校验失败才停留) */
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* ==================== 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 页内已知消息直接调,
+/* ==================== 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 页内已知消息直接调,
    C++ 已知消息经 t:"toast" 推送进来, 同一浮层) ==================== */
 function showToast(msg,kind){
   const t=$('toast');
@@ -1371,6 +304,7 @@ function cfgToggle(open){
        已开时的重入 (renderAll 被 pal/status 等推送反复调) 不得走这里 —
        重填+清 dirty 会静默抹掉正在敲的编辑 */
     S.profDirty=false;profDisarm();
+    S.testing=false;const tb=$('b-test');tb.disabled=false;tb.textContent='测试';   /* 上次测试的残留态复位 */
     renderProfSelect();fillProfForm();
     fillAgentForm();setCfgTab(S.cfgTab||'api');
     setTimeout(()=>{try{$('f-prof').focus();}catch(e){}},0);
@@ -1453,8 +387,7 @@ function turnEnd(start){   /* 助手侧连续段 [start, end) */
   while(e<S.msgs.length&&S.msgs[e].r!==0) e++;
   return e;
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* 正文开始 → 本回合过程面板自动收起 (2026-09-25 用户口径 "AI 开始回答正文时自动收缩"):
+/* 正文开始 → 本回合过程面板自动收起 (2026-09-25 用户口径 "AI 开始回答正文时自动收缩"):
  * 末条消息首次出现非空正文 (打字点气泡有了文字) 时落账 false。只在尚无落账 (undefined) 时写 —
  * 用户手动开合过的面板不被自动行为覆盖。回合里只有这一条 (无过程面板) 不动。 */
 function maybeAutoCollapseTurn(){
@@ -1624,8 +557,7 @@ function userRowHtml(m,mi){
     +'<span class="glyph" aria-hidden="true">&#xE74D;</span></button></div>';
 }
 /* 短气泡收缩: 单段、无块级元素、纯文本 ≤30 字才不跟右缘对齐 */
-)AIWEBUI"
-           LR"AIWEBUI(function applyBubbleShapes(root){
+function applyBubbleShapes(root){
   (root||$('threadInner')).querySelectorAll('.ai-msg-assistant .ai-bubble').forEach(b=>{
     const text=String(b.textContent||'').replace(/\s+/g,' ').trim();
     const block=b.querySelector('br,ul,ol,table,pre,blockquote,hr,h1,h2,h3,h4,h5,h6,div');
@@ -1798,8 +730,7 @@ function updateJumpbar(){
   bar.hidden=false;
   syncJumpActive();
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* 一轮包含的消息节点: 本轮用户提问起, 到下一轮提问之前 */
+/* 一轮包含的消息节点: 本轮用户提问起, 到下一轮提问之前 */
 function roundMessages(roundElement){
   const nodes=[];
   let node=roundElement;
@@ -1824,8 +755,7 @@ function jumpTo(round){
   S.jumpFlashTimer=setTimeout(()=>{S.jumpFlashTimer=0;clear();},1600);
 }
 
-)AIWEBUI"
-           LR"AIWEBUI(/* ==================== 可点击交互 (搜索卡片 / 语法高亮 / 路径链接 / 右键菜单) ====================
+/* ==================== 可点击交互 (搜索卡片 / 语法高亮 / 路径链接 / 右键菜单) ====================
  * AI 决定点击的类型, 一律标准 Markdown 链接语法 (链接文字 = 给用户看的动作指引):
  * [..](xjs://search?text=..&mode=..) = 搜索卡片 (点击置入搜索框并按模式执行);
  * [..](xjs://open|reveal?id=<FileId>) = 文件动作链接 — 模型只输出引擎 FileId, 路径由
@@ -1940,8 +870,7 @@ function hlApply(code,src,lang){
   }
   code.innerHTML=html;
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* 通用高亮 (python/js/bash/json/c): 关键字+字符串+注释+数字 近似着色, 不做完整 tokenizer */
+/* 通用高亮 (python/js/bash/json/c): 关键字+字符串+注释+数字 近似着色, 不做完整 tokenizer */
 const PY_KW=new Set('False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case'.split(' '));
 const JS_KW=new Set('async await break case catch class const continue debugger default delete do else enum export extends false finally for from function if implements import in instanceof interface let new null of private protected public readonly return static super switch this throw true try typeof undefined var void while with yield'.split(' '));
 const SH_KW=new Set('if then else elif fi for while until do done case esac function in select break continue return exit local export readonly declare unset shift eval trap echo cd ls pwd grep sed awk cat chmod chown cp mv rm mkdir rmdir touch find tar zip unzip curl wget sudo apt yum dnf systemctl service kill ps top df du head tail sort uniq wc xargs tee which whoami git npm node python pip'.split(' '));
@@ -1985,8 +914,7 @@ function highlightCode(root){
       (lang==='sh'||lang==='shell'||lang==='zsh')?'bash':(lang==='cpp'||lang==='c++'||lang==='java')?'c':lang);
   });
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* 气泡正文里的绝对路径 → 可点击 .ai-path 链接 (TreeWalker 只碰文本节点,
+/* 气泡正文里的绝对路径 → 可点击 .ai-path 链接 (TreeWalker 只碰文本节点,
    跳过代码块/链接/已有链接/按钮; 句尾标点剥出链接外) */
 /* 句尾标点剥离: 配对 closers 只在失衡 (= 正文括号包住了路径, 如 "(见 F:\a\b)") 时剥,
    平衡的名字后缀保留 ("美人鱼 (2016)" 结尾的 ")" 不再被剥掉, 旧规则恒剥 = 点不开);
@@ -2081,9 +1009,7 @@ function mmInit(){
     themeVariables:mmThemeVars()});}catch(e){return false;}
   return true;
 }
-)AIWEBUI"
-           LR"AIWEBUI()AIWEBUI"
-           LR"AIWEBUI(/* ---- 数学公式: md4c LaTeX 开关输出的 .ai-math 喂 KaTeX (库缺 = 按源码文本显示) ---- */
+/* ---- 数学公式: md4c LaTeX 开关输出的 .ai-math 喂 KaTeX (库缺 = 按源码文本显示) ---- */
 function renderMath(scope){
   const root=(scope&&scope.querySelectorAll)?scope:document;
   const els=root.querySelectorAll('.ai-math:not([data-kx])');
@@ -2153,6 +1079,24 @@ function mmSanitize(src){
     if(/^\s*timeline\b/im.test(src)){
       src=src.split('\n').map(function(line){
         return line.replace(/^(\s*)(\d{1,2}):(\d{2})(?=\s*:)/,'$1$2时$3分');
+      }).join('\n');
+    }
+    /* xychart: 轴分类列表里未加引号的项自动包双引号 — 词法表 axis_data 态不认裸 '-'
+       等特殊字符 (x-axis [C-系统,...] 直接 Lexical error 实锤, 2026-10-01), 引号字符串
+       才是词法表收的形态; 已引号/含裸引号的项不动 (保守, 包错更糟)。bar/line 数字数组
+       与 y-axis 线性区间 (0 --> N) 无括号列表, 天然不匹配不碰 */
+    if(/^\s*xychart(-beta)?\b/im.test(src)){
+      src=src.split('\n').map(function(line){
+        const m=/^(\s*(?:x|y)-axis(?:\s+"[^"]*")?\s*\[)(.*)(\]\s*)$/.exec(line);
+        if(!m)return line;
+        const fixed=m[2].split(',').map(function(it){
+          const t=it.trim();
+          if(!t)return it;
+          if(t.length>=2&&t.charAt(0)==='"'&&t.charAt(t.length-1)==='"')return it;
+          if(t.indexOf('"')>=0)return it;
+          return ' "'+t+'"';
+        });
+        return m[1]+fixed.join(',')+m[3];
       }).join('\n');
     }
     return src;
@@ -2233,8 +1177,7 @@ function mermaidRetheme(){
   });
   renderMermaid(document);
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- 图表灯箱 (宿主预览灯箱同口径): 点击已出图的图表 → 整面板放大看 — 滚轮缩放
+/* ---- 图表灯箱 (宿主预览灯箱同口径): 点击已出图的图表 → 整面板放大看 — 滚轮缩放
    (5%~800%, 缩放中心跟光标), 按住拖动平移 (指针捕获, 拖出窗不丢), 原地点击/Esc/✕ 收,
    拖动结束不算点击。克隆卡片里已渲好的 SVG (矢量, 任意缩放不糊); 换肤重渲时直接收灯箱
    (克隆图引用卡片内 defs, 悬空会掉箭头)。 ---- */
@@ -2313,14 +1256,7 @@ function enhance(root){
   linkifyPaths(scope);
   schedulePathCheck();
 }
-)AIWEBUI"
-/* ---- pathcheck 图标补投递 (2026-09-28 实锤 "exe 链接全裸没图标"): 链接有效性校验一次性落
-   data-ok, 但图标提取是尽力而为 — agent 正在执行工具时 TryEnter g_agentCs 失败 / 扫描期不建
-   私有结果对象 / 本批 16 个新提取配额耗尽, 都只缺图标不缺链接有效性; 校验已过就不再发, 图标
-   永远缺席 (同批文件夹图标命中共享 <dir> 缓存照常显示, 图标随文件本身的 exe 却全裸)。ok 且
-   无图标的链接挂 data-needico 走 3s 慢轮补投递, data-ict 计数封顶 40 (~2 分钟) 防拿不到图标
-   的死循环; 新链接优先占批内名额, 补投递垫后; 重渲重建 DOM 计数自然重置。 ---- */
-           LR"AIWEBUI(/* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
+/* ---- 路径存在性校验 (C++ pathcheck 批量后端, 2026-09-25 用户口径): 解析出的候选先问
    真实存在性 — 不存在按解析梯子继续试 (more 向后并词/去尾词回退, 与点击解析同一梯子),
    仍不存在 = 退回纯文本, 不画链接不做字符特殊处理。校验异步: enhance 落地后 300ms
    去抖汇总未校验的 .ai-path, 单批 ≤64 条, 余量随回复的 schedulePathCheck 下一轮续检。
@@ -2437,8 +1373,7 @@ function showCtx(items,x,y){
   menu.style.top=Math.round(T)+'px';
   S.ctxOpen=true;
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- 消息 HTML 内的点击 (事件委托) ---- */
+/* ---- 消息 HTML 内的点击 (事件委托) ---- */
 function decodeHtml(s){const t=document.createElement('textarea');t.innerHTML=s;return t.value;}
 function copyTurn(mi){
   const m=S.msgs[mi];
@@ -2591,8 +1526,7 @@ function bindThread(){
         turn.replaceWith(nw);applyOpenSteps();}
       return;}
   });
-)AIWEBUI"
-           LR"AIWEBUI(/* 右键: 文件路径 / 搜索卡片 / 工具卡片的操作菜单 (其余区域保留浏览器原生菜单 = 选区复制入口) */
+/* 右键: 文件路径 / 搜索卡片 / 工具卡片的操作菜单 (其余区域保留浏览器原生菜单 = 选区复制入口) */
   inner.addEventListener('contextmenu',e=>{
     const chip=e.target.closest('.ai-chip');
     if(chip){
@@ -2681,8 +1615,7 @@ function clearDisarm(){
 }
 function sideToggle(open){
   S.sideOpen=open;clearDisarm();
-)AIWEBUI"
-           LR"AIWEBUI(  if(!open)hideJumpTip();
+  if(!open)hideJumpTip();
   renderSide();
 }
 /* 侧栏悬浮模式 = 窄面板 (阈值与样式表 @media 同一口径 760px): 悬浮盖住对话区,
@@ -2809,8 +1742,7 @@ function doSend(){
   refreshSendState();
   post({c:'send',text,atts});
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* ---- 文件操作权限下拉 ---- */
+/* ---- 文件操作权限下拉 ---- */
 function renderPolicy(){
   const cur=POLICY[S.cfg.policy]||POLICY[2];
   $('policyLabel').textContent=cur.n;
@@ -2945,8 +1877,7 @@ function positionUsagePanel(){
   let left=anchor.right-pr.width;
   const maxLeft=window.innerWidth-pr.width-8;
   left=Math.max(8,Math.min(left,maxLeft));
-)AIWEBUI"
-           LR"AIWEBUI(  let top=anchor.top-pr.height-6;
+  let top=anchor.top-pr.height-6;
   if(top<8)top=anchor.bottom+6;   /* 上方空间不够: 翻到下方 */
   panel.style.left=Math.round(left)+'px';
   panel.style.top=Math.round(top)+'px';
@@ -3014,6 +1945,11 @@ function handle(m){
       applyLast();renderStatus();break;}
     case 'usage':S.usage=m.u||S.usage;renderUsage();break;
     case 'toast':showToast(m.msg,{0:'info',1:'ok',2:'warn',3:'err'}[m.k]||'warn');break;
+    case 'testResult':{
+      /* 接口测试回包: 复位按钮 + 按结果着色 (ok=绿=接口可用; 其余=失败原因) */
+      S.testing=false;const tb=$('b-test');tb.disabled=false;tb.textContent='测试';
+      showToast(m.msg||('测试'+(m.ok?'成功':'失败')),m.ok?'ok':'err');break;
+    }
     case 'status':
       S.sending=!!m.sending;S.net=m.net;S.phase=m.phase||0;S.note=m.note||'';
       maybeAutoCollapseTurn();
@@ -3037,8 +1973,7 @@ function renderAll(){
   renderProfSelect();renderModelBtn();
   renderStatus();cfgToggle(S.cfgOpen);renderThread(false);renderComposer();renderSide();
 }
-)AIWEBUI"
-           LR"AIWEBUI(/* ==================== 事件接线 ==================== */
+/* ==================== 事件接线 ==================== */
 function bind(){
   const ta=$('inputT');   /* 输入框引用提前: 下方粘贴/附件接线同帧就要用到 (const 有暂时性死区) */
   $('b-set').addEventListener('click',()=>cfgToggle(!S.cfgOpen));
@@ -3050,6 +1985,16 @@ function bind(){
   $('b-close').addEventListener('click',()=>post({c:'close'}));
   $('b-cancel').addEventListener('click',()=>cfgToggle(false));
   $('b-save').addEventListener('click',saveProf);
+  $('b-test').addEventListener('click',()=>{   /* 接口测试: 表单当前值直发 (未保存也算数);
+                                                  密钥留空由 C++ 用已存密钥, 明文不出宿主 */
+    if(S.testing)return;
+    if(!$('f-url').value.trim()||!$('f-model').value.trim()){
+      showToast('请先填写接口地址与模型名称','warn');return;
+    }
+    S.testing=true;
+    const tb=$('b-test');tb.disabled=true;tb.textContent='测试中…';
+    post({c:'profTest',url:$('f-url').value.trim(),key:$('f-key').value.trim(),model:$('f-model').value.trim()});
+  });
   /* Agent 标签页: 切页 / 保存 / 取消 / 两勾选 (与接口页同面板, 点外/Esc 收起共用) */
   $('cfgTabApi').addEventListener('click',()=>setCfgTab('api'));
   $('cfgTabAgent').addEventListener('click',()=>setCfgTab('agent'));
@@ -3144,8 +2089,7 @@ function bind(){
     addFiles(media);
     try{ta.focus();}catch(err){}
   });
-)AIWEBUI"
-           LR"AIWEBUI(  /* 拖放文件 (左侧搜索结果 / 资源管理器拖入皆可): 媒体走 addFiles 附件管线 (同 📎/粘贴);
+  /* 拖放文件 (左侧搜索结果 / 资源管理器拖入皆可): 媒体走 addFiles 附件管线 (同 📎/粘贴);
      非媒体文件浏览器拿不到真实路径 (CF_HDROP 到页面只剩 File 对象), 把文件名填入输入框,
      AI 用搜索工具按名定位。dragover 必须 preventDefault, 否则松手触发 WebView2 默认
      "拖入即导航", 整个面板被文件内容替换 */
@@ -3192,8 +2136,7 @@ function bind(){
     if(e.target.closest('button')||e.target.closest('.ai-usage-panel')||e.target===ta)return;
     e.preventDefault();ta.focus();
   });
-)AIWEBUI"
-           LR"AIWEBUI(  $('policyBtn').addEventListener('click',()=>policySetOpen(!S.policyOpen));
+  $('policyBtn').addEventListener('click',()=>policySetOpen(!S.policyOpen));
   $('policyMenu').addEventListener('click',e=>{
     const op=e.target.closest('.ai-cmd-policy-option');
     if(!op)return;
@@ -3260,8 +2203,7 @@ function bind(){
       if(S.usageOpen){usageSetOpen(false);e.preventDefault();return;}
     }
   });
-)AIWEBUI"
-           LR"AIWEBUI(  window.addEventListener('resize',()=>{hideJumpTip();hideCtx();if(S.modelOpen)modelSetOpen(false);});
+  window.addEventListener('resize',()=>{hideJumpTip();hideCtx();if(S.modelOpen)modelSetOpen(false);});
   /* 内容高度变化时自动跟随到底 (用户手动上滚后 S.follow=false 不再拉回) */
   try{
     new ResizeObserver(()=>{
@@ -3280,10 +2222,3 @@ try{
   });
 }catch(e){}
 document.addEventListener('DOMContentLoaded',bind);
-</script>
-</body>
-</html>
-
-)AIWEBUI"
-           ;
-}

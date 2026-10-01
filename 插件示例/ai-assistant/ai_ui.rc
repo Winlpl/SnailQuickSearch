@@ -1,0 +1,7 @@
+// AI frontend embedded pages (compile-time packed; source of truth = ui\ folder).
+// 300 = index.html (top-level document), 301 = app.css, 302 = app.js.
+// Loaded via FindResourceW(RT_RCDATA) in ai_web.cpp - keep the IDs in sync there.
+// Note: rc strings process backslash escapes (\a = bell!), so double them.
+300 RCDATA "ui\\index.html"
+301 RCDATA "ui\\app.css"
+302 RCDATA "ui\\app.js"

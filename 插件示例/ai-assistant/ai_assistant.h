@@ -11,7 +11,7 @@
  *   ai_session.cpp 会话层: 会话池 / 发送入口 / 流泵 (UI 抽取 → Web 增量同步) / 消息窗口
  *   ai_web.cpp     Web 前端宿主: 系统 WebView2 生命周期 (环境/控制器/子窗口) /
  *                  C++↔JS JSON 桥 / 皮肤调色派生 / markdown→HTML (md4c) / 消息 HTML 生成
- *   ai_web_ui.cpp  嵌入式前端: 整套对话 UI 的单文件 HTML+CSS+JS (资源内嵌, 免外部文件)
+ *                  (前端页面 = ui\ 磁盘真实文件, 经虚拟主机映射装载, 随 build.bat 部署)
  *   ai_plugin.cpp  插件边界: GetInfo / Init / Shutdown / OnCommand / OnPanelEvent
  *
  * 渲染口径 (2026-09-23): 整块 UI 交给系统 WebView2 (Edge 运行时) — 插件建真子窗口
@@ -62,6 +62,8 @@ static const UINT XJS_AI_SWEEP  = WM_APP + 41;  /* 孤儿作业清扫 */
 static const UINT XJS_AI_UIJOB  = WM_APP + 42;  /* 工具编组: worker → UI 线程执行宿主扩展 API (lParam=AiUiJob*) */
 static const UINT XJS_AI_MANUALWRITE = WM_APP + 43;  /* 手动重放 lua_exec 的写盘收口: 完成事件回调转投
                                                         UI 线程执行 (wParam=发起序号, lParam=窗口令牌) */
+static const UINT XJS_AI_TESTDONE = WM_APP + 44;  /* 接口测试完成 (lParam=堆分配 ConnTestResult*, 所有权
+                                                     随消息移交 UI; WebConnTestDone 消费后 delete) */
 
 /* ==================== 宿主扩展 API (QueryApi 按名解析; 全部仅 UI 线程) ====================
  * Init 时解析一次 (ApiResolveAll; host->size 先验), 存函数指针 — 未知名/旧宿主 = NULL,
@@ -468,6 +470,15 @@ void WebHtmlToText(const std::string& html8, std::string* out8);
 std::wstring WebUnwrapResultUrl(const std::wstring& u);
                                                   /* 搜索结果跳转链接 → 真实 URL (bing/ck 的
                                                      u=a1<base64url>、ddg 的 uddg=<百分号编码>) */
+bool WebTestApiConn(const std::wstring& baseUrl, const std::wstring& key,
+                    const std::wstring& model, std::wstring* msg);
+                                                  /* 接口连通性测试 (设置页「测试」钮): 按聊天同款
+                                                     路径 POST <baseUrl>/responses 发 16 token 极小
+                                                     请求; true=可用 (*msg=模型+耗时), false=失败
+                                                     (*msg=服务端错误文本或传输失败原因)。
+                                                     不带 AiJob (无「停止」; 面板一次性动作)。
+                                                     本地端点 (127.0.0.1 等) 合法 — 不走 fetch_url
+                                                     的 SSRF 公网闸 */
 /* ---- SSRF 防护 (fetch_url, 2026-09-27): url 由模型任意给出, 而本进程是管理员权限 —
  * 内网/环回/链路本地/保留地址一律拦截, 重定向仅跟随同源跳转 (dsh web-fetch-http 口径:
  * DNS 解析逐地址校验 + 不自动跟随, 逐跳复验)。三个纯函数供 test\test_ai_net.cpp 直测。 */
@@ -673,6 +684,8 @@ void WebTouch(AiSess* s);                         /* 会话数据结构性变化
 void WebToast(AiSess* s, const char* utf8, int kind);
                                                   /* 页面内提示 (kind=XJS_PLUGIN_TOAST_*; 面板开着时宿主 Toast 被浏览器子窗盖住) */
 void WebCommand(AiSess* s, const Jv& msg);        /* JS 命令分发 (WebMessageReceived 回调) */
+void WebConnTestDone(void* result);               /* 接口测试完成 (XJS_AI_TESTDONE; UI 线程消费
+                                                   * 堆分配结果并推 testResult, 面板已关则丢弃) */
 const void* AgentFetchFileIco(int fileId, int* outLen);
                                                   /* UI 线程取引擎图标 PNG (pathcheck 用, 定义 ai_agent.cpp):
                                                    * agent 忙 TryEnter 失败 = NULL, 本轮放弃下轮再试 */
@@ -690,8 +703,5 @@ bool MdToHtml(const std::wstring& text, std::wstring* out);
 /* 捐赠二维码 data URL (0=微信 1=支付宝; 空串=不可用; get_donate_qr 工具与 md 渲染层共用;
  * 进程内缓存一次, SRWLOCK 护双线程 — 实现 ai_web.cpp) */
 std::wstring DonateQrDataUrl(int kind);
-
-/* 嵌入式前端整文档 (实现 ai_web_ui.cpp; 两段宽字面量拼接 — MSVC 单字面量 32767 字符上限) */
-const wchar_t* AiWebUiHtml();
 
 #endif /* AI_ASSISTANT_H */

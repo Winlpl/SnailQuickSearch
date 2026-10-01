@@ -60,11 +60,26 @@ if not exist "katex\katex.min.js" (
 :: UI = embedded WebView2 frontend (system Edge runtime renders; no GDI+ bitmap
 :: pipeline anymore). md4c is compiled straight in (markdown -> HTML for bubbles).
 :: WinToast is compiled straight in too (system toast notifications, no PowerShell).
+:: Frontend sources (ui\index.html + app.css + app.js) are packed into the DLL
+:: as RCDATA resources 300/301/302 (ai_ui.rc; loaded in ai_web.cpp at runtime).
+if not exist "ui\index.html" (
+    echo ERROR: ui\index.html not found next to the plugin sources.
+    pause
+    exit /b 1
+)
+rc /nologo /fo ai_ui.res ai_ui.rc
+if errorlevel 1 (
+    echo ERROR: resource compile failed - ai_ui.rc.
+    pause
+    exit /b 1
+)
+
 cl /nologo /EHsc /std:c++20 /O2 /MP /Zi /Fd:ai-assistant.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ^
    /I..\..\webview2\include ^
-   ai_core.cpp ai_agent.cpp ai_session.cpp ai_web.cpp ai_web_ui.cpp ai_plugin.cpp ai_file.cpp ai_net.cpp ^
+   ai_core.cpp ai_agent.cpp ai_session.cpp ai_web.cpp ai_plugin.cpp ai_file.cpp ai_net.cpp ^
    ..\..\md4c\md4c.c ^
    ..\..\WinToast\wintoastlib.cpp ^
+   ai_ui.res ^
    /link /OUT:ai-assistant.dll winhttp.lib ws2_32.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib gdiplus.lib windowscodecs.lib propsys.lib runtimeobject.lib ^
    ..\..\xunjieso.lib
 if errorlevel 1 (

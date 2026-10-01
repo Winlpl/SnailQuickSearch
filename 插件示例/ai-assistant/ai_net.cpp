@@ -760,6 +760,135 @@ static bool HttpGet(AiJob* j, const std::wstring& url, std::string* out8,
     return HttpGetInner(j, url, false, out8, status, NULL, err);
 }
 
+/* ---- 接口连通性测试 (设置页「测试」钮, 2.15.2) ---- */
+
+/* 从非 200 应答体提取服务端错误文本: OpenAI 风格 {"error":{"message":..}} 直取,
+ * 顶层 {"message":..} 兜底, 都没有 → 原文展示 (换行折叠, 240 字符截断) */
+static std::wstring WebConnErrText(const std::string& body8) {
+    std::wstring out;
+    picojson::value v;
+    if (JParseU8(v, body8) && v.is<picojson::object>()) {
+        const picojson::object& o = v.get<picojson::object>();
+        auto eit = o.find("error");
+        if (eit != o.end() && eit->second.is<picojson::object>()) {
+            const picojson::object& e = eit->second.get<picojson::object>();
+            auto mit = e.find("message");
+            if (mit != e.end() && mit->second.is<std::string>())
+                out = W8(mit->second.get<std::string>().c_str());
+        }
+        if (out.empty()) {
+            auto mit = o.find("message");
+            if (mit != o.end() && mit->second.is<std::string>())
+                out = W8(mit->second.get<std::string>().c_str());
+        }
+    }
+    if (out.empty()) out = W8(body8.c_str());
+    for (auto& ch : out)
+        if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
+    if (out.size() > 240) { out.resize(240); out += L"…"; }
+    return out;
+}
+
+/* 按聊天同款路径实测一次: POST <baseUrl>/responses {"model","input","max_output_tokens":16,
+ * "stream":false} — 地址解析/密钥鉴权/模型名有效/协议兼容 一次全验 (聊天走什么路径这就走
+ * 什么路径)。代理档位与 WorkerMain 相同 (AUTO 打不开才回退 DEFAULT): 测试必须代表聊天本身
+ * 的连通性, 不能比它"更能通" (web_search 的三档链对 LLM 端点过宽, 测试得绿但聊天仍败 = 误导)。
+ * 本地端点 (Ollama/LM Studio 的 127.0.0.1) 合法 — 不走 fetch_url 的 SSRF 公网闸。
+ * 返回 true = 接口可用 (*msg = 模型+耗时); false = 失败 (*msg = 服务端错误文本或传输失败原因)。 */
+bool WebTestApiConn(const std::wstring& baseUrl, const std::wstring& key,
+                    const std::wstring& model, std::wstring* msg) {
+    std::wstring base = TrimW(baseUrl);
+    while (!base.empty() && base.back() == L'/') base.pop_back();
+    bool secure = true;
+    if (base.rfind(L"https://", 0) == 0) { secure = true; base = base.substr(8); }
+    else if (base.rfind(L"http://", 0) == 0) { secure = false; base = base.substr(7); }
+    size_t slash = base.find(L'/');
+    std::wstring path = slash == std::wstring::npos ? L"/responses" : base.substr(slash) + L"/responses";
+    std::wstring hostpart = slash == std::wstring::npos ? base : base.substr(0, slash);
+    INTERNET_PORT port = secure ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    {
+        std::wstring host = hostpart;
+        size_t colon = host.rfind(L':');
+        if (colon != std::wstring::npos && host.find(L']') == std::wstring::npos) {
+            int p = _wtoi(host.substr(colon + 1).c_str());
+            if (p > 0) port = (INTERNET_PORT)p;
+            host = host.substr(0, colon);
+        }
+        /* 极小请求体 (picojson 拼装防注入; 16 token 把费用压到可忽略) */
+        picojson::object body;
+        body["model"] = JS(model);
+        body["input"] = picojson::value("hi");
+        body["max_output_tokens"] = JN(16);
+        body["stream"] = JB(false);
+        std::string body8 = picojson::value(body).serialize();
+        std::wstring hdr = L"Content-Type: application/json\r\nAuthorization: Bearer " + key;
+        ULONGLONG t0 = GetTickCount64();
+        bool answered = false;
+        unsigned long status = 0;
+        std::string resp8;
+        for (int mode = 0; mode < 2 && !answered; mode++) {
+            const DWORD access = mode == 0 ? WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+                                           : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+            HINTERNET hs = WinHttpOpen(L"snail-quicksearch-ai-assistant", access, NULL, NULL, 0);
+            if (!hs) continue;
+            WinHttpSetTimeouts(hs, 5000, 5000, 5000, 15000);   /* 解析/连接/发送/收包 (毫秒) */
+            HINTERNET hc = WinHttpConnect(hs, host.c_str(), port, 0);
+            HINTERNET hr = NULL;
+            if (hc)
+                hr = WinHttpOpenRequest(hc, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER,
+                                        WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                        secure ? WINHTTP_FLAG_SECURE : 0);
+            if (hr) {
+                BOOL sent = WinHttpAddRequestHeaders(hr, hdr.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD) &&
+                            WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                               (LPVOID)body8.data(), (DWORD)body8.size(),
+                                               (DWORD)body8.size(), 0) &&
+                            WinHttpReceiveResponse(hr, NULL);
+                if (sent) {
+                    DWORD st = 0, sz = sizeof(st);
+                    WinHttpQueryHeaders(hr, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                        NULL, &st, &sz, NULL);
+                    status = st;
+                    for (;;) {   /* 错误体也读全 (16KB 封顶) */
+                        DWORD avail = 0;
+                        if (!WinHttpQueryDataAvailable(hr, &avail) || !avail) break;
+                        if (resp8.size() >= 16384) break;
+                        char buf[4096];
+                        DWORD rd = 0, want = avail < sizeof(buf) ? avail : sizeof(buf);
+                        if (!WinHttpReadData(hr, buf, want, &rd) || !rd) break;
+                        resp8.append(buf, rd);
+                    }
+                    answered = true;   /* 拿到应答 = 事实; 可用与否由 status 表达, 不再换档 */
+                }
+                WinHttpCloseHandle(hr);
+            }
+            if (hc) WinHttpCloseHandle(hc);
+            WinHttpCloseHandle(hs);
+            /* 传输失败 → 换下一档代理重试 (与 HttpGetInner 同口径) */
+        }
+        if (!answered) {
+            *msg = L"连接失败 (地址不可达、超时或被安全软件拦截)";
+            return false;
+        }
+        if (status == 200) {
+            wchar_t nb[160];
+            swprintf(nb, 160, L"接口可用 · %s · %.1f 秒", TrimW(model).c_str(),
+                     (GetTickCount64() - t0) / 1000.0);
+            *msg = nb;
+            return true;
+        }
+        std::wstring et = WebConnErrText(resp8);
+        if (et.empty()) et = L"服务端未返回错误详情";
+        wchar_t nb[560];
+        swprintf(nb, 560, L"HTTP %lu: %s", status, et.c_str());
+        std::wstring m = nb;
+        if (status == 401 || status == 403) m += L" (检查 API 密钥)";
+        else if (status == 404) m += L" (检查接口地址)";
+        *msg = m;
+        return false;
+    }
+}
+
 /* ---- fetch_url 的 SSRF 闸门 (dsh web-fetch-http 口径) ---- */
 
 /* 主机校验: IP 字面量直判; 域名 GetAddrInfoW 解析后逐地址校验, 全部公网才放行

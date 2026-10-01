@@ -12,6 +12,7 @@
 #include <shellapi.h>
 #include <map>
 #include <vector>
+#include <thread>
 #include "../../md4c/md4c.h"
 #include "../../webview2/include/WebView2.h"
 
@@ -1376,6 +1377,19 @@ struct WebFocusHandler : ICoreWebView2FocusChangedEventHandler {
 };
 
 /* 外域导航/新窗口一律掐掉 (CSP 之外的第二道; 外链走 openurl 命令; data: = NavigateToString 自身) */
+/* RCDATA 资源 → UTF-8 字节串 (缺失/空资源 = 空 string)。前端三件套 (ai_ui.rc
+ * 300/301/302, 编译期内嵌 — 源 = ui\ 目录, build.bat rc 步骤打包) */
+static std::string LoadRcUtf8(HMODULE hMod, int id) {
+    HRSRC rs = FindResourceW(hMod, MAKEINTRESOURCEW(id), RT_RCDATA);
+    if (!rs) return std::string();
+    HGLOBAL h = LoadResource(hMod, rs);
+    if (!h) return std::string();
+    DWORD n = SizeofResource(hMod, rs);
+    const void* p = n ? LockResource(h) : NULL;
+    if (!p) return std::string();
+    return std::string((const char*)p, n);
+}
+
 struct WebNavHandler : ICoreWebView2NavigationStartingEventHandler {
     WEB_HANDLER_BEGIN(ICoreWebView2NavigationStartingEventHandler)
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* args) override {
@@ -1477,7 +1491,36 @@ struct WebCtrlHandler : ICoreWebView2CreateCoreWebView2ControllerCompletedHandle
                                                   COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
             w4->Release();
         }
-        ctx->web->NavigateToString(AiWebUiHtml());
+        /* 首页 = 编译期内嵌 RCDATA (ai_ui.rc: 300=index.html 301=app.css 302=app.js;
+         * 唯一事实源 = 插件源码目录 ui\ 三件套, build.bat 的 rc 步骤随全量重编打包):
+         * 运行时零外部文件, NavigateToString 的 data: 文档也不入 HTTP 缓存 — 无缓存失效
+         * 问题。装载 = index.html 原样为顶层文档 (data: 在导航闸白名单, "NavigationStarting
+         * 全掐"口径原样不动), 页内仅有的两个外链引用并回 <style>/<script> 内联 (前端本就
+         * 单文档出身, CSP 的 unsafe-inline 即彼时口径; js 无 </script> 字面量, 内联安全)。
+         * 改前端 = 编辑 ui\ 文件后重跑 build.bat。资源缺失 (打包口径错误) = 内嵌最小
+         * 错误页, 不白屏 */
+        HMODULE hMod = NULL;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)&LoadRcUtf8, &hMod);
+        std::string html8 = hMod ? LoadRcUtf8(hMod, 300) : std::string();
+        std::string css8 = hMod ? LoadRcUtf8(hMod, 301) : std::string();
+        std::string js8 = hMod ? LoadRcUtf8(hMod, 302) : std::string();
+        if (!html8.empty() && !css8.empty() && !js8.empty()) {
+            auto swapRef = [&html8](const char* from, const std::string& to) {
+                size_t i = html8.find(from);
+                if (i != std::string::npos) html8.replace(i, strlen(from), to);
+            };
+            swapRef("<link rel=\"stylesheet\" href=\"app.css\">", "<style>" + css8 + "</style>");
+            swapRef("<script src=\"app.js\"></script>", "<script>" + js8 + "</script>");
+            std::wstring htmlW = W8(html8.c_str());
+            ctx->web->NavigateToString(htmlW.c_str());
+        } else {
+            ctx->web->NavigateToString(
+                L"<html><meta charset=\"utf-8\"><body style=\"font:13px sans-serif;color:#888;"
+                L"display:grid;place-items:center;height:90vh\">前端资源缺失 (ai_ui.rc 300/301/302) —"
+                L"请重新安装 AI 助手插件</body></html>");
+        }
         return S_OK;
     }
 };
@@ -2261,6 +2304,20 @@ static bool IcoDataUrlOf(int fid, const std::wstring& path, int* fresh, std::wst
     return true;
 }
 
+/* ---- 接口测试 (设置页「测试」钮, 2.15.2): 堆分配跨线程交付 —
+ * WebCommand("profTest") 起 detached 线程跑 WebTestApiConn, 完成结果经
+ * XJS_AI_TESTDONE 移交 UI 线程 (WebConnTestDone 消费后 delete; PostMessage
+ * 失败 = 线程侧自删, 不悬垂) */
+struct ConnTestJob {
+    AiSess* s;
+    std::wstring url, key, model;
+};
+struct ConnTestResult {
+    AiSess* s;
+    bool ok;
+    std::wstring msg;
+};
+
 void WebCommand(AiSess* s, const Jv& msg) {
     std::wstring c = msg.S(L"c");
     if (c == L"ready") {
@@ -2424,6 +2481,31 @@ void WebCommand(AiSess* s, const Jv& msg) {
         CfgApplyActive();
         CfgSave();
         CfgBroadcast();
+        return;
+    }
+    if (c == L"profTest") {   /* 接口测试 (设置页「测试」钮): 用表单当前值实连一次 —
+                                 未保存的编辑也算数 (测的就是用户敲进去的东西);
+                                 密钥框留空 = 用已存密钥 (与 profSave 同口径, 明文不出宿主)。
+                                 网络在工作线程跑 (UI 线程阻塞 = 面板冻结), 结果经
+                                 g_msgwnd 投回 UI 线程推 testResult。 */
+        std::wstring url = TrimW(msg.S(L"url")), key = TrimW(msg.S(L"key")),
+                     model = TrimW(msg.S(L"model"));
+        if (key.empty()) {
+            const AiProfile* p = CfgActive();
+            if (p) key = p->apiKey;
+        }
+        if (url.empty() || model.empty()) {
+            WebToast(s, "请先填写接口地址与模型名称", XJS_PLUGIN_TOAST_WARN);
+            return;
+        }
+        ConnTestJob* tj = new ConnTestJob{s, url, key, model};
+        std::thread([tj]() {
+            std::wstring m;
+            bool ok = WebTestApiConn(tj->url, tj->key, tj->model, &m);
+            ConnTestResult* r = new ConnTestResult{tj->s, ok, std::move(m)};
+            delete tj;
+            if (!PostMessageW(g_msgwnd, XJS_AI_TESTDONE, 0, (LPARAM)r)) delete r;
+        }).detach();
         return;
     }
     if (c == L"agentCfg") {   /* Agent 行为设置 (「Agent」标签页): 整包写回 — 数值越界夹取
@@ -2884,4 +2966,22 @@ void WebCommand(AiSess* s, const Jv& msg) {
         WebPost(s, picojson::value(o).serialize());
         return;
     }
+}
+
+/* ---- 接口测试 (设置页「测试」钮) ----
+ * 会话池 g_sess 是定长数组 (地址进程终身), 裸存 AiSess* 不悬垂; 消费时校验
+ * inUse/bootDone — 面板已关 (槽位释放) 的迟到结果直接丢弃。 */
+
+void WebConnTestDone(void* result) {
+    ConnTestResult* r = (ConnTestResult*)result;
+    if (!r) return;
+    AiSess* s = r->s;
+    if (s && s->inUse && s->web && s->bootDone) {
+        picojson::object o;
+        o["t"] = picojson::value("testResult");
+        o["ok"] = picojson::value(r->ok);
+        o["msg"] = JS(r->msg);
+        WebPost(s, picojson::value(o).serialize());
+    }
+    delete r;
 }

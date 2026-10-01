@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' https://aiassets.snailqs.local; style-src 'unsafe-inline' https://aiassets.snailqs.local; img-src data:; font-src https://aiassets.snailqs.local; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>AI 助手</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <div class="ai-main">
+    <div class="ai-toolbar">
+      <h1 class="ai-toolbar-title">AI 助手</h1>
+      <span class="ai-toolbar-status">
+        <span class="ai-status-dot" id="stDot" data-state="missing" aria-hidden="true"></span>
+        <span class="ellipsis-text" id="stText">未配置接口</span>
+      </span>
+      <div class="ai-toolbar-actions">
+        <!-- 模型切换: 点开列出全部档案, 选中即生效; 管理动作在接口设置面板里 -->
+        <div class="ai-model-picker" id="modelPicker">
+          <button class="ai-btn ai-model-picker-button" id="modelBtn" type="button"
+            aria-haspopup="listbox" aria-expanded="false" title="模型">
+            <span class="glyph" aria-hidden="true">&#xE99A;</span><span class="ellipsis-text" id="modelBtnLabel"></span><span class="ai-model-caret glyph" aria-hidden="true">&#xE70D;</span>
+          </button>
+          <div class="ai-model-menu" id="modelMenu" role="listbox" hidden></div>
+        </div>
+        <button class="ai-btn" id="b-set" type="button" title="设置"><span class="glyph" aria-hidden="true">&#xE713;</span><span class="ellipsis-text">设置</span></button>
+        <button class="ai-btn" id="b-hist" type="button" title="历史对话"><span class="glyph" aria-hidden="true">&#xE81C;</span><span class="ellipsis-text">历史对话</span></button>
+        <button class="ai-btn" id="b-new" type="button" title="新对话"><span class="glyph" aria-hidden="true">&#xE72C;</span><span class="ellipsis-text">新对话</span></button>
+        <button class="ai-btn icononly" id="b-close" type="button" title="关闭"><span class="glyph" aria-hidden="true">&#xE8BB;</span></button>
+      </div>
+    </div>
+
+    <!-- 接口设置: 管理模型档案 (每条档案是一套完整接口配置, 跨服务商时地址与密钥随档案走) -->
+    <div class="ai-config-panel" id="cfgPanel" hidden>
+      <div class="ai-cfg-tabs" role="tablist" aria-label="设置分类">
+        <button class="ai-cfg-tab" id="cfgTabApi" type="button" role="tab" aria-selected="true">接口</button>
+        <button class="ai-cfg-tab" id="cfgTabAgent" type="button" role="tab" aria-selected="false">Agent</button>
+      </div>
+      <div id="cfgPageApi">
+      <div class="ai-config-row"><label class="ai-config-label" for="f-prof">模型</label>
+        <div class="ai-config-profile-row">
+          <select class="ai-config-input" id="f-prof"></select>
+          <button class="ai-btn" id="f-prof-add" type="button">新建</button>
+          <button class="ai-btn" id="f-prof-dup" type="button">复制</button>
+          <button class="ai-btn" id="f-prof-del" type="button" data-armed="false">删除</button>
+        </div></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-name">名称</label>
+        <input class="ai-config-input" id="f-name" type="text" spellcheck="false" autocomplete="off" placeholder="例如：DeepSeek 官方"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-url">接口地址</label>
+        <input class="ai-config-input" id="f-url" type="text" spellcheck="false" autocomplete="off" placeholder="https://api.deepseek.com" title="接口需兼容 OpenAI Responses 协议（/responses）"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-key">API 密钥</label>
+        <input class="ai-config-input" id="f-key" type="password" spellcheck="false" autocomplete="off" placeholder="sk-...（留空保存 = 保留已存密钥）" title="密钥以本机 GUID 为密码加密后只存在本机配置文件里，换机或分享配置均无法解出"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-model">模型</label>
+        <input class="ai-config-input" id="f-model" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-flash"></div>
+      <div class="ai-config-row" title="按模型实际支持勾选：开启后输入区可粘贴/附带对应类型（图片压缩为 ≤1568px，视频/音频按原样 data URL 发送，上限见输入区提示）；未开启的类型不会出现附件入口"><span class="ai-config-label" aria-hidden="true">多模态</span>
+        <div class="ai-caps-row">
+          <button class="ai-reason-toggle" id="f-img" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>图片 (可粘贴/附带)</button>
+          <button class="ai-reason-toggle" id="f-video" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>视频</button>
+          <button class="ai-reason-toggle" id="f-audio" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>音频</button>
+        </div></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-ctx">上下文长度</label>
+        <input class="ai-config-input" id="f-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则按模型名自动推断" title="只影响用量里的“剩余”显示。填 token 数，支持 128K、1M 这类写法"></div>
+      <div class="ai-config-row"><label class="ai-config-label" for="f-max">最大输出</label>
+        <input class="ai-config-input" id="f-max" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="留空则用服务端默认（不发送该参数）" title="填 token 数，支持 128K、1M 这类写法；留空时请求不携带该参数"></div>
+      <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+        <button class="ai-reason-toggle" id="f-reason" type="button" aria-pressed="false"><span class="ai-reason-box" aria-hidden="true"></span>深度思考 (reasoning.effort=high)</button></div>
+      <div class="ai-config-actions">
+        <button class="ai-btn" id="b-test" type="button" title="用当前填写的地址与密钥实际连接一次">测试</button>
+        <button class="ai-btn" id="b-cancel" type="button">取消</button>
+        <button class="ai-btn ai-btn-primary" id="b-save" type="button">保存</button>
+      </div>
+      </div>
+      <div id="cfgPageAgent" hidden>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-turns">工具调用上限</label>
+          <input class="ai-config-input" id="a-turns" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="1-100（默认 30）" title="一次任务里 AI 最多连续执行几轮工具，用尽后强制总结作答"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-ctx">历史消息上限</label>
+          <input class="ai-config-input" id="a-ctx" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-200（默认 30）" title="每次请求携带的早期问答条数；仅在关闭「自动压缩历史」时生效"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-sample">搜索样本条数</label>
+          <input class="ai-config-input" id="a-sample" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-50（默认 20）" title="每次搜索回传给 AI 的结果条数"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-readcap">读取内容上限</label>
+          <input class="ai-config-input" id="a-readcap" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="4-512 KB（默认 30）" title="单个文件/网页回传正文上限，超出部分留头 80% 尾 20% 并注明省略量；完整内容会存为外溢文件供 AI 分页读取"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-cmdto">命令默认超时</label>
+          <input class="ai-config-input" id="a-cmdto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="3-600 秒（默认 120）" title="AI 执行命令/程序的最长等待"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-httpto">请求超时</label>
+          <input class="ai-config-input" id="a-httpto" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="30-600 秒（默认 120）" title="单轮对话等待模型响应的最长时间"></div>
+        <div class="ai-config-row"><label class="ai-config-label" for="a-instr">自定义指令</label>
+          <textarea class="ai-config-input ai-config-area" id="a-instr" rows="4" spellcheck="false" placeholder="例如：回答尽量简洁；找文件时优先按修改时间排序…（留空 = 不追加）" title="会拼进 AI 的系统提示词，保存后下一条消息生效"></textarea></div>
+        <div class="ai-config-row"><span class="ai-config-label" aria-hidden="true"></span>
+          <div class="ai-caps-row">
+            <button class="ai-reason-toggle" id="a-notify" type="button" aria-pressed="true" title="任务在后台完成/失败时弹系统通知提醒；面板在前台使用时不打扰"><span class="ai-reason-box" aria-hidden="true"></span>后台完成时系统通知</button>
+            <button class="ai-reason-toggle" id="a-cardsopen" type="button" aria-pressed="false" title="开启后工具卡片默认展开；关闭时只显示头部一行，点击展开"><span class="ai-reason-box" aria-hidden="true"></span>工具卡片默认展开</button>
+            <button class="ai-reason-toggle" id="a-web" type="button" aria-pressed="true" title="允许 AI 联网搜索并读取网页（web_search / fetch_url）。查询词会发给搜索引擎，只能访问公网地址；关闭后 AI 不再具备联网能力"><span class="ai-reason-box" aria-hidden="true"></span>联网搜索</button>
+            <button class="ai-reason-toggle" id="a-acompact" type="button" aria-pressed="true" title="上下文接近模型上限时，自动把早期对话压缩成背景要点再继续；长对话不丢开头，偶尔多一次摘要耗时"><span class="ai-reason-box" aria-hidden="true"></span>自动压缩历史</button>
+          </div></div>
+        <div class="ai-config-actions">
+          <button class="ai-btn" id="b-agent-cancel" type="button">取消</button>
+          <button class="ai-btn ai-btn-primary" id="b-agent-save" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="ai-thread-wrap">
+      <div class="ai-thread" id="thread">
+        <div class="ai-thread-inner" id="threadInner"></div>
+      </div>
+      <div class="ai-jumpbar" id="jumpbar" hidden><div class="ai-jump-track" id="jumpTrack"></div></div>
+    </div>
+
+    <div class="ai-pendbar" id="pendbar" hidden></div>
+
+    <div class="ai-composer">
+      <div class="ai-composer-inner">
+        <div class="ai-composer-box" id="cbox">
+          <div class="ai-attrow" id="attRow" hidden></div>
+          <textarea class="ai-input" id="inputT" rows="1" aria-label="给 AI 助手的消息"
+            placeholder="描述你的目标，例如：找出一周内修改过的文档"></textarea>
+          <div class="ai-composer-bar">
+            <button class="ai-bar-ic" id="attB" type="button" title="附带图片 / 视频 / 音频" hidden>
+              <span class="glyph" aria-hidden="true">&#xE8DA;</span></button>
+            <input type="file" id="attFile" multiple accept="image/*,video/*,audio/*" hidden>
+            <div class="ai-cmd-policy" id="policy">
+              <button class="ai-cmd-policy-button" id="policyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE756;</span>
+                <span id="policyLabel"></span>
+                <span class="ai-cmd-policy-chevron glyph" aria-hidden="true">&#xE70D;</span>
+              </button>
+              <div class="ai-cmd-policy-menu" id="policyMenu" role="listbox" aria-label="文件操作权限" hidden>
+                <button class="ai-cmd-policy-option" type="button" data-policy="0" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-policy="1" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-policy="2" role="option" aria-checked="true">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-policy="3" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+              </div>
+            </div>
+            <div class="ai-cmd-policy" id="epolicy">
+              <button class="ai-cmd-policy-button" id="epolicyBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE7EE;</span>
+                <span id="epolicyLabel"></span>
+                <span class="ai-cmd-policy-chevron glyph" aria-hidden="true">&#xE70D;</span>
+              </button>
+              <div class="ai-cmd-policy-menu" id="epolicyMenu" role="listbox" aria-label="命令执行权限" hidden>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="0" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="2" role="option" aria-checked="true">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+                <button class="ai-cmd-policy-option" type="button" data-epolicy="3" role="option" aria-checked="false">
+                  <span class="ai-cmd-policy-check glyph" aria-hidden="true">&#xE73E;</span>
+                  <span class="ai-cmd-policy-option-text"><span class="ai-cmd-policy-option-label"></span><span class="ai-cmd-policy-option-hint"></span></span></button>
+              </div>
+            </div>
+            <button class="ai-cmd-policy-button ai-sync-btn" id="syncBtn" type="button" aria-pressed="false">
+              <span class="ai-cmd-policy-icon glyph" aria-hidden="true">&#xE73E;</span>
+              <span id="syncLabel"></span>
+            </button>
+            <button class="ai-usage" id="usageBtn" type="button" aria-expanded="false">
+              <span class="ai-usage-bar" aria-hidden="true"><i class="ai-usage-bar-fill" id="ubarf"></i></span>
+              <span class="ai-usage-brief" id="ubrief"></span>
+              <span class="ai-usage-caret glyph" aria-hidden="true">&#xE70D;</span>
+            </button>
+            <button class="ai-send" id="sendB" type="button" data-mode="send" aria-label="发送"></button>
+          </div>
+          <div class="ai-usage-panel" id="usagePanel" role="dialog" aria-label="用量详情"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="ai-history-sidebar" id="side" aria-label="历史对话" hidden>
+    <div class="ai-history-head">
+      <span class="ai-history-title">历史对话</span>
+      <div class="ai-history-head-actions">
+        <button class="ai-btn ai-history-clear" id="clearb" type="button" title="清空全部对话记录" hidden>清空记录</button>
+        <button class="ai-history-close glyph" id="sideClose" type="button" title="关闭历史对话" aria-label="关闭历史对话">&#xE8BB;</button>
+      </div>
+    </div>
+    <div class="ai-history-list" id="sideList"></div>
+    <div class="ai-history-empty" id="sideEmpty" hidden>暂无历史对话</div>
+  </aside>
+
+  <!-- 页面内 Toast (宿主 Toast 被浏览器子窗盖住; 恒在 DOM, 显隐走 .visible, pointer-events:none 不挡点击) -->
+  <div class="ai-toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+<!-- 图表库 mermaid + 数学渲染 KaTeX: 本地文件经 C++ 虚拟主机映射载入 (缺文件/旧运行时加载失败 = 各自降级为源码/纯文本) -->
+<script defer src="https://aiassets.snailqs.local/mermaid.min.js"></script>
+<link rel="stylesheet" href="https://aiassets.snailqs.local/katex/katex.min.css"/>
+<script defer src="https://aiassets.snailqs.local/katex/katex.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
+

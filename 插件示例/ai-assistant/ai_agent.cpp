@@ -2672,7 +2672,8 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"演进过程用 timeline。图放在文字结论或表格之后，正文照常给结论和数字，图是补充不是替代。\n"
     L"- 一个图一个独立代码块，节点文字简短；标签文字里含引号、圆括号等特殊字符时，标签整体用双引号包起来"
     L"（如 A[\"文字(含括号)\"]，标签内部的双引号写成 #quot;）；timeline 的时段/事件文字里不能带冒号"
-    L"（07:18 要写成 07时18分）；只写有把握的语法（不支持的写法整块渲染失败退回源码）。\n"
+    L"（07:18 要写成 07时18分）；xychart-beta 的 x-axis/y-axis 分类列表里每一项都加双引号"
+    L"（x-axis [\"C-系统\", \"D-工作\"]——裸写连字符等符号会词法错误）；只写有把握的语法（不支持的写法整块渲染失败退回源码）。\n"
     L"- 图里的数据必须来自真实工具结果，缺数据先用工具查，绝不编造数值；确实不适合图示的（纯清单、单个数值的回答）不硬画。\n"
     L"\n"
     L"## 搜索语法速查（run_search 的 mode）\n"
@@ -3640,10 +3641,10 @@ static void AiSystemToast(const std::wstring& bodyRaw) {
     }
     if (SUCCEEDED(hr))
         hr = doc->LoadXml(Microsoft::WRL::Wrappers::HStringReference(
-            L"<toast scenario=\"reminder\"><visual><binding template=\"ToastText02\">"
+            L"<toast scenario=\"reminder\"><visual><binding template=\"ToastGeneric\">"
             L"<text>蜗牛快搜 AI 助手</text><text></text>"
             L"</binding></visual>"
-            L"<actions><action content=\"打开窗口\" activationType=\"foreground\"/>"
+            L"<actions><action content=\"打开窗口\" arguments=\"wake\" activationType=\"foreground\"/>"
             L"<action content=\"知道了\" arguments=\"dismiss\" activationType=\"system\"/></actions>"
             L"</toast>").Get());
     if (SUCCEEDED(hr)) {   /* 正文进第 2 个 text 节点 (CreateTextNode = 注入安全) */
