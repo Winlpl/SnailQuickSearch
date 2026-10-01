@@ -15,7 +15,7 @@ enum XjsSetCtrl { CT_INFO = 0, CT_SWITCH, CT_OPTION, CT_BUTTON, CT_PILL, CT_IMAG
 enum XjsSetAct {
     ACT_NONE = 0, ACT_PREVIEW, ACT_AUTOSTART, ACT_REBUILD, ACT_GITHUB, ACT_SITE, ACT_DONORS, ACT_GLM,
     ACT_COPYVER = 8,  /* 关于页: 复制版本信息 (排查问题时直接粘给对方) */
-    ACT_VIEW = 200,   /* +0..3 视图模式 */
+    ACT_VIEW = 200,   /* +0..4 视图模式 (枚举序 = 显示序 = 滚轮档序: 严密/紧凑/详情/中等/大, 见 xjs_app.h) */
     ACT_SKIN = 100,   /* +皮肤索引 (g_skinMenuNames) */
     ACT_MATCH = 300,  /* +0..7 搜索匹配开关 (下发 SetSearchSettings) */
     ACT_EXCL_ADD = 310,
@@ -955,9 +955,10 @@ static bool XjsSetBuildRows() {
                    XjsT(L"设置.列表.悬停高亮.说明"), L"", g_rowHover, false);
             addRow(ACT_HOVERFADE, CT_SWITCH, XjsT(L"设置.列表.悬停残影"),
                    XjsT(L"设置.列表.悬停残影.说明"), L"", g_rowHoverFade, false, !g_rowHover);
-            const wchar_t* const VN[4] = { XjsT(L"通用词.紧凑视图"), XjsT(L"通用词.详情视图"),
-                                                  XjsT(L"通用词.中等图标"), XjsT(L"通用词.大图标") };
-            for (int m = 0; m < 4; m++)
+            const wchar_t* const VN[5] = { XjsT(L"通用词.严密模式"), XjsT(L"通用词.紧凑视图"),
+                                                  XjsT(L"通用词.详情视图"), XjsT(L"通用词.中等图标"),
+                                                  XjsT(L"通用词.大图标") };
+            for (int m = 0; m < 5; m++)
                 addRow(ACT_VIEW + m, CT_OPTION, VN[m], L"", L"", g_viewMode == m, false);
             break;
         }
@@ -2606,7 +2607,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                     s_aliasEds.erase(s_aliasEds.begin() + i * 2, s_aliasEds.begin() + i * 2 + 2);
                 break;
             }
-            if (act >= ACT_VIEW && act < ACT_VIEW + 4) { XjsSetViewMode(act - ACT_VIEW); break; }
+            if (act >= ACT_VIEW && act < ACT_VIEW + 5) { XjsSetViewMode(act - ACT_VIEW); break; }
             if (act >= ACT_SKIN && act < ACT_SKIN + (int)g_skinMenuNames.size()) {
                 int si = act - ACT_SKIN;
                 if (g_skinMenuNames[si] != g_skinName) {

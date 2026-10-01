@@ -1145,6 +1145,7 @@ void XjsShowAppMenu() {
         }
         items.push_back(nw);
     }
+    items.push_back({ IDM_MENU_BASE + 47, XjsT(L"菜单.严密模式"), L"", g_viewMode == VM_DENSE, false, false, false });
     items.push_back({ IDM_MENU_BASE + 41, XjsT(L"菜单.紧凑视图"), L"", g_viewMode == VM_LIST, false, false, false });
     items.push_back({ IDM_MENU_BASE + 42, XjsT(L"菜单.详情视图"), L"", g_viewMode == VM_DETAILS, false, false, false });
     items.push_back({ IDM_MENU_BASE + 43, XjsT(L"菜单.中等图标"), L"", g_viewMode == VM_MEDIUM, false, false, false });

@@ -151,13 +151,15 @@ enum HoverBits { HB_CLEAR = 1, HB_HISTORY = 2, HB_FILTER = 4, HB_PILL = 8, HB_ME
    应用菜单唯一入口 = 左侧 ☰菜单按钮) */
 enum XjsWndBtn { WBTN_NONE = 0, WBTN_PIN, WBTN_MIN, WBTN_MAX, WBTN_CLOSE };
 
-/* 视图模式四档 (正式版 VIEW_MODES 按图标从小到大排列: list 16 → details 32 → medium 48 → large 72;
-   Ctrl+滚轮切换: 向上滚=放大, 向下滚=缩小, 两端停止不循环; 紧凑为默认, 同正式版) */
-enum XjsViewMode { VM_LIST = 0, VM_DETAILS = 1, VM_MEDIUM = 2, VM_LARGE = 3 };
-static const int XJS_ROW_H[4] = { 34, 54, 116, 142 };      /* medium/large=网格排高 (VIEW_CFG.rowH) */
-static const int XJS_ICON_PX[4] = { 16, 32, 48, 72 };      /* 图标显示尺寸 */
-static const int XJS_FETCH_ICON[4] = { 16, 32, 64, 128 };  /* 向引擎请求的图标尺寸 (网格取大图保清晰) */
-static const int XJS_GRID_ITEM_W[4] = { 0, 0, 100, 140 };  /* 网格格子宽 (VIEW_CFG.minItemW, 0=列表型) */
+/* 视图模式五档, 枚举序 = 菜单/设置显示序 = Ctrl+滚轮档序: 严密 → 紧凑 → 详情 → 中等 → 大
+   (2026-10-01 用户口径: 严密排最前, 滚轮全档循环)。整条阶梯视觉尺寸单调:
+   严密 (行槽 20px, 行间只留 2px 缝) → 紧凑 34px → 详情 32px 图标 → 中等 48px → 大 72px,
+   向上滚=放大, 向下滚=缩小, 两端停止不循环; 紧凑仍为默认档 (同正式版) */
+enum XjsViewMode { VM_DENSE = 0, VM_LIST = 1, VM_DETAILS = 2, VM_MEDIUM = 3, VM_LARGE = 4 };
+static const int XJS_ROW_H[5] = { 20, 34, 54, 116, 142 };      /* medium/large=网格排高 (VIEW_CFG.rowH); dense=20 (18px可见行+2px缝) */
+static const int XJS_ICON_PX[5] = { 16, 16, 32, 48, 72 };      /* 图标显示尺寸 */
+static const int XJS_FETCH_ICON[5] = { 16, 16, 32, 64, 128 };  /* 向引擎请求的图标尺寸 (网格取大图保清晰) */
+static const int XJS_GRID_ITEM_W[5] = { 0, 0, 100, 140 };      /* 网格格子宽 (VIEW_CFG.minItemW, 0=列表型) */
 
 /* ==================== 绘图后端中立值类型 (换绘图引擎的接缝, 2026-09-17) ====================
  * 布局/皮肤/几何/颜色这类"值"不再绑定 D2D: 字段名与 D2D 同名 (left/top/right/bottom, r/g/b/a),
@@ -1762,6 +1764,7 @@ void XjsScrollTo(double top);
 void XjsEnsureVisible(int idx);
 int XjsRowAtY(double yInList);
 bool XjsIsGridView();                             // 网格模式 (中图标/大图标)
+bool XjsIsListTypeView();                         // 列表型视图 (紧凑/严密: 共用列表列集与单行行绘制)
 int XjsGridCols();                                // 网格每排格数 (按列表宽度算)
 int XjsItemAtPoint(POINT pt);                     // 命中项目索引 (列表按行, 网格按格子)
 void XjsSetViewMode(int m);                       // 切视图模式 (锚点保持滚动位置)

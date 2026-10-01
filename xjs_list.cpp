@@ -33,6 +33,10 @@ static bool XjsSelForPaint(int idx) {
 
 bool XjsIsGridView() { return g_viewMode == VM_MEDIUM || g_viewMode == VM_LARGE; }
 
+/* 列表型视图 (紧凑/严密): 共用列表列集 + 单行版行绘制 + 横向滚动语义。
+   严密模式 = 紧凑的行距变体, 列结构完全一致, 一切"是否列表视图"的判定都走这里 */
+bool XjsIsListTypeView() { return g_viewMode == VM_LIST || g_viewMode == VM_DENSE; }
+
 /* 网格每排格数: 列表可用宽 / 格子宽 (正式版: availW = clientWidth-36, 向下取整, ≥1) */
 int XjsGridCols() {
     int itemW = XJS_GRID_ITEM_W[g_viewMode];
@@ -136,10 +140,11 @@ void XjsSetViewMode(int m) {
     XjsSearchWindow::Cur()->Invalidate();
 }
 
-/* Ctrl+滚轮: dir>0 向上滚=放大 (更大图标), dir<0 缩小, 两端停止不循环 */
+/* Ctrl+滚轮: dir>0 向上滚=放大, dir<0 缩小, 两端停止不循环。
+   枚举序即档序 (严密 → 紧凑 → 详情 → 中等 → 大, 视觉尺寸单调), ±1 直行 */
 void XjsCycleViewMode(int dir) {
     int m = (int)g_viewMode + dir;
-    if (m < VM_LIST || m > VM_LARGE) return;
+    if (m < VM_DENSE || m > VM_LARGE) return;
     XjsSetViewMode(m);
 }
 
@@ -217,7 +222,7 @@ void XjsGetColumnRects(float listWidth, bool listView, float* xs, float* ws) {
 int XjsHitTestColHandle(POINT pt) {
     /* bottom 用 >=: 网格模式 listHead 是 top==bottom 的零高矩形, == 时会漏进来按详情列集调宽 */
     if (pt.y < g_layout.listHead.top || pt.y >= g_layout.listHead.bottom) return -1;
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsVisCols V = XjsVis(listView);
     float xs[XjsColumnSet::MAX] = {0}, ws[XjsColumnSet::MAX] = {0};
     XjsGetColumnRects(g_layout.list.right, listView, xs, ws);
@@ -425,7 +430,7 @@ static float s_colMoveStartX = 0, s_colMoveStartY = 0, s_colMoveCurX = 0;
 
 /* 源样式 getDropIndex: 首个中点在鼠标右侧的列 → 插到它前面; 全过 = n (插到末尾)。可见列序 */
 static int XjsColDropIndex(float x) {
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsVisCols V = XjsVis(listView);
     float xs[XjsColumnSet::MAX] = {0}, ws[XjsColumnSet::MAX] = {0};
     XjsGetColumnRects(g_layout.list.right, listView, xs, ws);
@@ -550,8 +555,8 @@ static bool XjsVThumbGeom(float* thumbY, float* thumbH, double* maxScroll) {
 /* 横向滚动条 thumb 几何 (同上三处同源)。返回 false = 无横向溢出。
    smax 回带滚动范围 (拖拽换算用); 轨道矩形经 trackOut 回带给渲染 */
 static bool XjsHThumbGeom(float* thumbX, double* thumbW, double* smax, XjsRect* trackOut) {
-    XjsClampHScroll(g_viewMode == VM_LIST);
-    *smax = XjsColumnsContentWidth(g_viewMode == VM_LIST) - (double)g_layout.list.right;
+    XjsClampHScroll(XjsIsListTypeView());
+    *smax = XjsColumnsContentWidth(XjsIsListTypeView()) - (double)g_layout.list.right;
     if (*smax <= 0) return false;
     float trackL, trackW, trackY, trackH;
     XjsHTrackGeom(&trackL, &trackW, &trackY, &trackH);
@@ -575,7 +580,7 @@ static void XjsRenderListTail() {
             (g_dragScroll || g_sbHover == 1) ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
     }
     /* 横向滚动条 (列总宽超出视口时, 同源样式 htrack; 详情视图 XjsClampHScroll 恒归零不滚动, 不渲染死条) */
-    if (g_viewMode == VM_LIST) {
+    if (XjsIsListTypeView()) {
         float thumbX = 0;
         double thumbW = 0, smax = 0;
         XjsRect track;
@@ -803,7 +808,7 @@ void XjsColDrawAttrs(const XjsRect& cell, XjsRowData* rd, int idx, bool listView
 void XjsListRender() {
     XjsLayout& L = g_layout;
     if (XjsIsGridView()) { XjsRenderGrid(); XjsRenderListTail(); XjsRenameRender(); return; }
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsClampHScroll(listView);
     XjsVisCols V = XjsVis(listView);
     float xs[XjsColumnSet::MAX] = {0}, ws[XjsColumnSet::MAX] = {0};
@@ -899,6 +904,11 @@ void XjsListRender() {
        选中/悬停底、选中条、驱动器容量条与列内容保持一体 */
     float rowL = xs[0] - XSF(8);
     float rowR = (V.n > 0 ? xs[V.n - 1] + ws[V.n - 1] : xs[0]) + XSF(8);
+    /* 严密模式可见行仅 18px: 圆角/选中条内缩随行高收一档; 驱动器容量条塞不下不画
+       (容量读数在 评分/大小 列已有文本, 见 XjsColDrawRating/XjsColDrawSize) */
+    bool denseRow = (g_viewMode == VM_DENSE);
+    float rowRad = XSF(denseRow ? 5.0f : 9.0f);
+    float barIns = XSF(denseRow ? 4.0f : 7.0f);
     g_rt->PushAxisAlignedClip(L.list, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     int nullRows = 0;
     for (int idx = first; idx <= last; idx++) {
@@ -911,9 +921,9 @@ void XjsListRender() {
         if (sel) {
             g_brSelGrad->SetStartPoint(XjsPoint2F(row.left, y));
             g_brSelGrad->SetEndPoint(XjsPoint2F(row.right, y));
-            g_rt->FillRoundedRectangle(XjsRoundedRectF(row, XSF(9), XSF(9)), g_brSelGrad);
-            g_rt->DrawRoundedRectangle(XjsRoundedRectF(row, XSF(9), XSF(9)), g_br[XTH_ACCENT], 1.0f);
-            XjsRect bar = XjsRectF(row.left, y + XSF(7), row.left + XSF(3), y + rowH - XSF(2) - XSF(7));
+            g_rt->FillRoundedRectangle(XjsRoundedRectF(row, rowRad, rowRad), g_brSelGrad);
+            g_rt->DrawRoundedRectangle(XjsRoundedRectF(row, rowRad, rowRad), g_br[XTH_ACCENT], 1.0f);
+            XjsRect bar = XjsRectF(row.left, y + barIns, row.left + XSF(3), y + rowH - XSF(2) - barIns);
             g_brSelBar->SetStartPoint(XjsPoint2F(0, bar.top));
             g_brSelBar->SetEndPoint(XjsPoint2F(0, bar.bottom));
             g_rt->FillRoundedRectangle(XjsRoundedRectF(bar, XSF(1.5f), XSF(1.5f)), g_brSelBar);
@@ -921,7 +931,7 @@ void XjsListRender() {
             float ha = XjsListHoverAlpha(idx);
             if (ha > 0) {
                 XjsColor hc = g_skin.rowHover; hc.a *= ha;
-                g_rt->FillRoundedRectangle(XjsRoundedRectF(row, XSF(9), XSF(9)), XjsTempBrush(hc));
+                g_rt->FillRoundedRectangle(XjsRoundedRectF(row, rowRad, rowRad), XjsTempBrush(hc));
             }
         }
         if (!rd) { nullRows++; continue; }
@@ -931,12 +941,12 @@ void XjsListRender() {
             if (col->draw)
                 col->draw(XjsRectF(xs[vi], row.top, xs[vi] + ws[vi], row.bottom), rd, idx, listView);
         }
-        if (rd->isDrive && g_driveProgress) XjsDrawDriveBar(row, *rd, listView);
+        if (rd->isDrive && g_driveProgress && !denseRow) XjsDrawDriveBar(row, *rd, listView);
         /* 剪切灰显 (源样式 data-cut 半透明): 内容之上罩一层底色 */
         if (g_cutSet.count(idx)) {
             XjsColor dim = g_skin.bg1;
             dim.a *= 0.55f;
-            g_rt->FillRoundedRectangle(XjsRoundedRectF(row, XSF(9), XSF(9)), XjsTempBrush(dim));
+            g_rt->FillRoundedRectangle(XjsRoundedRectF(row, rowRad, rowRad), XjsTempBrush(dim));
         }
     }
     g_rt->PopAxisAlignedClip();
@@ -960,7 +970,7 @@ void XjsListRender() {
 /* ==================== 列显隐菜单 / 自适应列宽 ==================== */
 
 void XjsShowColumnMenu(POINT screenPt) {
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsColumnSet& S = XjsColSet(listView);
     int n = S.n;
     int visCount = 0;
@@ -979,7 +989,7 @@ void XjsShowColumnMenu(POINT screenPt) {
 }
 
 void XjsColumnToggle(int fullIdx) {
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsColumnSet& S = XjsColSet(listView);
     int n = S.n;
     if (fullIdx < 0 || fullIdx >= n) return;
@@ -1028,7 +1038,7 @@ static std::wstring XjsColTextOf(const char* field, XjsRowData* rd) {
 
 /* 双击列宽手柄: 按可视区内容最大宽自适应 (50~800, 源样式 dblclick 同款), 该列转固定列 */
 void XjsAutoFitColumn(int handleIdx) {
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsVisCols V = XjsVis(listView);
     if (handleIdx < 0 || handleIdx >= V.n || g_resultCount <= 0) return;
     XjsColSpec* col = V.c[handleIdx];
@@ -1076,7 +1086,7 @@ XjsRect XjsRenameEditRect() {
         return XjsRectF(x + XSF(6), y + XSF(10) + boxH + XSF(6), x + itemW - XSF(6), y + rowHd - XSF(4));
     }
     float xs[XjsColumnSet::MAX] = {0}, ws[XjsColumnSet::MAX] = {0};
-    bool listView = (g_viewMode == VM_LIST);
+    bool listView = XjsIsListTypeView();
     XjsGetColumnRects(g_layout.list.right, listView, xs, ws);
     /* 编辑框锚到名称列矩形; 名称列隐藏时锚到第一可见列 (改的仍是文件名) */
     XjsVisCols V = XjsVis(listView);
@@ -1184,7 +1194,7 @@ bool XjsListScrollMouseDown(POINT pt) {
        纵向轨道 (底 = list.bottom-6) 与横向轨道带 (顶 ≈ list.bottom-13, 含 ±2 容差) 在右端
        重叠 ~5px — 先判纵向会把横条右端上半误吞成"纵向翻页连发", 横滚到最右后拖不动 thumb。
        XjsHThumbGeom 对无横向溢出返回 false, 自然落回纵向 */
-    if (g_viewMode == VM_LIST) {
+    if (XjsIsListTypeView()) {
         float thumbX = 0;
         double thumbW = 0, smax = 0;
         XjsRect track;
@@ -1196,7 +1206,7 @@ bool XjsListScrollMouseDown(POINT pt) {
             } else {
                 s_trackDir = (double)pt.x < thumbX ? -1 : 1;
                 g_hScroll += s_trackDir * (double)g_layout.list.right;   /* 一屏宽 (与 smax 口径一致) */
-                XjsClampHScroll(g_viewMode == VM_LIST);
+                XjsClampHScroll(XjsIsListTypeView());
                 s_trackPt = pt;
                 SetTimer(g_hWnd, ID_TIMER_SBTRACK, 400, NULL);
                 XjsSearchWindow::Cur()->Invalidate();
@@ -1236,7 +1246,7 @@ bool XjsListScrollRegionHit(POINT pt) {
         double maxScroll = 0;
         if (XjsVThumbGeom(&thumbY, &thumbH, &maxScroll)) return true;
     }
-    if (g_viewMode == VM_LIST) {
+    if (XjsIsListTypeView()) {
         float thumbX = 0;
         double thumbW = 0, smax = 0;
         XjsRect track;
@@ -1274,7 +1284,7 @@ bool XjsListTrackTick() {
             return false;
         }
         g_hScroll += s_trackDir * (double)g_layout.list.right;
-        XjsClampHScroll(g_viewMode == VM_LIST);
+        XjsClampHScroll(XjsIsListTypeView());
         XjsSearchWindow::Cur()->Invalidate();
     } else {
         XjsTrackGestureEnd();
@@ -1298,7 +1308,7 @@ bool XjsListMouseDown(POINT pt, WPARAM flags) {
     }
     /* 表头: 记录待定列拖动 (源样式: 拖过 6px 阈值=换位, 松开没拖=单击排序) */
     if (!XjsIsGridView() && pt.y < g_layout.listHead.bottom) {
-        bool listView = (g_viewMode == VM_LIST);
+        bool listView = XjsIsListTypeView();
         XjsVisCols V = XjsVis(listView);
         float xs[XjsColumnSet::MAX] = {0}, ws[XjsColumnSet::MAX] = {0};
         XjsGetColumnRects(g_layout.list.right, listView, xs, ws);
@@ -1434,7 +1444,7 @@ bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样�
             pt.x >= g_layout.vtrack.right - XSF(8) && pt.x <= g_layout.vtrack.right &&
             pt.y >= thY && pt.y <= thY + thH)
             hb = 1;
-        if (!hb && g_viewMode == VM_LIST) {
+        if (!hb && XjsIsListTypeView()) {
             float thumbX = 0;
             double thumbW = 0, smax = 0;
             XjsRect track;
@@ -1455,7 +1465,7 @@ bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样�
             double trackW = track.right - track.left;
             if (trackW - thumbW > 0) {
                 g_hScroll = ((double)pt.x - g_hScrollGrab - track.left) / (trackW - thumbW) * smax;
-                XjsClampHScroll(g_viewMode == VM_LIST);
+                XjsClampHScroll(XjsIsListTypeView());
                 XjsSearchWindow::Cur()->Invalidate();
             }
         }
@@ -1477,7 +1487,7 @@ bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样�
     }
     /* 列宽拖动 (边界改边界左侧那一列, 下标=可见列序; min 50, 拖过即接管为固定列) */
     if (g_dragCol) {
-        bool listView = (g_viewMode == VM_LIST);
+        bool listView = XjsIsListTypeView();
         XjsVisCols V = XjsVis(listView);
         /* 拖动边界改边界左侧那一列 (同源样式 resize 手柄属于左列, min 50, 拖过即接管为固定列)。
            列宽存逻辑px (XjsAutoFitColumn 同口径): 物理位移除回缩放, 否则高 DPI/缩放下手柄漂离光标;
@@ -1581,7 +1591,7 @@ bool XjsListMouseUp(POINT pt) {
     }
     /* 列拖动收尾: 拖动了=重排列(列宽/顺序/排序列随行), 没拖动=单击排序 (源样式同款) */
     if (s_colMovePending) {
-        bool listView = (g_viewMode == VM_LIST);
+        bool listView = XjsIsListTypeView();
         XjsColumnSet& S = XjsColSet(listView);
         if (s_colDragging) {
             if (s_colMoveFrom != s_colDropTo && s_colDropTo >= 0 && s_colDropTo <= XjsVis(listView).n) {

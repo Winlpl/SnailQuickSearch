@@ -541,6 +541,7 @@ void XjsOnPopupResult(int id) {
             case 51: XjsSettingsShowDonate(); break;   /* 捐赠 = 开设置直达捐赠页 (原"退出"项已挪走, 退出在托盘菜单) */
             case 46: XjsSearchWindow::OpenNew(); break;   /* 创建新窗口 (独立搜索结果对象) */
             case 41: XjsSetViewMode(VM_LIST); break;
+            case 47: XjsSetViewMode(VM_DENSE); break;   /* 严密模式 (行槽 20px, 行间只留 2px 缝) */
             case 42: XjsSetViewMode(VM_DETAILS); break;
             case 43: XjsSetViewMode(VM_MEDIUM); break;
             case 44: XjsSetViewMode(VM_LARGE); break;
@@ -1271,7 +1272,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if ((GetKeyState(VK_SHIFT) & 0x8000) && pt.y >= g_layout.list.top && pt.y < g_layout.list.bottom) {
                 /* Shift+滚轮 = 横向滚动 (列溢出时) */
                 g_hScroll -= (double)delta * XSF(3);
-                XjsClampHScroll(g_viewMode == VM_LIST);
+                XjsClampHScroll(XjsIsListTypeView());
                 w->Invalidate();
                 return 0;
             }
@@ -1288,7 +1289,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             /* 横向滚轮: 列总宽超出视口时横向滚动 */
             double delta = (double)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * XSF(60);
             g_hScroll -= delta;
-            XjsClampHScroll(g_viewMode == VM_LIST);
+            XjsClampHScroll(XjsIsListTypeView());
             w->Invalidate();
             return 0;
         }

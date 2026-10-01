@@ -1795,11 +1795,11 @@ void XjsHostedPickSource(int srcIdx) {
     }
 }
 
-/* 视图名 ↔ 枚举: 档序/文字单一来源 (配置里 list/details/medium/large 是持久化口径,
+/* 视图名 ↔ 枚举: 档序/文字单一来源 (配置里 list/dense/details/medium/large 是持久化口径,
    与 XjsViewMode 序一一对应; 曾载入两处各写一套 if 链 + 保存处另有一张表, 三处漂移) */
-static const wchar_t* VIEW_NAMES[4] = { L"list", L"details", L"medium", L"large" };
+static const wchar_t* VIEW_NAMES[5] = { L"dense", L"list", L"details", L"medium", L"large" };
 static int XjsViewIndexFromName(const std::wstring& s) {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         if (s == VIEW_NAMES[i]) return i;
     return VM_LIST;   /* 未知名回落列表视图 (原口径) */
 }

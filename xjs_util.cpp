@@ -278,10 +278,13 @@ static bool XjsOpenViaUserToken(const std::wstring& path) {
         }
         CloseHandle(ptok);
     }
-    /* 文件关联 open 命令展开 (照 shell 口径): %1/%L/%V → 目标路径。模板已带引号时整组
-       `"%1"` 替换防双引号 —— exefile 模板是 "%1" %*, 曾把 %1 换成带引号路径得到
-       ""path"" %*, CreateProcessWithTokenW 报 87 拒收 → 两级通道全灭 → 回落直开继承了
-       管理员 (exe 打开必现, txt 因模板是裸 %1 幸免; 2026-09-16 实锤)。
+    /* 文件关联 open 命令展开 (照 shell 口径): %1/%L/%V → 目标路径。
+       引号 = 照 Explorer 的"必要才引": 路径含空白才加引号, 否则原样替换 — 参数怎么被
+       目标程序解析是它自己的事, 恒加引号会把引号并进参数本体 (Chromium 系模板
+       `--single-argument %1` 的参数取原始余串不解析引号, 表象=浏览器地址栏 "d:/路径",
+       2026-10-01 实锤); 含空白路径必须加引号 (裸 %1 模板如 txtfile 不然拆成多参数)。
+       模板已带引号 (`"%1"`) 且需加引号时整组替换防双引号 —— exefile 模板 "%1" %*,
+       曾恒加引号得到 ""path"" %*, CreateProcessWithTokenW 报 87 拒收 (2026-09-16 实锤)。
        %* (附加参数) 展开为空 (单文件打开无附加参数); 模板无路径参数 = 视同无关联 */
     std::wstring cmd;
     wchar_t abuf[1024] = {};
@@ -289,16 +292,22 @@ static bool XjsOpenViaUserToken(const std::wstring& path) {
     bool substituted = false;
     if (SUCCEEDED(AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_COMMAND, path.c_str(), L"open", abuf, &alen))) {
         std::wstring tpl = abuf;
+        bool needQuote = path.find_first_of(L" \t") != std::wstring::npos;
         std::wstring quoted = L"\"" + path + L"\"";
         for (size_t i = 0; i < tpl.size(); ) {
             if (tpl[i] == L'%' && i + 1 < tpl.size()) {
                 wchar_t c = tpl[i + 1];
                 if (c == L'1' || c == L'L' || c == L'V') {           /* 路径类参数 */
-                    bool wrapped = !cmd.empty() && cmd.back() == L'"'
-                                   && i + 2 < tpl.size() && tpl[i + 2] == L'"';
-                    if (wrapped) { cmd.pop_back(); i += 3; }         /* 模板引号并入整组替换 */
-                    else i += 2;
-                    cmd += quoted;
+                    if (needQuote) {
+                        bool wrapped = !cmd.empty() && cmd.back() == L'"'
+                                       && i + 2 < tpl.size() && tpl[i + 2] == L'"';
+                        if (wrapped) { cmd.pop_back(); i += 3; }     /* 模板引号并入整组替换 */
+                        else i += 2;
+                        cmd += quoted;
+                    } else {
+                        i += 2;
+                        cmd += path;
+                    }
                     substituted = true;
                     continue;
                 }

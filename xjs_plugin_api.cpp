@@ -86,14 +86,15 @@ void XjsPluginApiPruneOwners() {
 
 /* ==================== 名称↔值映射 (视图 / 关键词模式, 与配置文件取值同串) ==================== */
 
-static const char* const XJS_VIEW_NAMES[4] = { "list", "details", "medium", "large" };
+static const char* const XJS_VIEW_NAMES[5] = { "dense", "list", "details", "medium", "large" };
 static const wchar_t* const XJS_MODE_NAMES[5] = { L"wildcard", L"regex", L"sql", L"lua", L"lua-exec" };
 
 static std::string ViewNameUtf8(int vm) {
-    return (vm >= 0 && vm < 4) ? XJS_VIEW_NAMES[vm] : XJS_VIEW_NAMES[0];
+    /* 越界回落 "list" 钉死下标 (默认档是紧凑; 0 号是 dense, 别拿 0 号当回落) */
+    return (vm >= 0 && vm < 5) ? XJS_VIEW_NAMES[vm] : "list";
 }
 static int ViewIndexFromUtf8(const std::wstring& s) {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         if (s == Utf8ToUtf16(XJS_VIEW_NAMES[i])) return i;
     return -1;
 }
