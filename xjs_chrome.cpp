@@ -115,6 +115,7 @@ static void XjsSearchAfterEdit() {
             return;
         }
         XjsSearchNow(false);
+        XjsHistArmPending();   /* 编辑驱动的搜索进历史落账制 (打字中间态被后续编辑不断重置, 停下且搜完才记) */
     }
 }
 
@@ -131,6 +132,7 @@ void XjsSearchFocus(bool on) {
     if (!on) {   /* 真失焦 = 其它输入框接管键盘路由: 清选区/拖拽/系统光标。**不再熄闪烁光标** —
                     编辑与焦点分离后光标跟随"编辑权", 接管期的隐藏由渲染处判定 (重命名/模式对话框);
                     熄灯曾在此处理, 会把"接管结束后光标不回来"埋成暗坑 (2026-09-16 口径修订) */
+        XjsHistYieldFlush();   /* 编辑权离开搜索框 (重命名/别名/模态接管): 待记词立即落账 */
         g_searchFocused = false;
         s_searchEd.anchor = -1;
         s_searchEd.dragging = false;
@@ -154,6 +156,7 @@ void XjsSearchFocus(bool on) {
  * 点列表/↓/回车跳列表/Tab/弹下拉菜单 都只是"键给列表", 打字/退格/←→ 仍无缝编辑搜索框 */
 void XjsSearchYieldKeys() {
     if (!g_searchFocused) return;
+    XjsHistYieldFlush();   /* 焦点交列表 = 本次输入结束: 待记词立即落账 (点列表/↓/回车跳列表/弹菜单 汇聚点) */
     g_searchFocused = false;
     s_searchEd.anchor = -1;
     s_searchEd.dragging = false;
@@ -1164,22 +1167,28 @@ void XjsShowAppMenu() {
     XjsShowPopupMenu(g_hWnd, anchor, items, XSF(260));
 }
 
+static const wchar_t* XjsMdlgTypeName(int type);
+
 void XjsShowHistoryPanel() {
     std::vector<XjsPopupItem> items;
-    int n = (int)g_history.size() < 14 ? (int)g_history.size() : 14;
+    /* 历史按搜索模式分档: 面板只显示当前模式的历史 (切模式后面板内容随之变), 头部标注当前模式名 */
+    const auto& h = g_history[g_mode];
+    items.push_back({ 0, XjsMdlgTypeName(g_mode), L"", false, false, true, false });
+    int n = (int)h.size() < 14 ? (int)h.size() : 14;
     if (n == 0) {
         items.push_back({ 0, XjsT(L"菜单.暂无搜索历史"), L"", false, false, true, false });
     } else {
         for (int i = 0; i < n; i++) {
             XjsPopupItem it;
             it.id = IDM_HISTORY_BASE + i;
-            it.title = g_history[i];
+            it.title = h[i];
             it.rclickCopy = true;   /* 右键 = 复制该条查询语句 (不执行搜索); 左键照旧置入并搜索 */
             items.push_back(it);
         }
     }
     items.push_back({ 0, L"", L"", false, true });
-    items.push_back({ IDM_HISTORY_BASE + 999, XjsT(L"菜单.清空搜索历史"), L"", false, false });
+    items.push_back({ IDM_HISTORY_BASE + 999, XjsT(L"菜单.清空当前模式历史"), L"", false, false });
+    items.push_back({ IDM_HISTORY_BASE + 998, XjsT(L"菜单.清空全部历史"), L"", false, false });
     POINT anchor = { (LONG)g_layout.historyBtn.left, (LONG)g_layout.historyBtn.bottom };
     ClientToScreen(g_hWnd, &anchor);
     XjsShowPopupMenu(g_hWnd, anchor, items, XSF(340));

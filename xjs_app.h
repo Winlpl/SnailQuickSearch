@@ -79,6 +79,7 @@
 #define ID_TIMER_SETLIVE    10  /* 设置窗 内存/性能分析页 实时数据 1s 刷新 (仅这两分类重建行模型, 其余分类空转) */
 #define ID_TIMER_SBTRACK    11  /* 滚动条轨道按住连发翻页 (首延 400ms, 之后 150ms/步; thumb 到指针即停) */
 #define ID_TIMER_MEDIA      12  /* 媒体预览泵 40ms (装载期/播放期帧搬运/音量浮标; 无媒体活动即摘) */
+#define ID_TIMER_HISTCOMMIT 13  /* 搜索历史落账 2s 防抖 (每次编辑驱动/提交型搜索重置; 到点且搜索完成才落账) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
@@ -803,7 +804,7 @@ struct XjsPreviewHits {
 /* 搜索模式 (keywordType 强制指定; AUTO 已移除) — 每窗可各自选择。
    LUA=脚本过滤 (每文件求布尔谓词, XJS_KEYWORD_LUA); LUA_EXEC=执行 (脚本即程序,
    自主遍历/排序, return ID 数组=结果, XJS_KEYWORD_LUA_EXEC; 不进多重搜索链) */
-enum XjsSearchMode { XMODE_WILDCARD = 0, XMODE_REGEX = 1, XMODE_SQL = 2, XMODE_LUA = 3, XMODE_LUA_EXEC = 4 };
+enum XjsSearchMode { XMODE_WILDCARD = 0, XMODE_REGEX = 1, XMODE_SQL = 2, XMODE_LUA = 3, XMODE_LUA_EXEC = 4, XMODE_COUNT = 5 };
 
 /* 用户自定义搜索模式 (源样式 11-search-modes.js: "添加搜索模式"弹窗创建, 上限 100)
  * 存储: 共享 = 顶层 "共享搜索模式"; 私有 = 各窗口条目的 "私有搜索模式" (存储位置即作用域)。
@@ -942,7 +943,7 @@ struct XjsUiProfile {
     bool openAsync = true;                /* 打开文件: 异步线程执行 (防卡主线程), 默认开 */
     bool openHideWindow = false;          /* 打开文件后隐藏窗口到托盘, 默认关 */
     XjsMatchSettings match;               /* 搜索匹配 ×8 (搜索设置) */
-    std::vector<std::wstring> history;    /* 搜索历史 (每窗, 条目"搜索历史"; 曾为进程共享) */
+    std::vector<std::wstring> history[XMODE_COUNT];   /* 搜索历史 (每窗, 条目"搜索历史"; 按搜索模式分档, 下标=XjsSearchMode; 旧版单列表已迁入"通配符"档) */
     bool driveProgress = true;            /* 绘制驱动器占用进度条 (列表框) */
     bool rowHover = true;                 /* 高亮鼠标经过行 (列表框) */
     bool rowHoverFade = true;             /* 鼠标经过残影 (列表框; 依赖 rowHover) */
@@ -1013,7 +1014,9 @@ public:
     bool openAsync = true;
     bool openHideWindow = false;
     XjsMatchSettings match;      /* 搜索匹配 ×8 (每窗, 随 uiWindows 档案持久化) */
-    std::vector<std::wstring> history;   /* 搜索历史 (每窗; 曾为进程共享 g_history) */
+    std::vector<std::wstring> history[XMODE_COUNT];   /* 搜索历史 (每窗; 按搜索模式分档, 下标=XjsSearchMode) */
+    std::wstring histPending;            /* 待落账搜索词 (历史落账制: 停止输入/焦点交列表 且搜索成功完成才进 history) */
+    int histPendingMode = 0;             /* 待记词所属搜索模式 (arm 时快照 g_mode, 防落账前切档记错档) */
     /* 会话导航栈 (Alt+←/→ / 鼠标侧键, 每窗会话; 曾为进程共享 static → 多窗串味) */
     std::vector<std::wstring> navStack;
     int navPos = -1;
@@ -1640,7 +1643,10 @@ XjsRowData* XjsEnsureRowData(int idx);
 XjsRowData* XjsEnsureRowData(int idx, int fileId);   /* 指定文件ID版 (防抖绘制: 搜索中ID取自快照) */
 XjsBitmap* XjsGetRowIcon(int idx, int fileId, int iconPx, const char* askTag = "row");  // 返回位图归调用方所有, 用完 Release; askTag 透传 GetFileIco callbackInfo (ICON_ASK 闸门区分 列表行/预览卡)。排队期画临时默认图标但**不进缓存** (真图标就绪后须能取而代之)
 void XjsSaveHistory();
-void XjsAddHistory(const std::wstring& text);
+void XjsAddHistory(const std::wstring& text, int mode);   /* 记入指定搜索模式档 (去重置顶 + 落盘) */
+void XjsHistArmPending();      /* 搜索历史落账制: 置待记词 + 重置 2s 落账定时器 (编辑驱动/提交型搜索收口调用) */
+void XjsHistYieldFlush();      /* 焦点让渡到列表/其它接管: 本次输入结束, 待记词立即落账 (在途则缩短等待) */
+bool XjsHistCommitTick();      /* WM_TIMER(ID_TIMER_HISTCOMMIT): 假=已落账/放弃, 调用方应 KillTimer */
 /* ==================== 配置文件 (xjs_config.json) ====================
  * 配置存取的门面 = XjsConfig 类 + XjsLoadConfig/XjsSaveConfig, 全部收在 xjs_engine.cpp
  * (picojson 是它的实现细节, 不进本头文件; 换 JSON 模块 = 只改 xjs_engine.cpp)。

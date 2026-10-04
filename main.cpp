@@ -455,18 +455,22 @@ void XjsOnPopupResult(int id) {
         }
     } else if (id >= IDM_HOSTED_SRC_BASE && id < IDM_HOSTED_SRC_BASE + 100) {
         XjsHostedPickSource(id - IDM_HOSTED_SRC_BASE);   /* 来源切换菜单: 换当前来源并重搜整链 */
-    } else if ((id & ~XJS_POPUP_COPY) >= IDM_HISTORY_BASE && (id & ~XJS_POPUP_COPY) < IDM_HISTORY_BASE + 999) {
+    } else if ((id & ~XJS_POPUP_COPY) >= IDM_HISTORY_BASE && (id & ~XJS_POPUP_COPY) < IDM_HISTORY_BASE + 998) {
         int i = (id & ~XJS_POPUP_COPY) - IDM_HISTORY_BASE;
+        auto& h = g_history[g_mode];   /* 历史按模式分档: 面板条目即当前模式档 */
         if (id & XJS_POPUP_COPY) {   /* 右键历史项 = 复制该条查询语句, 不执行搜索 (带标志 id 判范围先剥标志, 同 CMODE 口径) */
-            if (i < (int)g_history.size()) {
-                XjsCopyClipboard(g_history[i]);
+            if (i < (int)h.size()) {
+                XjsCopyClipboard(h[i]);
                 XjsToastShow(g_hWnd, XjsT(L"状态栏.已复制"), XTOAST_SUCCESS, XSF(1));
             }
-        } else if (i < (int)g_history.size()) {
-            XjsSearchSetText(g_history[i]);   /* 置入即触发搜索 */
+        } else if (i < (int)h.size()) {
+            XjsSearchSetText(h[i]);   /* 置入即触发搜索 */
         }
     } else if (id == IDM_HISTORY_BASE + 999) {
-        g_history.clear();
+        g_history[g_mode].clear();   /* 只清当前模式档 (面板所见即所清) */
+        XjsSaveHistory();
+    } else if (id == IDM_HISTORY_BASE + 998) {
+        for (auto& h : g_history) h.clear();   /* 全部模式档清空 */
         XjsSaveHistory();
     } else if (id >= IDM_FILTER_BASE && id < IDM_FILTER_BASE + 1000) {
         XjsApplyFilter(id - IDM_FILTER_BASE);
@@ -1421,6 +1425,9 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else if (wParam == ID_TIMER_SBTRACK) {
                 if (!XjsListTrackTick()) KillTimer(hwnd, ID_TIMER_SBTRACK);   /* 滚动条轨道按住连发翻页 */
                 return 0;
+            } else if (wParam == ID_TIMER_HISTCOMMIT) {
+                if (!XjsHistCommitTick()) KillTimer(hwnd, ID_TIMER_HISTCOMMIT);   /* 假=已落账/放弃 (真=Tick 内已续挂) */
+                return 0;
             } else if (wParam == ID_TIMER_MEDIA) {
                 w->MediaTick();   /* 媒体预览泵: 状态推进/帧搬运 (无活动自摘表) */
                 return 0;
@@ -1630,6 +1637,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd, ID_TIMER_SYNCWATCH);
             KillTimer(hwnd, ID_TIMER_HOVERFADE);
             KillTimer(hwnd, ID_TIMER_MEDIA);   /* 媒体预览泵 (引擎随窗析构释放) */
+            KillTimer(hwnd, ID_TIMER_HISTCOMMIT);   /* 历史落账防抖 (关窗丢弃 2s 窗口期内未落账的词) */
             /* 组件统一退登记: 输入字段登记 (路由层命中/聚焦表) + 光标闪烁驱动器 + Toast 条目/画刷。
                必须在 XjsDeviceDiscardCtx 之前 (Toast 画刷需随其所属 RT 一起释放) */
             XjsWindowComponentsDetach(hwnd);

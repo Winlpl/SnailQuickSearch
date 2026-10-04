@@ -300,7 +300,7 @@ void XjsSearchNow(bool commitHistory) {
            快速完成则计时器被杀, 状态栏直接从旧文字切到结果文字) */
         if (g_hWnd) SetTimer(g_hWnd, ID_TIMER_SEARCHSTATUS, 200, NULL);
         if (commitHistory && !text.empty()) {
-            XjsAddHistory(text);
+            XjsHistArmPending();   /* 历史落账制: 提交型只置待记词, 词成功完成后才进 history (见 XjsHistArmPending) */
             /* 会话导航栈: 提交型搜索入栈, 截掉前进分支 (源样式 07-search.js 同语义) */
             if (!g_navJumping) {
                 if (g_navPos >= 0 && g_navPos + 1 < (int)g_navStack.size()) g_navStack.resize(g_navPos + 1);
@@ -593,7 +593,9 @@ static const char* const K_SORTFIELD = "排序字段";         /* 默认排序 (
 static const char* const K_SORTWAY = "排序方向";           /* true=升序 */
 static const char* const K_MODES_SHARED = "共享搜索模式";   /* 顶层: 全部窗口生效 */
 static const char* const K_MODES_PRIVATE = "私有搜索模式";  /* 窗口条目内: 仅本窗生效 (存储位置即作用域) */
-static const char* const K_HISTORY = "搜索历史";            /* 窗口条目内: 每窗搜索历史 */
+static const char* const K_HISTORY = "搜索历史";            /* 窗口条目内: 每窗搜索历史 (对象 {模式名:[词条]}, 旧版数组迁入"通配符"档) */
+/* 搜索历史分档键 (配置中文主键, 下标=XjsSearchMode; 历史面板/落账/存取共用, 显示名可用但配这份) */
+static const wchar_t* const K_HIST_MODES[XMODE_COUNT] = { L"通配符", L"正则", L"SQL", L"Lua 过滤", L"Lua 执行" };
 static const char* const K_SEARCHMODE = "搜索模式";          /* 窗口条目内: 关键词模式 (wildcard/regex/sql/lua);
                                                               曾顶层共享, 已每窗化 (顶层旧键迁移后废弃) */
 static const char* const K_ZOOM = "页面缩放";               /* 曾顶层共享, 已每窗化 (条目内; 顶层旧键迁移后废弃) */
@@ -1230,13 +1232,56 @@ void XjsSaveHistory() {
     XjsSaveConfig();
 }
 
-void XjsAddHistory(const std::wstring& text) {
-    if (text.empty()) return;
-    auto it = std::find(g_history.begin(), g_history.end(), text);
-    if (it != g_history.end()) g_history.erase(it);
-    g_history.insert(g_history.begin(), text);
-    if (g_history.size() > MAX_SEARCH_HISTORY) g_history.resize(MAX_SEARCH_HISTORY);
+void XjsAddHistory(const std::wstring& text, int mode) {
+    if (text.empty() || mode < 0 || mode >= XMODE_COUNT) return;
+    auto& h = g_history[mode];
+    auto it = std::find(h.begin(), h.end(), text);
+    if (it != h.end()) h.erase(it);
+    h.insert(h.begin(), text);
+    if (h.size() > MAX_SEARCH_HISTORY) h.resize(MAX_SEARCH_HISTORY);
     XjsSaveHistory();
+}
+
+/* ==================== 搜索历史落账制 (2026-10-01) ====================
+ * 旧口径"只有搜索框回车才记"反直觉 (输入即搜出结果后直接点文件 = 最常用流, 却不记录),
+ * 且 SQL/Lua 语法失败的词照记。新口径: 记录发生在"本次输入结束且该词搜索成功完成后" —
+ * "输入结束"两个信号: ①停止输入 2s (定时器到点) ②焦点让渡到列表/其它接管 (立即落账)。
+ * 编辑驱动 (输入即搜/粘贴/IME) 与提交型 (回车) 的搜索都经 XjsHistArmPending 置待记词并重置
+ * 定时器; 打字过程的中间态词被每次编辑不断重置, 永远到不了落账点。程序自动恢复的词
+ * (启动首搜/创建套用/F5/切模式重搜) 不置待记词, 不入库。模式在 arm 时快照 (防落账前切档记错档)。 */
+void XjsHistArmPending() {
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->hWnd) return;
+    const std::wstring& text = XjsSearchGetText();
+    if (text.empty()) { w->histPending.clear(); return; }   /* 清空搜索: 连带放弃未落账的旧词 */
+    w->histPending = text;
+    w->histPendingMode = g_mode;
+    SetTimer(w->hWnd, ID_TIMER_HISTCOMMIT, 2000, NULL);
+}
+
+void XjsHistYieldFlush() {   /* 焦点让渡 (回车/↓跳列表、鼠标点列表、重命名/别名/模态接管) = 输入结束 */
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->hWnd || w->histPending.empty()) return;
+    if (g_searching.load()) {   /* 还在途: 缩短轮询间隔, 完成即落 (XjsHistCommitTick 同一条落账链) */
+        SetTimer(w->hWnd, ID_TIMER_HISTCOMMIT, 300, NULL);
+        return;
+    }
+    if (w->histPending == XjsSearchGetText() && w->errText.empty())
+        XjsAddHistory(w->histPending, w->histPendingMode);
+    w->histPending.clear();
+    KillTimer(w->hWnd, ID_TIMER_HISTCOMMIT);
+}
+
+bool XjsHistCommitTick() {   /* WM_TIMER: 真=继续挂 (搜索在途续等), 假=调用方 KillTimer */
+    XjsSearchWindow* w = XjsSearchWindow::Cur();
+    if (!w || !w->hWnd) return false;
+    if (g_searching.load()) { SetTimer(w->hWnd, ID_TIMER_HISTCOMMIT, 1000, NULL); return true; }
+    KillTimer(w->hWnd, ID_TIMER_HISTCOMMIT);
+    /* 词中途没变 (防: 待记词 A 在途时用户已改成 B) 且本次没有失败 (SQL/Lua 语法错 = errText 非空) 才落账 */
+    if (!w->histPending.empty() && w->histPending == XjsSearchGetText() && w->errText.empty())
+        XjsAddHistory(w->histPending, w->histPendingMode);
+    w->histPending.clear();
+    return false;
 }
 
 /* ==================== XjsColumnSet: 列 JSON 存取 (配置持久化, 键名同源样式 columns.*) ====================
@@ -1326,7 +1371,7 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.hotkeyMod = w->hotkeyMod;
     p.hotkeyVk = w->hotkeyVk;
     p.match = w->match;
-    p.history = w->history;   /* 搜索历史 (每窗) */
+    for (int m = 0; m < XMODE_COUNT; m++) p.history[m] = w->history[m];   /* 搜索历史 (每窗, 按模式分档) */
     p.driveProgress = w->driveProgress;
     p.rowHover = w->rowHover;
     p.rowHoverFade = w->rowHoverFade;
@@ -1979,12 +2024,25 @@ void XjsLoadConfig() {
                 if (auto dit = co.find(K_COL_DETVIEW); dit != co.end() && dit->second.is<picojson::object>())
                     XjsColsApplyJson(p.colsDetails, dit->second.get<picojson::object>(), K_COL_ORDER, K_COL_W, K_COL_FLEX, K_COL_V);
             }
-            /* 搜索历史 (每窗) */
-            if (auto hhit = o.find(K_HISTORY); hhit != o.end() && hhit->second.is<picojson::array>()) {
-                for (auto& he : hhit->second.get<picojson::array>()) {
-                    if (!he.is<std::string>()) continue;
-                    std::wstring s = Utf8ToUtf16(he.get<std::string>().c_str());
-                    if (!s.empty()) p.history.push_back(s);
+            /* 搜索历史 (每窗, 按搜索模式分档 {"通配符":[..],...}); 旧版单列表 (数组) 整体迁入"通配符"档 */
+            if (auto hhit = o.find(K_HISTORY); hhit != o.end()) {
+                if (hhit->second.is<picojson::object>()) {
+                    picojson::object& ho = hhit->second.get<picojson::object>();
+                    for (int m = 0; m < XMODE_COUNT; m++) {
+                        auto mit = ho.find(Utf16ToUtf8(K_HIST_MODES[m]));
+                        if (mit == ho.end() || !mit->second.is<picojson::array>()) continue;
+                        for (auto& he : mit->second.get<picojson::array>()) {
+                            if (!he.is<std::string>()) continue;
+                            std::wstring s = Utf8ToUtf16(he.get<std::string>().c_str());
+                            if (!s.empty()) p.history[m].push_back(s);
+                        }
+                    }
+                } else if (hhit->second.is<picojson::array>()) {
+                    for (auto& he : hhit->second.get<picojson::array>()) {
+                        if (!he.is<std::string>()) continue;
+                        std::wstring s = Utf8ToUtf16(he.get<std::string>().c_str());
+                        if (!s.empty()) p.history[XMODE_WILDCARD].push_back(s);
+                    }
                 }
             }
             XjsUiProfilesPush(p);
@@ -2025,7 +2083,7 @@ void XjsLoadConfig() {
         g_driveProgress = p0->driveProgress;
         g_rowHover = p0->rowHover;
         g_rowHoverFade = p0->rowHoverFade;
-        g_history = p0->history;               /* 搜索历史 (每窗; 曾为顶层 "history" 进程共享) */
+        for (int m = 0; m < XMODE_COUNT; m++) g_history[m] = p0->history[m];   /* 搜索历史 (每窗; 曾为顶层 "history" 进程共享) */
         /* 热键注册事实源是窗口字段 (XjsHotkeyRegisterSlot 窗口字段优先, 档案只是未开窗槽位兜底):
            启动载入把槽 0 档案热键同步进主窗字段 — 只同步显式录制过的值, 不再造默认 */
         XjsSearchWindow::Cur()->hotkeyMod = p0->hotkeyMod;
@@ -2195,11 +2253,16 @@ void XjsSaveConfig() {
             }
             o[K_MODES_PRIVATE] = picojson::value(pm);
         }
-        /* 搜索历史 (每窗) */
+        /* 搜索历史 (每窗, 按搜索模式分档对象; 空档不写键, 旧版读侧不再支持数组) */
         {
-            picojson::array harr;
-            for (auto& s : p->history) harr.push_back(picojson::value(Utf16ToUtf8(s.c_str())));
-            o[K_HISTORY] = picojson::value(harr);
+            picojson::object ho;
+            for (int m = 0; m < XMODE_COUNT; m++) {
+                if (p->history[m].empty()) continue;
+                picojson::array harr;
+                for (auto& s : p->history[m]) harr.push_back(picojson::value(Utf16ToUtf8(s.c_str())));
+                ho[Utf16ToUtf8(K_HIST_MODES[m])] = picojson::value(harr);
+            }
+            o[K_HISTORY] = picojson::value(ho);
         }
         uiarr.push_back(picojson::value(o));
     }

@@ -235,7 +235,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         hotkeyMod = p->hotkeyMod;
         hotkeyVk = p->hotkeyVk;
         match = p->match;
-        history = p->history;   /* 搜索历史 (每窗) */
+        for (int m = 0; m < XMODE_COUNT; m++) history[m] = p->history[m];   /* 搜索历史 (每窗, 按模式分档) */
         driveProgress = p->driveProgress;
         rowHover = p->rowHover;
         rowHoverFade = p->rowHoverFade;
@@ -271,7 +271,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         openHideWindow = m->openHideWindow;
         match = m->match;
         mode = m->mode;    /* 搜索模式 (每窗): 无档案新窗跟随主窗, 之后各自独立 */
-        history.clear();   /* 跟随主窗不含历史: 新窗搜索历史从空开始 */
+        for (auto& h : history) h.clear();   /* 跟随主窗不含历史: 新窗搜索历史从空开始 */
         driveProgress = m->driveProgress;
         rowHover = m->rowHover;
         rowHoverFade = m->rowHoverFade;

@@ -47,6 +47,8 @@
  "菜单.捐赠": "Donate",
  "菜单.暂无搜索历史": "No search history",
  "菜单.清空搜索历史": "Clear Search History",
+ "菜单.清空当前模式历史": "Clear History for This Mode",
+ "菜单.清空全部历史": "Clear All History",
  "右键菜单.打开": "Open",
  "右键菜单.打开路径": "Open Path",
  "右键菜单.重命名": "Rename",

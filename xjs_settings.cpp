@@ -2458,7 +2458,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             break;
         }
         case ACT_CLEARHIST:
-            g_history.clear();
+            for (auto& h : g_history) h.clear();   /* 全部模式档清空 */
             XjsSaveHistory();
             XjsToastShow(s_set.hwnd, XjsT(L"提示.历史已清空"), XTOAST_SUCCESS, SS(1));
             break;
