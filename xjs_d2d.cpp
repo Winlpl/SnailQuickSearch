@@ -815,8 +815,22 @@ static void ApiBitmapFromMemory(XjsRt* rt, UINT w, UINT h, UINT stride, const BY
     *out = new XjsBitmap(nb);
 }
 static void ApiDrawBmp(XjsRt* rt, XjsBitmap* bm, const XjsRect& r, float opacity, int interp, const XjsRect* src) {
+    /* interp 语义见 xjs_app.h DrawBitmap (0=最近邻 1=线性 2=高质量)。RT 级 DrawBitmap 只认
+       0/1, 高质量借设备上下文视角 (XjsDeviceCreate 同款 QI, Win8.1+ 必成; 失败退线性) 走
+       HQ Cubic ≈Lanczos — 与 GDI+ 端 HighQualityBicubic 观感对齐 */
+    if (interp >= 2) {
+        ID2D1DeviceContext* dc = NULL;
+        if (SUCCEEDED(D2(rt)->QueryInterface(__uuidof(ID2D1DeviceContext), (void**)&dc)) && dc) {
+            dc->DrawBitmap(D2(bm), *(const D2D1_RECT_F*)&r, opacity,
+                           D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, (const D2D1_RECT_F*)src);
+            dc->Release();
+            return;
+        }
+    }
     D2(rt)->DrawBitmap(D2(bm), *(const D2D1_RECT_F*)&r, opacity,
-                       (D2D1_BITMAP_INTERPOLATION_MODE)interp, (const D2D1_RECT_F*)src);
+                       interp <= 0 ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                                   : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                       (const D2D1_RECT_F*)src);
 }
 static XjsSizeU ApiBmpPixelSize(XjsBitmap* bm) {
     D2D1_SIZE_U s = D2(bm)->GetPixelSize();

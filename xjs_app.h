@@ -346,7 +346,10 @@ struct XjsRt {
     void PopAlpha()                          { g_gfx->PopAlpha(this); }
     void CreateBitmapFromWicBitmap(IWICBitmapSource* src, void* /*props*/, XjsBitmap** out)   { g_gfx->BitmapFromWic(this, src, out); }
     void CreateBitmapFromMemory(UINT w, UINT hh, UINT stride, const BYTE* px, XjsBitmap** out) { g_gfx->BitmapFromMemory(this, w, hh, stride, px, out); }
-    void DrawBitmap(XjsBitmap* bm, const XjsRect& r, float opacity = 1.0f, int interp = 0, const XjsRect* src = NULL) { g_gfx->DrawBmp(this, bm, r, opacity, interp, src); }
+    /* interp 统一语义 (两后端同表): 0=最近邻 (1:1 像素内容) 1=线性/双线性 (快速平滑)
+       2=高质量 (缩放图稿默认; D2D=HQ Cubic ≈Lanczos, GDI+=HighQualityBicubic)。
+       图标/预览图等缩放绘制禁止用默认 0 — D2D 端最近邻缩放=锯齿 (2026-10-04 用户实锤) */
+    void DrawBitmap(XjsBitmap* bm, const XjsRect& r, float opacity = 1.0f, int interp = 2, const XjsRect* src = NULL) { g_gfx->DrawBmp(this, bm, r, opacity, interp, src); }
     HRESULT CreateSolidColorBrush(const XjsColor& c, XjsSolidBrush** out)   { return g_gfx->SolidBrush(this, c, out); }
     void CreateLinearGradientBrush(XjsPoint2 s, XjsPoint2 e, const XjsGradientStop* st, int n, XjsGradBrush** out) { g_gfx->GradBrush(this, s, e, st, n, out); }
     void CreateRadialGradientBrush(XjsPoint2 c, XjsPoint2 off, float rx, float ry, const XjsGradientStop* st, int n, XjsGradBrush** out) { g_gfx->RadialBrush(this, c, off, rx, ry, st, n, out); }

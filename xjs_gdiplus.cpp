@@ -820,7 +820,10 @@ static void GpDrawBmp(XjsRt* rt, XjsBitmap* bm, const XjsRect& r, float opacity,
     if (!gb || !gb->bmp) return;
     Gdiplus::Graphics* g = DrawGfx(s);
     if (!g) return;
-    g->SetInterpolationMode(interp == 1 ? Gdiplus::InterpolationModeNearestNeighbor
+    /* interp 语义对齐 xjs_app.h DrawBitmap (0=最近邻 1=双线性 2=高质量); 曾 1=最近邻
+       其余=HQ 与 D2D 端正好相反, 同一 interp 值跨后端观感不一 (2026-10-04 顺手收口) */
+    g->SetInterpolationMode(interp <= 0 ? Gdiplus::InterpolationModeNearestNeighbor
+                          : interp == 1 ? Gdiplus::InterpolationModeBilinear
                                         : Gdiplus::InterpolationModeHighQualityBicubic);
     XjsRect dr = InCur(s, r);
     if (src) {
