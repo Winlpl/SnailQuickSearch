@@ -505,13 +505,15 @@ static void XjsDrawTimeBadge(const std::wstring& text, const XjsRect& cell, long
 
 /* 驱动器行容量条 (正式版 .row[data-drive]::after 胶囊: 占用色光晕 + 全程轨道 + 蓝→占用色渐变 + 圆头;
    磁盘信息没取到 (driveTotal=0) 时源样式删 data-drive, 整条不画)。
-   胶囊高随视图档: 紧凑视图行仅 34px 高, 条高 2px (圆头/最小填充随之), 详情视图 3px */
+   胶囊高随视图档: 紧凑视图行仅 34px 高, 条高 2px (圆头/最小填充随之), 详情视图 3px;
+   严密模式 18px 可见行被 12.5px 居中文字的行盒占满, 条压成 1px 贴行底缘 (下缘细线观感) */
 static void XjsDrawDriveBar(const XjsRect& row, const XjsRowData& rd, bool listView) {
     if (rd.driveTotal <= 0) return;
+    bool dense = (g_viewMode == VM_DENSE);
     float barL = row.left + XSF(12), barR = row.right - XSF(12);
-    float barH = XSF(listView ? 2.0f : 3.0f);   /* 胶囊高 (紧凑视图更细) */
+    float barH = XSF(dense ? 1.0f : (listView ? 2.0f : 3.0f));  /* 胶囊高 (紧凑视图更细, 严密 1px) */
     float cap = barH / 2;                       /* 圆头半径 = 半高 */
-    float barB = row.bottom - XSF(4), barT = barB - barH;
+    float barB = row.bottom - (dense ? barH : XSF(4)), barT = barB - barH;
     XjsColor driveColor = XjsDriveColor(rd.drivePercent);
     /* 源样式整条胶囊带 box-shadow 0 0 6px rgba(占用色,.25) — 未占用段因此有虚化光晕;
        本宿主 RT 的效果管线帧必废 (跨渲染域铁律), 用逐层外扩低透明胶囊近似
@@ -910,8 +912,9 @@ void XjsListRender() {
        选中/悬停底、选中条、驱动器容量条与列内容保持一体 */
     float rowL = xs[0] - XSF(8);
     float rowR = (V.n > 0 ? xs[V.n - 1] + ws[V.n - 1] : xs[0]) + XSF(8);
-    /* 严密模式可见行仅 18px: 圆角/选中条内缩随行高收一档; 驱动器容量条塞不下不画
-       (容量读数在 评分/大小 列已有文本, 见 XjsColDrawRating/XjsColDrawSize) */
+    /* 严密模式可见行仅 18px: 圆角/选中条内缩随行高收一档; 驱动器容量条压成 1px 贴行底缘
+       (12.5px 居中文字的行盒占满整行, 只有下缘放得下细线, 见 XjsDrawDriveBar;
+       容量读数在 评分/大小 列仍有文本, 见 XjsColDrawRating/XjsColDrawSize) */
     bool denseRow = (g_viewMode == VM_DENSE);
     float rowRad = XSF(denseRow ? 5.0f : 9.0f);
     float barIns = XSF(denseRow ? 4.0f : 7.0f);
@@ -947,7 +950,7 @@ void XjsListRender() {
             if (col->draw)
                 col->draw(XjsRectF(xs[vi], row.top, xs[vi] + ws[vi], row.bottom), rd, idx, listView);
         }
-        if (rd->isDrive && g_driveProgress && !denseRow) XjsDrawDriveBar(row, *rd, listView);
+        if (rd->isDrive && g_driveProgress) XjsDrawDriveBar(row, *rd, listView);
         /* 剪切灰显 (源样式 data-cut 半透明): 内容之上罩一层底色 */
         if (g_cutSet.count(idx)) {
             XjsColor dim = g_skin.bg1;

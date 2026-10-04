@@ -159,7 +159,7 @@ enum XjsViewMode { VM_DENSE = 0, VM_LIST = 1, VM_DETAILS = 2, VM_MEDIUM = 3, VM_
 static const int XJS_ROW_H[5] = { 20, 34, 54, 116, 142 };      /* medium/large=网格排高 (VIEW_CFG.rowH); dense=20 (18px可见行+2px缝) */
 static const int XJS_ICON_PX[5] = { 16, 16, 32, 48, 72 };      /* 图标显示尺寸 */
 static const int XJS_FETCH_ICON[5] = { 16, 16, 32, 64, 128 };  /* 向引擎请求的图标尺寸 (网格取大图保清晰) */
-static const int XJS_GRID_ITEM_W[5] = { 0, 0, 100, 140 };      /* 网格格子宽 (VIEW_CFG.minItemW, 0=列表型) */
+static const int XJS_GRID_ITEM_W[5] = { 0, 0, 0, 100, 140 };   /* 网格格子宽 (VIEW_CFG.minItemW, 0=列表型; 五槽=严密/紧凑/详情/中/大, 插严密档时曾漏补详情位 0 致后两位错位: 中=140、大=补零) */
 
 /* ==================== 绘图后端中立值类型 (换绘图引擎的接缝, 2026-09-17) ====================
  * 布局/皮肤/几何/颜色这类"值"不再绑定 D2D: 字段名与 D2D 同名 (left/top/right/bottom, r/g/b/a),
