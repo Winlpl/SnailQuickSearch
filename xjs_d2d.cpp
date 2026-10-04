@@ -334,7 +334,8 @@ void XjsDeviceCreate() {
     if (!g_rt) return;
     /* 同一 RT 取设备上下文视角 (Win8.1+ QI 必成): DrawText 系列才能带
        ENABLE_COLOR_FONT 画 emoji 的 COLR 彩色字形; 失败(老系统)退单色轮廓。
-       仅 D2D 后端执行 (GDI+ 模式的 hwndRt 原生是 GpSurface, 瞎 QI = AV, 白窗元凶之一) */
+       仅实际后端=D2D 时执行 — 按 g_gfxEngineActive 判 (GDI+ 模式的 hwndRt 原生是 GpSurface,
+       瞎 QI = AV, 白窗元凶之一; g_gfxEngine 是"待生效选择"可被设置页提前改写, 禁作运行期分流) */
     if (g_gfxEngineActive == 0) {
         ID2D1DeviceContext* dcp = NULL;
         if (SUCCEEDED(D2(g_hwndRt)->QueryInterface(__uuidof(ID2D1DeviceContext), (void**)&dcp)) && dcp)

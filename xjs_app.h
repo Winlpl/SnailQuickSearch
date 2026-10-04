@@ -313,7 +313,7 @@ struct XjsGfxApi {
     bool  (*LayoutHitTest)(XjsTextLayout*, UINT32 idx, BOOL trailing, float* x, float* y, XjsHitTestMetrics*);
     void  (*FreeLayout)(void* native);
 };
-extern XjsGfxApi* g_gfx;     /* 当前绘图后端函数表 (XjsGfxStartup 选边) */
+extern XjsGfxApi* g_gfx;     /* 当前绘图后端函数表 (wWinMain 按 g_gfxEngine 选边 XjsD2DInit/XjsGdiplusInit 时指向 D2dApi/GpApi) */
 extern int g_gfxEngine;      /* 绘制引擎选择 (设置-通用, 重启生效): 0=D2D 1=GDI+; 用户改档时立即变"待生效"值, 与运行中实际后端可错位 */
 extern int g_gfxEngineActive; /* 本次运行实际初始化的后端 (启动定型后不变); 运行期按后端分流 (收尾清理/RT 建 Dc 视角等) 一律读它 */
 
