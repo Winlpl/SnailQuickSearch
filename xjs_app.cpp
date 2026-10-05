@@ -343,6 +343,7 @@ XjsSearchWindow::~XjsSearchWindow() {
     if (plugPanelCache) { plugPanelCache->Release(); plugPanelCache = NULL; }   /* 面板接管位图持 RT 引用, 随窗释放 */
     plugPanelCacheRt = NULL;
     if (appIcon) { appIcon->Release(); appIcon = NULL; }
+    if (guideCursorBmp) { guideCursorBmp->Release(); guideCursorBmp = NULL; }   /* 引导演示光标位图持 RT 引用, 同 appIcon 回收 */
     for (auto& b : br) { if (b) { b->Release(); b = NULL; } }
     if (brWhite) { brWhite->Release(); brWhite = NULL; }
     if (brCloseHover) { brCloseHover->Release(); brCloseHover = NULL; }
@@ -448,6 +449,8 @@ XjsFormat* g_tfCardVal = NULL;
 XjsFormat* g_tfSearch = NULL;
 XjsFormat* g_tfToast = NULL;
 XjsFormat* g_tfTag = NULL;
+XjsFormat* g_tfGuideTitle = NULL;
+XjsFormat* g_tfGuideText = NULL;
 /* g_uiZoomTenths 已每窗化: 宏 → XjsSearchWindow::Cur()->uiZoom (见 xjs_app.h 宏区) */
 
 /* 引擎状态 */

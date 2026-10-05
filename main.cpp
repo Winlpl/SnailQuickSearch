@@ -553,6 +553,7 @@ void XjsOnPopupResult(int id) {
                 XjsModeDlgOpen(false, L"");   /* 添加搜索模式 (源样式 smMask 弹窗) */
                 break;
             case 14: XjsPreviewToggle(); break;
+            case 48: XjsGuideStart(); break;   /* 引导动画重开 (手动打开不改"不再提示"记忆) */
             case 50: XjsSettingsShow(); break;   /* 皮肤/自启动/关于在设置窗口 */
         }
     }
@@ -725,6 +726,27 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 default: break;
             }
         }
+        /* ===== 新手引导层总闸 (灯箱/媒体全屏同口径): 遮罩整窗模态 — 输入全吞,
+           仅说明卡按钮与 Esc(跳过) 可用, 其余真实交互一律拦截 (源样式遮罩 mousedown preventDefault 同) ===== */
+        if (XjsGuideActive()) {
+            if (msg == WM_SETCURSOR) {
+                if (LOWORD(lParam) == HTCLIENT) SetCursor(LoadCursorW(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            switch (msg) {
+                case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+                case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+                case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+                case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_MOUSELEAVE: case WM_CONTEXTMENU:
+                case WM_SYSCOMMAND:
+                case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP:
+                case WM_CHAR: case WM_UNICHAR: case WM_IME_CHAR: case WM_IME_STARTCOMPOSITION:
+                case WM_IME_COMPOSITION: case WM_IME_NOTIFY:
+                    XjsGuideMsg(hwnd, msg, wParam, lParam);
+                    return 0;
+                default: break;
+            }
+        }
         switch (msg) {
         case WM_CREATE: {
             XjsSetPhase(L"wm-create:init");
@@ -780,6 +802,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     PostMessage(hwnd, WM_HOTKEY_WARN, 0, 0);   /* 明确设置过的热键注册失败: 创建完成后再提醒 */
                 XjsSetPhase(L"wm-create:tray");
                 XjsTrayAdd(hwnd);
+                /* 新手引导自启动 (仅主窗): +800ms 等首帧画完再判 "不再提示" (源样式 guideAutoStart 同拍) */
+                SetTimer(hwnd, ID_TIMER_GUIDE_START, 800, NULL);
             }
             /* 置顶档案恢复 (图钉态随窗口档案持久化; 启动/按档案重建都生效) */
             if (g_topmost)
@@ -842,6 +866,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 g_rt->PopAxisAlignedClip();
                 if (backdrop) XjsBackdropEndBlur(g_rt, cr);   /* 虚化底整面盖住 + 暗罩 */
                 XjsModeDlgRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 模态对话框 (遮罩置顶) */
+                XjsGuideRender(g_rt, (float)cr.right, (float)cr.bottom);   /* 新手引导层: 遮罩+高亮环+说明卡+演示光标 */
                 XjsToastRender(hwnd, g_rt, g_layout.w, g_layout.h, XSF(1));   /* Toast 浮层最顶 (自带圆角遮罩层, 不参与脏区 band 裁剪) */
                 HRESULT hr = g_rt->EndDraw();
                 if (hr != S_OK) {
@@ -1427,6 +1452,13 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return 0;
             } else if (wParam == ID_TIMER_HISTCOMMIT) {
                 if (!XjsHistCommitTick()) KillTimer(hwnd, ID_TIMER_HISTCOMMIT);   /* 假=已落账/放弃 (真=Tick 内已续挂) */
+                return 0;
+            } else if (wParam == ID_TIMER_GUIDE_START) {
+                KillTimer(hwnd, ID_TIMER_GUIDE_START);   /* 一次性: 主窗创建 +800ms 未"不再提示"自动播放引导 */
+                XjsGuideAutoStartTick(hwnd);
+                return 0;
+            } else if (wParam == ID_TIMER_GUIDE) {
+                if (!XjsGuideTick(hwnd)) KillTimer(hwnd, ID_TIMER_GUIDE);   /* 呼吸环/点击演示动画驱动, 关引导自摘表 */
                 return 0;
             } else if (wParam == ID_TIMER_MEDIA) {
                 w->MediaTick();   /* 媒体预览泵: 状态推进/帧搬运 (无活动自摘表) */

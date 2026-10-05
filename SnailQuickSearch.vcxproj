@@ -103,6 +103,7 @@
     <ClCompile Include="xjs_plugin.cpp" />
     <ClCompile Include="xjs_plugin_api.cpp" />
     <ClCompile Include="xjs_pdf.cpp" />
+    <ClCompile Include="xjs_guide.cpp" />
     <ClCompile Include="md4c\md4c.c" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>

@@ -603,6 +603,7 @@ static const char* const K_DOUBLECTRL = "双击Ctrl目标";      /* 顶层: 档�
 static const char* const K_ENGINE = "绘制引擎";              /* 顶层: "d2d"|"gdiplus", 重启生效 (设置-通用) */
 static const char* const K_WINRECT = "窗口矩形";             /* 窗口条目内: {横坐标,纵坐标,宽,高,DPI}; 曾为顶层共享键(已迁入槽0后废弃) */
 static const char* const K_REBUILD = "重建记忆";             /* 顶层: 重建对话框记忆 */
+static const char* const K_GUIDE = "新手引导不再提示";        /* 顶层: 完成引导/点"不再提示"=1, 启动不再自动播放 */
 static const char* const K_COLSG = "列布局";                 /* 顶层: 全局列默认 (旧扁平键, 兜底用) */
 static const char* const K_PLUGINS = "插件";                 /* 顶层: 插件用户状态数组 [{标识,启用}]
                                                                 (目录发现/清单/加载状态不落盘 — 运行时扫 plugins\;
@@ -1905,6 +1906,7 @@ void XjsLoadConfig() {
     /* 双击 Ctrl 唤起目标 (空/名称不存在 = 禁用) */
     g_doubleCtrlTarget = XjsConfig::Str(g_cfg.Root(), K_DOUBLECTRL, L"");
     g_gfxEngine = (XjsConfig::Str(g_cfg.Root(), K_ENGINE, L"d2d") == L"gdiplus") ? 1 : 0;   /* 绘制引擎 (重启生效) */
+    XjsGuideSetDismissed(XjsConfig::Bool(g_cfg.Root(), K_GUIDE, false));   /* 新手引导 "不再提示" */
 
     /* 插件用户状态 (顶层 "插件" 数组): 标识/启用 — 目录发现与清单在 XjsPluginStartup 扫描 */
     if (auto pit = g_cfg.Root().find(K_PLUGINS); pit != g_cfg.Root().end() && pit->second.is<picojson::array>()) {
@@ -2282,6 +2284,7 @@ void XjsSaveConfig() {
 
     g_cfg.Set(K_DOUBLECTRL, Utf16ToUtf8(g_doubleCtrlTarget.c_str()));
     g_cfg.Set(K_ENGINE, std::string(g_gfxEngine == 1 ? "gdiplus" : "d2d"));   /* std::string 包裹: 裸三元是 const char*, 会被隐式匹配到 Set(bool) 重载落盘成 true (09-24 白屏崩溃元凶之一) */
+    g_cfg.Set(K_GUIDE, XjsGuideDismissed());   /* 新手引导 "不再提示" (Set(bool) 重载) */
     /* 语言已每窗化 (条目 "语言"); 顶层键废弃, LoadConfig 读作迁移种子后 erase */
 
     /* 文件分类 / 路径别名 (顶层; XjsFilterConfigApply/XjsAliasConfigApply 成功时更新, 此处随档落盘) */

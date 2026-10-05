@@ -25,7 +25,7 @@ void XjsReleaseTextFormats() {
     /* 必须经二级指针清全局: 曾用值数组 for(auto& f) 置空 — 只清了局部副本, g_tf* 全部悬空 */
     XjsFormat** const fmts[] = { &g_tfTitle, &g_tfMenu, &g_tfHead, &g_tfHeadR, &g_tfRow, &g_tfRowBold,
         &g_tfDim, &g_tfTiny, &g_tfTinyR, &g_tfStatus, &g_tfTip, &g_tfChip, &g_tfRowR, &g_tfBig, &g_tfCardVal,
-        &g_tfSearch, &g_tfToast, &g_tfTag };
+        &g_tfSearch, &g_tfToast, &g_tfTag, &g_tfGuideTitle, &g_tfGuideText };
     for (auto* pf : fmts) { if (*pf) { (*pf)->Release(); *pf = NULL; } }
     for (auto& kv : g_ellSignCache) { if (kv.second) kv.second->Release(); }
     g_ellSignCache.clear();   // 签名由旧格式生成, 格式重建后须作废
@@ -379,6 +379,15 @@ void XjsRecreateTextFormats() {
     }
     /* 搜索框托管标签 11.5px 中字重 (源样式 .hosted-tag font 12/500, 标题栏紧凑档 11.5) */
     XjsMakeFormat(&g_tfTag, 11.5f, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+    /* 新手引导卡: 标题 14px 中字重 (.guide-card-title); 正文 12px 词换行 + 1.7 行距 (.guide-card-text
+       font 12/line-height 1.7=20.4) — 统一行高顶对齐, XjsMakeFormat 固定居中不适用 */
+    XjsMakeFormat(&g_tfGuideTitle, 14, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+    g_dw->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 12 * g_s * XjsUiZoom(), L"zh-cn", &g_tfGuideText);
+    if (g_tfGuideText) {
+        g_tfGuideText->SetWordWrapping(XJS_WRAP_WORD);
+        g_tfGuideText->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 20.4f * g_s * XjsUiZoom(), 15.2f * g_s * XjsUiZoom());
+    }
     /* 记录构建时的 每窗尺度×页面缩放 镜像: 页面缩放每窗化后, 共享格式跟随"当前窗"倍率,
        窗口切换时经 XjsSyncTextFormats 按镜像判失配重建 (XjsMakeFormat/toast 行高都吃这两个值) */
     s_tfDpiS = g_s;

@@ -80,6 +80,8 @@
 #define ID_TIMER_SBTRACK    11  /* 滚动条轨道按住连发翻页 (首延 400ms, 之后 150ms/步; thumb 到指针即停) */
 #define ID_TIMER_MEDIA      12  /* 媒体预览泵 40ms (装载期/播放期帧搬运/音量浮标; 无媒体活动即摘) */
 #define ID_TIMER_HISTCOMMIT 13  /* 搜索历史落账 2s 防抖 (每次编辑驱动/提交型搜索重置; 到点且搜索完成才落账) */
+#define ID_TIMER_GUIDE      14  /* 新手引导动画驱动 30ms (呼吸环/点击演示; 关引导自摘表) */
+#define ID_TIMER_GUIDE_START 15  /* 新手引导自启动一次性 (主窗创建 +800ms, 未"不再提示"才播) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
@@ -790,6 +792,18 @@ struct XjsModeDlg {
     XjsEditField nameEd, descEd, tplEd;
 };
 
+/* 新手引导动画状态 (每窗一份, xjs_guide.cpp 实现; "不再提示"=进程共享, 走配置顶层键) */
+static const int XJS_GUIDE_STEPS = 10;   /* 步骤表上限 (xjs_guide.cpp kGuideSteps 同值) */
+struct XjsGuide {
+    bool open = false;
+    int idx = 0;                     /* 当前步 (过滤后下标) */
+    int count = 0;                   /* 过滤后总步数 (不可见目标启动时剔除) */
+    int map[XJS_GUIDE_STEPS] = {};   /* 过滤后步 → 步骤表原始下标 (启动时定格, 只存下标不存窗口状态地址) */
+    double stepStart = 0;            /* 本步起始时刻 (ms, GetTickCount64) — 呼吸环/点击演示时序基准 */
+    int pressCmd = 0;                /* 按下待定 (松开触发): 0=无 1=不再提示 2=跳过 3=上一步 4=下一步 */
+    int hoverCmd = 0;                /* 悬停按钮 (同编码) */
+};
+
 struct XjsMediaCtx;   /* 媒体预览会话 (实现收口 xjs_media.cpp; 本头不见 MF/D3D 类型) */
 
 /* 预览面板内命中区域 (渲染时填写, 命中测试读取; 每窗一份) */
@@ -869,6 +883,16 @@ bool XjsModeDlgMouseDown(POINT pt);                           /* 真=吃掉点�
 bool XjsModeDlgMouseUp(POINT pt);                             /* 命令控件松开触发 (按下待定校验) */
 bool XjsModeDlgKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);  /* 键盘/IME 直通, 真=已消费 (模态) */
 void XjsModeDlgRender(XjsRt* rt, float w, float h);
+
+/* 新手引导动画 (xjs_guide.cpp; 状态归窗口 XjsSearchWindow::guide, "不再提示"=进程配置) */
+bool XjsGuideDismissed();                     /* "不再提示"记忆 (XjsLoadConfig 读入, 完成引导/点不再提示置位) */
+void XjsGuideSetDismissed(bool v);            /* 仅供配置载入写初值 (落盘走 XjsSaveConfig) */
+bool XjsGuideActive();                        /* 引导开着 (输入总闸/绘制接线判) */
+void XjsGuideStart();                         /* 打开引导 (当前窗; 不可见目标步剔除; 菜单开着则不开) */
+void XjsGuideAutoStartTick(HWND hwnd);        /* ID_TIMER_GUIDE_START 到点: 未不再提示且窗可见才播 */
+bool XjsGuideTick(HWND hwnd);                 /* WM_TIMER(ID_TIMER_GUIDE): 动画驱动, 假=已关闭 (调用方摘表) */
+void XjsGuideMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);   /* 引导期输入总闸路由 (全部吞掉) */
+void XjsGuideRender(XjsRt* rt, float w, float h);                      /* 遮罩+高亮环+说明卡+演示光标 */
 
 /* Toast 类型 (源样式 20-toast.js showToast: error 失败红 / warn 警告橙 / success 成功绿 / info 信息蓝) */
 enum XjsToastType { XTOAST_INFO = 0, XTOAST_SUCCESS, XTOAST_WARN, XTOAST_ERROR };
@@ -1043,6 +1067,7 @@ public:
     XjsSolidBrush *brWhite = NULL, *brCloseHover = NULL, *brErr = NULL;
     XjsGradBrush *brSelGrad = NULL, *brSelBar = NULL, *brProgress = NULL;
     XjsBitmap* appIcon = NULL;                       /* 标题栏图标 (按窗懒解码, 绑本窗 RT) */
+    XjsBitmap* guideCursorBmp = NULL;                /* 引导演示光标 (懒解码绑本窗 RT, 设备释放同 appIcon 回收) */
     std::unordered_map<unsigned int, XjsSolidBrush*> brushCache;   /* XjsTempBrush 按色缓存 */
 
     /* 布局/DPI (窗口可在不同显示器) */
@@ -1075,6 +1100,7 @@ public:
     XjsCaretBlink searchBlink;
     int imeUpdBusy = 0;                     /* IME 重入守卫 */
     XjsModeDlg modeDlg;                     /* 添加/编辑搜索模式 对话框 (模态; 状态归窗口) */
+    XjsGuide guide;                         /* 新手引导动画 (模态遮罩; 状态归窗口, xjs_guide.cpp) */
 
     /* 托管标签链 (源样式 26-hosted-search.js; 每窗一份, 不持久化 — 源样式页面重载即清零) */
     std::vector<XjsHostedTag> hostedTags;   /* 标签 (按加入顺序; word 忽略大小写唯一) */
@@ -1321,6 +1347,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_searchFingerprint (XjsSearchWindow::Cur()->searchFingerprint)
 #define g_searching       (XjsSearchWindow::Cur()->searching)
 #define g_modeDlg         (XjsSearchWindow::Cur()->modeDlg)
+#define g_guide           (XjsSearchWindow::Cur()->guide)
 #define g_hostedTags      (XjsSearchWindow::Cur()->hostedTags)
 #define g_hostedCaret     (XjsSearchWindow::Cur()->hostedCaret)
 #define g_hostedRects     (XjsSearchWindow::Cur()->hostedRects)
@@ -1430,6 +1457,8 @@ extern XjsFormat* g_tfCardVal;  // 卡片值
 extern XjsFormat* g_tfSearch;   // 搜索框输入文本 (无省略号: 溢出走横向滚动)
 extern XjsFormat* g_tfToast;    // Toast 正文 12.5px (顶对齐+字符级换行, 源样式 word-break:break-all)
 extern XjsFormat* g_tfTag;      // 搜索框托管标签 11.5px 中字重 (源样式 .hosted-tag 12px/500 标题栏紧凑档 11.5)
+extern XjsFormat* g_tfGuideTitle;   // 新手引导卡标题 14px 中字重 (源样式 .guide-card-title)
+extern XjsFormat* g_tfGuideText;    // 新手引导卡正文 12px 词换行+1.7 行距 (源样式 .guide-card-text)
 
 /* 引擎级状态 (一个引擎, 全窗共享) */
 extern xjs_engine* g_engine;

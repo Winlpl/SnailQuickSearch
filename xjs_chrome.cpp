@@ -1165,6 +1165,9 @@ void XjsShowAppMenu() {
     /* 皮肤/自启动/关于 → 独立设置窗口 (皮肤列表 18 项曾把菜单撑出屏幕); 重建索引也已移入设置 */
     items.push_back({ IDM_MENU_BASE + 50, XjsT(L"菜单.设置"), L"", false, false, false, false });
     items.push_back({ 0, L"", L"", false, true, false, false });
+    /* 新手引导动画 (首次启动自动播放; 此处重开不改"不再提示"记忆, xjs_guide.cpp) */
+    items.push_back({ IDM_MENU_BASE + 48, XjsT(L"引导.菜单项"), L"", false, false, false, false });
+    items.push_back({ 0, L"", L"", false, true, false, false });
     /* 捐赠 = 打开设置直达捐赠页 (用户口径: ☰菜单不再放"退出", 退出仍走托盘右键菜单) */
     items.push_back({ IDM_MENU_BASE + 51, XjsT(L"菜单.捐赠"), L"", false, false, false, false });
     XjsRect r = g_layout.menuBtn;
