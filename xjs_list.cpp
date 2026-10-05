@@ -827,7 +827,7 @@ void XjsListRender() {
     /* 排序态以结果对象为事实源 (GetSortField/GetSortway): 宿主不持影子状态,
        未就绪/无结果对象时无高亮无箭头 (此刻也无结果可排) */
     const char* sortFieldNow = g_result ? xjs_result_GetSortField(g_result) : NULL;
-    BOOL sortAscNow = g_result ? xjs_result_GetSortway(g_result) : FALSE;
+    BOOL sortAscNow = XjsResultSortAsc(g_result);   /* 方向读收口: 引擎 GetSortway 读回相反 */
     for (int i = 0; i < V.n; i++) {
         XjsColSpec* col = V.c[i];
         XjsRect cr = XjsRectF(xs[i], L.listHead.top, xs[i] + ws[i], L.listHead.bottom);
@@ -1621,12 +1621,13 @@ bool XjsListMouseUp(POINT pt) {
             int fi = XjsVisFull(listView, s_colMoveFrom);
             if (fi >= 0 && g_result) {
                 /* 排序态以结果对象为准: 同列再点=翻转方向, 换列=默认方向 (名称列升序, 其余降序, 原口径)。
-                   按字段名判定名称列 — 列可拖动换位, 全数组槽 0 不保证仍是"文件名" */
+                   按字段名判定名称列 — 列可拖动换位, 全数组槽 0 不保证仍是"文件名";
+                   方向读经 XjsResultSortAsc (引擎 GetSortway 读回相反, 见 xjs_engine.cpp) */
                 const char* field = S.arr[fi].sortField;
                 const char* cur = xjs_result_GetSortField(g_result);
-                BOOL asc = (cur && !strcmp(field, cur)) ? !xjs_result_GetSortway(g_result)
+                BOOL asc = (cur && !strcmp(field, cur)) ? !XjsResultSortAsc(g_result)
                                                         : (BOOL)(!strcmp(field, "文件名"));
-                xjs_result_SetSortField(g_result, field, asc);
+                XjsResultSetSortField(g_result, field, asc);
                 XjsSearchNow(false);
                 XjsSaveConfig();   /* 排序随窗口档案持久化 (每窗"默认排序", 重开/按档案重建恢复) */
             }

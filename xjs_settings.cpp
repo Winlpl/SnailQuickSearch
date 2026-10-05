@@ -937,7 +937,7 @@ static bool XjsSetBuildRows() {
             newCard(XjsT(L"设置分类.列表"));
             {   /* 默认排序 (每窗): 事实源 = 结果对象, 这里只匹配预设显示当前值 */
                 const char* sf = g_result ? xjs_result_GetSortField(g_result) : NULL;
-                bool sw = g_result ? xjs_result_GetSortway(g_result) != FALSE : false;
+                bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口: 引擎 GetSortway 读回相反 */
                 int si = -1;
                 for (int i = 0; i < 7; i++)
                     if (sf && !strcmp(SORT_PRESETS[i].field, sf) && SORT_PRESETS[i].asc == sw) { si = i; break; }
@@ -2318,7 +2318,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         case ACT_SORT: {
             /* 默认排序 (每窗): 预设菜单选择; 事实源 = 结果对象, 档案只存初始默认 */
             const char* sf = g_result ? xjs_result_GetSortField(g_result) : NULL;
-            bool sw = g_result ? xjs_result_GetSortway(g_result) != FALSE : false;
+            bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口: 引擎 GetSortway 读回相反 */
             POINT anchor = XjsSetDropdownAnchor(r);
             std::vector<XjsPopupItem> items;
             for (int i = 0; i < 7; i++)
@@ -2876,8 +2876,8 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                         prof->sortWay = SORT_PRESETS[id - ACT_SORT].asc;
                     }
                     if (ow && ow->result)
-                        xjs_result_SetSortField(ow->result, SORT_PRESETS[id - ACT_SORT].field,
-                                                SORT_PRESETS[id - ACT_SORT].asc ? TRUE : FALSE);
+                        XjsResultSetSortField(ow->result, SORT_PRESETS[id - ACT_SORT].field,
+                                              SORT_PRESETS[id - ACT_SORT].asc ? TRUE : FALSE);
                     XjsSaveConfig();
                     XjsSearchNow(false);
                     s_set.rowsDirty = true;

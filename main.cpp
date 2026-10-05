@@ -271,7 +271,7 @@ void XjsSearchWindow::ApplyTaskbarIcon() {
 void XjsSearchWindow::ApplyCreateSetup() {
     XjsUiProfile* p = XjsUiProfileAt(uiIndex);
     if (result && p && !p->sortField.empty())
-        xjs_result_SetSortField(result, Utf16ToUtf8(p->sortField.c_str()).c_str(), p->sortWay ? TRUE : FALSE);
+        XjsResultSetSortField(result, Utf16ToUtf8(p->sortField.c_str()).c_str(), p->sortWay ? TRUE : FALSE);
     switch (createFill) {
         case 1:
             if (!createKeyword.empty()) {
@@ -1105,6 +1105,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     g_dragColX = (float)pt.x;   /* 按下已起的调宽拖动归零基点 */
                     return 0;
                 }
+                /* 列面上的双击第二击 = 与单击同口径 (按下记待定, 松开翻转排序): 第二击以
+                   WM_LBUTTONDBLCLK 到达, 不补投 XjsListMouseDown 就没人接 — 表头连点两次
+                   翻转方向只见第一次生效 (与下方滚动条 2026-09-22 同源口径) */
+                XjsListMouseDown(pt, wParam);
+                return 0;
             }
             /* 滚动条上双击 = 与单击同口径 (thumb 抓取/轨道连翻), 不落下方"双击打开文件" —
                双击的第二下按下以 WM_LBUTTONDBLCLK 到达, 不经 XjsListMouseDown 的滚动条分支 (2026-09-22 实锤) */

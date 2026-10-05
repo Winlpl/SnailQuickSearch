@@ -1664,6 +1664,8 @@ void XjsDrawSpinner(XjsPoint2 c, float r, float phase);
 bool XjsEngineEnsureResult();                       /* 当前窗 (Cur) 版: 无则创建 (数据库未就绪 = 拒绝, 见 g_dbReady) */
 bool XjsEngineEnsureResultFor(XjsSearchWindow* w);  /* 指定窗版本 (ForEach/广播用) */
 void XjsEngineEnsureResultAll();                    /* 数据库就绪广播: 给所有尚无结果对象的窗口补建 */
+BOOL XjsResultSortAsc(xjs_result* r);               /* 排序方向读 (宿主口径 TRUE=升序; 引擎 GetSortway 读回相反, 见 xjs_engine.cpp 实现) */
+void XjsResultSetSortField(xjs_result* r, const char* field, BOOL asc);  /* 排序字段+方向写收口 (方向经 XjsResultSortAsc 口径) */
 void XjsClearRenderCaches();
 void XjsClearRowCache();
 void XjsSyncWatchStart(HWND hwnd);   /* 文件同步变化轮询: 挂 ID_TIMER_SYNCWATCH + 初始化数量基线 */

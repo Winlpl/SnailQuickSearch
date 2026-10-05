@@ -270,6 +270,21 @@ static void XjsDebounceSnapshot() {
     }
 }
 
+/* ==================== 排序方向读写收口 (2026-10-05 探针实锤) ====================
+ * 引擎 DLL 的方向读回与实际排序相反: SetSortField(r,f,TRUE) 实际升序 (!bee!go 在首),
+ * GetSortway(r) 却返回 FALSE; Set FALSE 实际降序, Get 却返回 TRUE (4.47M 行库两向实测)。
+ * 宿主一律经这两个包装读写方向 (宿主口径 TRUE=升序, 与 SetSortField 参数同义),
+ * 禁止再直调 xjs_result_GetSortway —— 表头翻转/表头箭头/设置默认排序 全栽在它手里
+ * (翻转恒卡在一个方向: 首点发 TRUE 后读回 0, 之后每次都算出 !0=TRUE)。引擎修正读回后
+ * 只需删 XjsResultSortAsc 里的取反。 */
+BOOL XjsResultSortAsc(xjs_result* r) {
+    return (r && !xjs_result_GetSortway(r)) ? TRUE : FALSE;
+}
+
+void XjsResultSetSortField(xjs_result* r, const char* field, BOOL asc) {
+    if (r) xjs_result_SetSortField(r, field, asc);   /* Set 参数方向诚实, 原样透传 */
+}
+
 void XjsSearchNow(bool commitHistory) {
     if (!g_engine || g_isScanning) return;
     if (!XjsEngineEnsureResult()) return;
@@ -1391,10 +1406,10 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.createFill = w->createFill;
     p.createKeyword = w->createKeyword;
     p.lastSearch = w->searchEd.text;   /* 上一次输入的搜索词 (createFill=2 的记忆源) */
-    if (w->result) {   /* 排序态事实源 = 结果对象 (宿主无影子状态); 档案只存初始默认 */
+    if (w->result) {   /* 排序态事实源 = 结果对象 (宿主无影子状态); 档案只存初始默认 (方向读收口) */
         const char* sf = xjs_result_GetSortField(w->result);
         p.sortField = sf ? Utf8ToUtf16(sf) : std::wstring();
-        p.sortWay = xjs_result_GetSortway(w->result) != FALSE;
+        p.sortWay = XjsResultSortAsc(w->result) != FALSE;
     }
     /* 窗口矩形 (每窗私有, 2026-09-17 用户口径: 尺寸不全局统一 — 主窗槽 0 同样入档):
        只在正常态采集 — 最小化矩形是 (-32000) 幻影坐标, 最大化矩形还原成普通窗会占满整屏;
