@@ -270,19 +270,18 @@ static void XjsDebounceSnapshot() {
     }
 }
 
-/* ==================== 排序方向读写收口 (2026-10-05 探针实锤) ====================
- * 引擎 DLL 的方向读回与实际排序相反: SetSortField(r,f,TRUE) 实际升序 (!bee!go 在首),
- * GetSortway(r) 却返回 FALSE; Set FALSE 实际降序, Get 却返回 TRUE (4.47M 行库两向实测)。
- * 宿主一律经这两个包装读写方向 (宿主口径 TRUE=升序, 与 SetSortField 参数同义),
- * 禁止再直调 xjs_result_GetSortway —— 表头翻转/表头箭头/设置默认排序 全栽在它手里
- * (翻转恒卡在一个方向: 首点发 TRUE 后读回 0, 之后每次都算出 !0=TRUE)。引擎修正读回后
- * 只需删 XjsResultSortAsc 里的取反。 */
+/* ==================== 排序方向读写收口 ====================
+ * 宿主口径 TRUE=升序, 与 SetSortField 参数同义。历史坑 (2026-10-05 探针实锤, 4.47M 行
+ * 两向实测): 当日引擎 DLL 的 GetSortway 读回与实际排序相反 (Set TRUE 实际升序它返回
+ * FALSE), 宿主曾直调取反 = 表头翻转恒卡一个方向, 当日先在包装里取反兜底;
+ * 2026-10-06 引擎侧修复读回, 包装取反同步撤除。方向读写仍只准经这两个包装
+ * (表头翻转/表头箭头/档案默认排序/设置回显全走这里), 引擎语义再变只改本处。 */
 BOOL XjsResultSortAsc(xjs_result* r) {
-    return (r && !xjs_result_GetSortway(r)) ? TRUE : FALSE;
+    return (r && xjs_result_GetSortway(r)) ? TRUE : FALSE;
 }
 
 void XjsResultSetSortField(xjs_result* r, const char* field, BOOL asc) {
-    if (r) xjs_result_SetSortField(r, field, asc);   /* Set 参数方向诚实, 原样透传 */
+    if (r) xjs_result_SetSortField(r, field, asc);
 }
 
 void XjsSearchNow(bool commitHistory) {

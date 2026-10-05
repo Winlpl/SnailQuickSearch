@@ -63,11 +63,14 @@ enum XjsSetAct {
     ACT_PLUGINS_OPENDIR = 1600,  /* 打开插件目录 */
     ACT_PLUGINS_RESCAN  = 1601,  /* 重新扫描 plugins\ */
     ACT_PLUGINS_TOGGLE  = 1602,  /* +插件下标 启用/禁用 (上限 200, 同票号上限) */
-    /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲 */
-    ACT_TSAVE = 2000,            /* 表格保存 (按当前分类下发 文件分类/别名) */
-    ACT_TADD  = 2001,            /* 表格添加一行 (按当前分类; 分类行自动预填下一个空闲类型号) */
+    /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲。
+       两张表已并入同一分类页 (2026-10-06), 不能再按 s_set.cat 路由 — 别名表动作拆独立段 */
+    ACT_TSAVE = 2000,            /* 文件分类表 保存 */
+    ACT_TADD  = 2001,            /* 文件分类表 添加一行 (分类行自动预填下一个空闲类型号) */
     ACT_FDEL  = 2002,            /* +行下标 删除文件分类行 (上限 256 行) */
-    ACT_ADEL  = 2302             /* +行下标 删除别名行 (上限 1024 行) */
+    ACT_ADEL  = 2302,            /* +行下标 删除别名行 (上限 1024 行) */
+    ACT_ALIAS_TSAVE = 3400,      /* 别名表 保存 (落在别名删除段之后的保留区尾部) */
+    ACT_ALIAS_TADD  = 3401       /* 别名表 添加一行 */
 };
 static_assert(ACT_APPEAR + XJS_APPEAR_COUNT <= ACT_EXCL_DEL, "ACT_APPEAR 档位段越界, 与 ACT_EXCL_DEL 重叠");
 static_assert(ACT_APPEAR + XJS_APPEAR_COUNT <= ACT_MEMLOCK, "出现位置档位段越界, 与内存/性能动作段重叠");
@@ -77,7 +80,8 @@ static_assert(ACT_PERF_SYNCLR + 1 <= ACT_EXCL_DEL, "内存/性能动作段越界
 static_assert(ACT_PLUGINS_TOGGLE + 200 <= ACT_WINGM_DEL, "插件段与窗口管理删除段重叠");
 static_assert(ACT_WINGM_DEL + 64 <= ACT_TSAVE, "窗口管理删除段与 文件分类/别名 表格段重叠");
 static_assert(ACT_FDEL + 256 <= ACT_ADEL, "文件分类删除段与别名删除段重叠");
-static_assert(ACT_ADEL + 1024 <= 4096, "别名删除段越出保留区");
+static_assert(ACT_ADEL + 1024 <= ACT_ALIAS_TSAVE, "别名删除段与别名表保存/添加动作重叠");
+static_assert(ACT_ALIAS_TADD + 1 <= 4096, "别名表动作越出保留区");
 static_assert(ACT_EXCL_DEL + 1024 <= ACT_WINGM_REN, "排除目录删除段与重命名段重叠");
 static_assert(ACT_WINGM_REN + 60 <= ACT_OPEN, "窗口重命名段 (上限 59 档案) 与打开行为段重叠");
 
@@ -148,22 +152,21 @@ struct XjsSetCard {
     float y = 0, h = 0;
 };
 
-/* 分类下标 (行模型 switch 与 SET_TREE 共用; 重排只动这两处) */
+/* 分类下标 (行模型 switch 与 SET_TREE 共用; 重排只动这两处)。
+   2026-10-06 精简合并: 新建窗口→窗口页第二张卡, 别名→文件分类页第二张卡,
+   内存→性能与内存页第一张卡, 开源许可→关于页尾部 md 卡 (旧 SC_* 下标废弃) */
 enum { SC_GENERAL = 0,  /* 通用 = 全局设置 (缩放/双击Ctrl/自启) */
-       SC_WIN,          /* ─ 窗口设置·窗口 (快捷键/名称/失焦动作/激活位置/标题栏与状态栏可见性, 每窗) */
+       SC_WIN,          /* ─ 窗口设置·窗口 (快捷键/名称/失焦动作/激活位置/标题栏与状态栏可见性 + 新建窗口卡, 每窗) */
        SC_APPEAR,       /* ─ 窗口设置·外观 (皮肤, 每窗) */
        SC_LIST,         /* ─ 窗口设置·列表框 (每窗) */
        SC_MATCH,        /* ─ 窗口设置·搜索匹配 (每窗, 2026-09-17 起移出通用) */
        SC_OPEN,         /* ─ 窗口设置·打开 (每窗) */
-       SC_CREATE,       /* ─ 窗口设置·创建 (每窗: 新窗口的初始搜索词/关键词) */
        SC_MANAGE,       /* 窗口管理 (全局: 档案列表, 可删除) */
        SC_DATA,         /* 数据维护 (全局) */
-       SC_FILTER,       /* 文件分类 (全局: 引擎筛选器表格编辑, 2026-09-22 抄自正式版) */
-       SC_ALIAS,        /* 别名 (全局: 引擎路径别名表格编辑, 2026-09-22 抄自正式版) */
-       SC_MEMORY,       /* 内存 (全局: 大页内存权限 + 引擎索引内存占用, 2026-09-21) */
-       SC_PERF,         /* 性能分析 (全局: 引擎队列实时状态 + 各阶段性能统计采样, 2026-09-21) */
+       SC_FILTER,       /* 分类与别名 (全局: 引擎筛选器/路径别名两张表格, 2026-09-22 抄自正式版) */
+       SC_PERF,         /* 性能与内存 (全局: 内存页锁定+索引内存占用 + 引擎队列实时状态 + 各阶段统计采样, 1s 刷新) */
        SC_PLUGINS,      /* 插件 (全局: 原生插件管理, 2026-09-19) */
-       SC_DONATE, SC_MODES, SC_LICENSE, SC_ABOUT, SC_N };
+       SC_DONATE, SC_MODES, SC_ABOUT, SC_N };
 
 /* 左侧分类树 (两层): "窗口设置"分组节点 (grp, 可折叠, 不可选中) 下的子级缩进一级 ——
    全局设置与每窗设置一眼可分 (子级全部作用到 owner 窗口)。
@@ -177,17 +180,13 @@ static const XjsSetCatNode SET_TREE[] = {
     { L"设置分类.列表",     SC_LIST,    false, 1 },
     { L"设置分类.搜索匹配", SC_MATCH,   false, 1 },
     { L"设置分类.打开",     SC_OPEN,    false, 1 },
-    { L"设置分类.新建窗口", SC_CREATE,  false, 1 },
     { L"设置分类.窗口管理", SC_MANAGE,  false, 0 },
-    { L"设置分类.数据维护", SC_DATA,    false, 0 },
-    { L"设置分类.文件分类", SC_FILTER,  false, 0 },
-    { L"设置分类.别名",     SC_ALIAS,   false, 0 },
-    { L"设置分类.内存",     SC_MEMORY,  false, 0 },
-    { L"设置分类.性能分析", SC_PERF,    false, 0 },
+    { L"设置分类.索引",     SC_DATA,    false, 0 },
+    { L"设置分类.分类与别名", SC_FILTER, false, 0 },
+    { L"设置分类.性能与内存", SC_PERF,   false, 0 },
     { L"设置分类.插件",     SC_PLUGINS, false, 0 },
     { L"设置分类.捐赠",     SC_DONATE,  false, 0 },
     { L"设置分类.搜索模式", SC_MODES,   false, 0 },
-    { L"设置分类.开源许可", SC_LICENSE, false, 0 },
     { L"设置分类.关于",     SC_ABOUT,   false, 0 },
 };
 static const int SET_TREE_N = (int)(sizeof(SET_TREE) / sizeof(SET_TREE[0]));
@@ -206,6 +205,7 @@ struct XjsSettingsState {
         *brDim = NULL, *brFaint = NULL, *brAccent = NULL, *brPanel = NULL, *brPanel2 = NULL,
         *brBorderStrong = NULL, *brDanger = NULL, *brWhite = NULL, *brAccentSoft = NULL,
         *brMask = NULL, *brOkFill = NULL, *brOkHover = NULL, *brWarn = NULL;
+    XjsStroke* ssRound = NULL;       /* 侧栏分类图标圆头描边 (同源样式 SVG stroke-linecap=round, 菜单图标同款) */
     XjsGradBrush* brBgGrad = NULL;   /* 窗口底 bg1→bg2 纵渐变 (同源样式 body) */
     XjsFormat *tfName = NULL, *tfDesc = NULL, *tfTitle = NULL, *tfCat = NULL, *tfBtn = NULL,
         *tfNameC = NULL, *tfDescC = NULL;   /* C 变体 = 水平居中 (捐赠页引导语/二维码标题) */
@@ -222,7 +222,7 @@ struct XjsSettingsState {
     float sbSideGrabOff = 0;     /* 分类栏 thumb 按下点相对顶缘偏移 */
     int sbHover = 0;             /* 悬停的滚动条 (0=无 1=右缘内容条 2=分类栏条; thumb 提亮一档) */
     int cat = 0;                 /* 当前分类 (SC_* 常量) */
-    std::wstring liveSig;        /* 内存/性能分析页 1s 采样签名 (变了才置脏重建, 见 XjsSetLiveSignature) */
+    std::wstring liveSig;        /* 性能与内存页 1s 采样签名 (变了才置脏重建, 见 XjsSetLiveSignature) */
     bool winTreeOpen = true;     /* 左侧"窗口设置"分组展开态 */
     int hoverRow = -1, hoverSide = -1;   /* hoverRow = 卡序×1000+卡内行序; hoverSide = 侧边栏可见条目下标 */
     bool trackingLeave = false;
@@ -348,7 +348,7 @@ static int XjsSetSideItems(XjsSetSideItem* out, int cap) {
 }
 
 /* 侧边栏宽度自适应 (单一事实源: 渲染/命中/点击/滚动四处同调) =
-   最宽可见分类名实测 + 左内边距 + 缩进 + 文本左偏 + 右缘, 夹在 [SS(132), SS(240)]。
+   最宽可见分类名实测 + 左内边距 + 缩进 + 图标列(12+16+7) + 文本 + 右缘, 夹在 [SS(132), SS(240)]。
    中文 4~5 字分类 = 旧固定宽 132; 英文长分类 (Window management 等) 自适应展宽不截断。
    tfCat 未就绪 (首帧命中先于绘制) 时回旧固定宽 */
 static float XjsSetSideW() {
@@ -360,7 +360,7 @@ static float XjsSetSideW() {
         const XjsSetCatNode& nd = SET_TREE[side[i].idx];
         float ind = nd.lvl ? SS(14) : 0;
         float tw = XjsMeasureText(XjsT(nd.name), s_set.tfCat);
-        need = xf_max(need, SS(10) + ind + SS(12) + tw + SS(10));
+        need = xf_max(need, SS(10) + ind + SS(35) + tw + SS(10));
     }
     return xf_min(SS(240), xf_max(SS(132), need));
 }
@@ -879,6 +879,15 @@ static bool XjsSetBuildRows() {
             addRow(ACT_TASKBAR, CT_SWITCH, XjsT(L"设置.窗口.任务栏图标"),
                    XjsT(L"设置.窗口.任务栏图标.说明"),
                    L"", g_taskbarIcon, false);
+            /* 新建窗口卡 (2026-10-06 并入窗口页): 本窗档案创建新窗口时的初始搜索状态 */
+            newCard(XjsT(L"设置分类.新建窗口"));
+            const wchar_t* const FILL_T[3] = { XjsT(L"通用词.清空"), XjsT(L"通用词.指定关键词"), XjsT(L"通用词.上一次搜索的词") };
+            addRow(ACT_CREATEFILL, CT_BUTTON, XjsT(L"设置.新建窗口.初始搜索词"),
+                   XjsT(L"设置.新建窗口.初始搜索词.说明"),
+                   FILL_T[g_createFill & 3], false, false);
+            addRow(ACT_CREATEKW, CT_BUTTON, XjsT(L"设置.新建窗口.指定关键词"),
+                   XjsT(L"设置.新建窗口.指定关键词.说明"),
+                   XjsT(L"通用词.修改"), false, false, g_createFill != 1);
             break;
         }
         case SC_MANAGE: {  /* 窗口管理 (全局): 全部命名窗口档案, 可删除 (已打开连窗销毁+卸热键) */
@@ -937,7 +946,7 @@ static bool XjsSetBuildRows() {
             newCard(XjsT(L"设置分类.列表"));
             {   /* 默认排序 (每窗): 事实源 = 结果对象, 这里只匹配预设显示当前值 */
                 const char* sf = g_result ? xjs_result_GetSortField(g_result) : NULL;
-                bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口: 引擎 GetSortway 读回相反 */
+                bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口 */
                 int si = -1;
                 for (int i = 0; i < 7; i++)
                     if (sf && !strcmp(SORT_PRESETS[i].field, sf) && SORT_PRESETS[i].asc == sw) { si = i; break; }
@@ -962,8 +971,8 @@ static bool XjsSetBuildRows() {
                 addRow(ACT_VIEW + m, CT_OPTION, VN[m], L"", L"", g_viewMode == m, false);
             break;
         }
-        case SC_DATA: {  /* 数据维护 */
-            newCard(XjsT(L"设置分类.数据维护"));
+        case SC_DATA: {  /* 索引 (原"数据维护", 2026-10-06 用户口径更名): 重建索引/清历史/排除目录 */
+            newCard(XjsT(L"设置分类.索引"));
             addRow(ACT_REBUILD, CT_BUTTON, XjsT(L"设置.数据维护.重建索引"), XjsT(L"设置.数据维护.重建索引.说明"), XjsT(L"重建.重建按钮"), false, true);
             addRow(ACT_CLEARHIST, CT_BUTTON, XjsT(L"菜单.清空搜索历史"), XjsT(L"设置.数据维护.清空历史"), XjsT(L"通用词.清空"), false, false);
             newCard(XjsT(L"设置.数据维护.排除目录"));
@@ -980,7 +989,7 @@ static bool XjsSetBuildRows() {
             }
             break;
         }
-        case SC_FILTER: {  /* 文件分类 (全局: 引擎筛选器表格, 保存整体下发 xjs_filter_SetFilterJSON) */
+        case SC_FILTER: {  /* 分类与别名 (全局: 两张表格并入一页, 保存各自整体下发引擎) */
             if (s_filterReload) { XjsSetFilterRowsLoad(); s_filterReload = false; }
             newCard(XjsT(L"设置分类.文件分类"));
             {   /* 说明: 两段合一 (名称行顶 + 说明占整块, 同内存页 lockDesc 配方) */
@@ -1001,56 +1010,50 @@ static bool XjsSetBuildRows() {
                 s_set.cards.back().rows.back().trowIdx = i;
                 s_set.cards.back().rows.back().tblCols = 3;
             }
-            break;
-        }
-        case SC_ALIAS: {  /* 别名 (全局: 引擎路径别名表格, 保存整体下发 xjs_alias_SetAliasJSON sync=TRUE) */
-            if (s_aliasReload) { XjsSetAliasRowsLoad(); s_aliasReload = false; }
-            newCard(XjsT(L"设置分类.别名"));
-            {
+            {   /* 别名卡 (2026-10-06 并入本页): 引擎路径别名表格, 保存整体下发 xjs_alias_SetAliasJSON sync=TRUE */
+                if (s_aliasReload) { XjsSetAliasRowsLoad(); s_aliasReload = false; }
+                newCard(XjsT(L"设置分类.别名"));
                 std::wstring desc = std::wstring(XjsT(L"设置.别名.说明")) + L"\n" + XjsT(L"设置.别名.生效说明");
                 addRow(ACT_NONE, CT_INFO, XjsT(L"设置.别名.说明标题"), desc.c_str(), L"", false, false);
                 s_set.cards.back().rows.back().block = true;
-            }
-            {
-                addRow(ACT_TADD, CT_BUTTON, XjsT(L"设置.别名.别名列表"),
+                addRow(ACT_ALIAS_TADD, CT_BUTTON, XjsT(L"设置.别名.别名列表"),
                        XjsFmt(XjsT(L"设置.别名.计数"), std::to_wstring(XjsSetAliasRows())).c_str(),
-                       XjsT(L"设置.别名.添加别名"), false, false, false, ACT_TSAVE, XjsT(L"通用词.保存"), false);
-            }
-            int an = XjsSetAliasRows();
-            if (an == 0)
-                addRow(ACT_NONE, CT_INFO, XjsT(L"设置.别名.尚未配置"), L"", L"", false, false);
-            for (int i = 0; i < an; i++) {
-                addRow(ACT_ADEL + i, CT_TROW, L"", L"", XjsT(L"通用词.删除"), false, false);
-                s_set.cards.back().rows.back().trowIdx = i;
-                s_set.cards.back().rows.back().tblCols = 2;
-            }
-            break;
-        }
-        case SC_MEMORY: {  /* 内存 (全局): 大页内存权限 + 引擎索引内存占用 (引擎实时报告, 1s 刷新) */
-            newCard(XjsT(L"设置分类.内存"));
-            /* 内存页锁定: 勾选态与状态行都以真实权限状态为准 (原版口径: 不入配置, 系统策略即事实源) */
-            int st = XjsMemLockQuery();
-            bool memOn = (st == XMLK_ST_ENABLED || st == XMLK_ST_GRANTED_OFF || st == XMLK_ST_GRANTED);
-            std::wstring lockDesc = std::wstring(XjsT(L"设置.内存.内存页锁定.说明")) + L"\n"
-                                  + XjsT(L"设置.内存.当前状态") + XjsMemLockStateText(st);
-            addRow(ACT_MEMLOCK, CT_SWITCH, XjsT(L"设置.内存.内存页锁定"), lockDesc.c_str(), L"", memOn, false);
-            s_set.cards.back().rows.back().warnText = (st == XMLK_ST_GRANTED || st == XMLK_ST_REMOVED);
-            if (g_engine) {
-                addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.索引内存占用"),
-                       (XjsT(L"设置.内存.索引内存占用.值前缀") + XjsFmtMemBytes(xjs_db_GetMemorySize(g_engine))).c_str(),
-                       L"", false, false);
-                std::wstring detail = XjsStatTextW(xjs_db_GetMemorySizeString(g_engine));
-                if (!detail.empty()) {
-                    addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.内存明细"), detail.c_str(), L"", false, false);
-                    s_set.cards.back().rows.back().block = true;   /* 多行明细: 名称行顶 + 文本占整块 */
+                       XjsT(L"设置.别名.添加别名"), false, false, false, ACT_ALIAS_TSAVE, XjsT(L"通用词.保存"), false);
+                int an = XjsSetAliasRows();
+                if (an == 0)
+                    addRow(ACT_NONE, CT_INFO, XjsT(L"设置.别名.尚未配置"), L"", L"", false, false);
+                for (int i = 0; i < an; i++) {
+                    addRow(ACT_ADEL + i, CT_TROW, L"", L"", XjsT(L"通用词.删除"), false, false);
+                    s_set.cards.back().rows.back().trowIdx = i;
+                    s_set.cards.back().rows.back().tblCols = 2;
                 }
-            } else {
-                addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.索引内存占用"),
-                       XjsT(L"设置.性能.引擎未就绪"), L"", false, false);
             }
             break;
         }
-        case SC_PERF: {  /* 性能分析 (全局): 引擎队列实时状态 + 各阶段统计采样 (原版"资源占用"窗口内化) */
+        case SC_PERF: {  /* 性能与内存 (全局): 内存页锁定+索引内存占用 + 引擎队列实时状态 + 各阶段统计采样
+                            (2026-10-06 内存并入本页; 原"资源占用"窗口内化; 引擎实时报告, 1s 刷新) */
+            {   /* 内存卡: 锁定勾选态与状态行都以真实权限状态为准 (原版口径: 不入配置, 系统策略即事实源) */
+                newCard(XjsT(L"设置分类.内存"));
+                int st = XjsMemLockQuery();
+                bool memOn = (st == XMLK_ST_ENABLED || st == XMLK_ST_GRANTED_OFF || st == XMLK_ST_GRANTED);
+                std::wstring lockDesc = std::wstring(XjsT(L"设置.内存.内存页锁定.说明")) + L"\n"
+                                      + XjsT(L"设置.内存.当前状态") + XjsMemLockStateText(st);
+                addRow(ACT_MEMLOCK, CT_SWITCH, XjsT(L"设置.内存.内存页锁定"), lockDesc.c_str(), L"", memOn, false);
+                s_set.cards.back().rows.back().warnText = (st == XMLK_ST_GRANTED || st == XMLK_ST_REMOVED);
+                if (g_engine) {
+                    addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.索引内存占用"),
+                           (XjsT(L"设置.内存.索引内存占用.值前缀") + XjsFmtMemBytes(xjs_db_GetMemorySize(g_engine))).c_str(),
+                           L"", false, false);
+                    std::wstring detail = XjsStatTextW(xjs_db_GetMemorySizeString(g_engine));
+                    if (!detail.empty()) {
+                        addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.内存明细"), detail.c_str(), L"", false, false);
+                        s_set.cards.back().rows.back().block = true;   /* 多行明细: 名称行顶 + 文本占整块 */
+                    }
+                } else {
+                    addRow(ACT_NONE, CT_INFO, XjsT(L"设置.内存.索引内存占用"),
+                           XjsT(L"设置.性能.引擎未就绪"), L"", false, false);
+                }
+            }
             newCard(XjsT(L"设置.性能.实时状态"));
             addRow(ACT_NONE, CT_INFO, XjsT(L"设置.性能.图标任务队列"),
                    XjsFmt(XjsT(L"设置.性能.待处理N"),
@@ -1144,17 +1147,6 @@ static bool XjsSetBuildRows() {
                    XjsT(L"设置.打开.打开后隐藏窗口.说明"), L"", g_openHideWindow, false);
             break;
         }
-        case SC_CREATE: {  /* 新建窗口 (每窗: 新窗口创建时的初始搜索状态; 显示前即执行一次首搜) */
-            newCard(XjsT(L"设置分类.新建窗口"));
-            const wchar_t* const FILL_T[3] = { XjsT(L"通用词.清空"), XjsT(L"通用词.指定关键词"), XjsT(L"通用词.上一次搜索的词") };
-            addRow(ACT_CREATEFILL, CT_BUTTON, XjsT(L"设置.新建窗口.初始搜索词"),
-                   XjsT(L"设置.新建窗口.初始搜索词.说明"),
-                   FILL_T[g_createFill & 3], false, false);
-            addRow(ACT_CREATEKW, CT_BUTTON, XjsT(L"设置.新建窗口.指定关键词"),
-                   XjsT(L"设置.新建窗口.指定关键词.说明"),
-                   XjsT(L"通用词.修改"), false, false, g_createFill != 1);
-            break;
-        }
         case SC_DONATE: {  /* 捐赠 (图片编译进 EXE 资源, 运行期解码) */
             newCard(XjsT(L"设置分类.捐赠"));
             addRow(ACT_NONE, CT_INFO, XjsT(L"设置.捐赠.引导语"), XjsT(L"设置.捐赠.扫码标题"), L"", false, false);
@@ -1167,9 +1159,6 @@ static bool XjsSetBuildRows() {
         }
         case SC_MODES:   /* 搜索模式 (内置《搜索模式简介》md 文档, 通用引擎见 xjs_md.cpp) */
             XjsSetAppendMdPage(0, XjsT(L"菜单.搜索模式"), XjsT(L"设置.搜索模式.简介页标题"));
-            break;
-        case SC_LICENSE:   /* 许可证 (内置《第三方组件声明》md 文档) */
-            XjsSetAppendMdPage(1, XjsT(L"设置分类.开源许可"), XjsT(L"设置.开源许可.第三方声明"));
             break;
         case SC_ABOUT: {  /* 关于 */
             newCard(XjsT(L"设置分类.关于"));
@@ -1206,6 +1195,8 @@ static bool XjsSetBuildRows() {
             addRow(ACT_NONE, CT_INFO, XjsT(L"设置.关于.网贷经历"),
                    XjsT(L"设置.关于.停更预告"), L"", false, false);
             addRow(ACT_NONE, CT_INFO, XjsT(L"设置.关于.作者署名"), L"", L"", false, false);
+            /* 开源许可 (2026-10-06 并入关于页尾): 内置《第三方组件声明》md 文档 */
+            XjsSetAppendMdPage(1, XjsT(L"设置分类.开源许可"), XjsT(L"设置.开源许可.第三方声明"));
             break;
         }
     }
@@ -1310,6 +1301,7 @@ static void XjsSetFreeMdDocs() {
 
 static void XjsSetFreeResources() {
     XjsLayersDropRt(s_set.rt);   /* 先摘 s_layers 条目再放 RT: 设置窗也弹 Toast (透明度层唯一使用方), 漏摘 = 键成悬垂堆地址 */
+    if (s_set.ssRound) { s_set.ssRound->Release(); s_set.ssRound = NULL; }
     if (s_set.rt) { s_set.rt->Release(); s_set.rt = NULL; }
     if (s_set.imgWechat) { s_set.imgWechat->Release(); s_set.imgWechat = NULL; }
     if (s_set.imgAlipay) { s_set.imgAlipay->Release(); s_set.imgAlipay = NULL; }
@@ -1378,6 +1370,7 @@ static void XjsSetEnsureResources(HWND hwnd) {
     s_set.rt->CreateSolidColorBrush(XjsColorF(1, 1, 1, 1), &s_set.brWhite);
     XjsGradientStop gs[2] = { { 0.0f, bg1 }, { 1.0f, bg2 } };
     s_set.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, (FLOAT)rc.bottom + 1), gs, 2, &s_set.brBgGrad);
+    g_gfx->RoundStroke(&s_set.ssRound);   /* 分类图标圆头笔画 (两端同源样式) */
     float px = SS(1);
     g_dw->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, 13 * px, L"zh-cn", &s_set.tfName);
@@ -1746,13 +1739,13 @@ static int XjsSetSbHoverAt(HWND hwnd, POINT pt) {
 
 /* CT_TROW 表格行第 col 格输入框矩形 (渲染 / 禁用格点选否决 两处同源)。
    cx0/cx1 = 内容区左右缘 (与绘制侧 sideW+SS(24) / w-SS(28) 同公式); 框区右缘让位行尾"删除"钮。
-   3 列 (文件分类): 名称 26% / 类型 16% / 后缀 58%; 2 列 (别名): 路径 54% / 别名 46%; 格间距 SS(8) */
+   3 列 (文件分类): 名称 26% / 类型 12% / 后缀 62%; 2 列 (别名): 路径 54% / 别名 46%; 格间距 SS(8) */
 static void XjsSetTblColRect(const XjsSetRow& r, int col, float cx0, float cx1, float ry0, float ry1, XjsRect* out) {
     float boxR = cx1 - SS(18) - (r.ctrlW > 0 ? r.ctrlW + SS(10) : 0);
     float total = boxR - (cx0 + SS(18)) - SS(8) * (r.tblCols - 1);
     float x = cx0 + SS(18), w = 0;
     if (r.tblCols == 3) {
-        static const float FR[3] = { 0.26f, 0.16f, 0.58f };
+        static const float FR[3] = { 0.26f, 0.12f, 0.62f };   /* 类型列只放 ≤3 位数字: 12% 够用, 让给最挤的后缀 */
         for (int c = 0; c < col; c++) x += total * FR[c] + SS(8);
         w = total * FR[col];
     } else {
@@ -1780,6 +1773,95 @@ static bool XjsSetTblDisabledHit(HWND hwnd, POINT pt) {
             return XjsPtIn(box, pt);
         }
     return false;
+}
+
+/* ==================== 侧栏分类图标 (2026-10-06) ====================
+ * 16×16 线性图标, 画法同 xjs_popup 的 XjsMenuIconDraw (几何锚点 = 正式版设置侧栏
+ * CATS 内联 SVG: stroke-width 1.2 / linecap·linejoin round), 用 ssRound 圆头笔画。
+ * 圆弧用 3~4 段折线近似 (16px 下不可辨); 新增分类在 switch 补一个 case。 */
+static void XjsSetCatIconDraw(XjsRt* rt, int cat, float cx, float cy, XjsBrush* br, XjsStroke* ss) {
+    if (!rt || !br || !ss) return;
+    auto P = [&](float x, float y) { return XjsPoint2F(cx - SS(8) + SS(x), cy - SS(8) + SS(y)); };
+    const float w = SS(1.2f);
+    auto seg = [&](float x1, float y1, float x2, float y2) { rt->DrawLine(P(x1, y1), P(x2, y2), br, w, ss); };
+    auto rrect = [&](float x0, float y0, float x1, float y1, float r) {
+        rt->DrawRoundedRectangle(XjsRoundedRectF(
+            XjsRectF(cx - SS(8) + SS(x0), cy - SS(8) + SS(y0), cx - SS(8) + SS(x1), cy - SS(8) + SS(y1)),
+            SS(r), SS(r)), br, w, ss);
+    };
+    auto ell = [&](float ex, float ey, float rx, float ry) {
+        rt->DrawEllipse(XjsEllipseF(P(ex, ey), SS(rx), SS(ry)), br, w, ss);
+    };
+    switch (cat) {
+        case SC_GENERAL:   /* 通用: 齿轮 (圆心 + 8 向辐条) */
+            ell(8, 8, 2.5f, 2.5f);
+            seg(8, 1.5f, 8, 3.5f);   seg(8, 12.5f, 8, 14.5f);
+            seg(1.5f, 8, 3.5f, 8);   seg(12.5f, 8, 14.5f, 8);
+            seg(3.4f, 3.4f, 4.8f, 4.8f);    seg(11.2f, 11.2f, 12.6f, 12.6f);
+            seg(12.6f, 3.4f, 11.2f, 4.8f);  seg(4.8f, 11.2f, 3.4f, 12.6f);
+            break;
+        case SC_WIN:       /* 窗口: 带标题栏的窗框 */
+            rrect(2.5f, 3, 13.5f, 13, 1.5f);
+            seg(2.5f, 6, 13.5f, 6);
+            break;
+        case SC_APPEAR:    /* 外观: 圆 + 十字 */
+            ell(8, 8, 5.5f, 5.5f);
+            seg(8, 2.5f, 8, 13.5f);
+            seg(2.5f, 8, 13.5f, 8);
+            break;
+        case SC_LIST:      /* 列表: 行卡 + 两条分隔线 */
+            rrect(2, 2.5f, 14, 13.5f, 1.5f);
+            seg(2, 6.5f, 14, 6.5f);
+            seg(2, 10.5f, 14, 10.5f);
+            break;
+        case SC_MATCH:     /* 搜索匹配: 双滑杆 */
+            seg(2, 5, 14, 5);    ell(6, 5, 1.8f, 1.8f);
+            seg(2, 11, 14, 11);  ell(10, 11, 1.8f, 1.8f);
+            break;
+        case SC_OPEN:      /* 打开: 盒 + 右向箭头 */
+            seg(10, 3.5f, 3.5f, 3.5f);  seg(3.5f, 3.5f, 3.5f, 12.5f);  seg(3.5f, 12.5f, 10, 12.5f);
+            seg(7, 8, 13, 8);
+            seg(10.5f, 5.5f, 13, 8);  seg(13, 8, 10.5f, 10.5f);
+            break;
+        case SC_MANAGE:    /* 窗口管理: 前后两窗 (后窗只画未遮的三边) */
+            seg(5.5f, 3, 13.5f, 3);   seg(13.5f, 3, 13.5f, 11);   seg(5.5f, 3, 5.5f, 5.5f);
+            rrect(2, 5.5f, 10.5f, 13.5f, 1.5f);
+            break;
+        case SC_DATA:      /* 数据维护: 数据库圆柱 (上下弧折线近似) */
+            ell(8, 3.5f, 5.5f, 2);
+            seg(2.5f, 3.5f, 2.5f, 12.5f);  seg(13.5f, 3.5f, 13.5f, 12.5f);
+            seg(2.5f, 8, 4.3f, 9.4f);  seg(4.3f, 9.4f, 8, 10);  seg(8, 10, 11.7f, 9.4f);  seg(11.7f, 9.4f, 13.5f, 8);
+            seg(2.5f, 12.5f, 4.3f, 13.9f);  seg(4.3f, 13.9f, 8, 14.5f);  seg(8, 14.5f, 11.7f, 13.9f);  seg(11.7f, 13.9f, 13.5f, 12.5f);
+            break;
+        case SC_FILTER:    /* 分类与别名: 漏斗 */
+            seg(2.5f, 2.5f, 13.5f, 2.5f);  seg(13.5f, 2.5f, 9.5f, 7.5f);  seg(9.5f, 7.5f, 9.5f, 12.5f);
+            seg(9.5f, 12.5f, 6.5f, 14);  seg(6.5f, 14, 6.5f, 7.5f);  seg(6.5f, 7.5f, 2.5f, 2.5f);
+            break;
+        case SC_PERF: {    /* 性能与内存: 仪表盘 (半圆盘 + 指针 + 轴心) */
+            seg(2.5f, 9, 4.11f, 5.11f);  seg(4.11f, 5.11f, 8, 3.5f);  seg(8, 3.5f, 11.89f, 5.11f);  seg(11.89f, 5.11f, 13.5f, 9);
+            seg(8, 9, 10.8f, 6.2f);
+            rt->FillEllipse(XjsEllipseF(P(8, 9), SS(1.1f), SS(1.1f)), br);
+            break;
+        }
+        case SC_PLUGINS:   /* 插件: 插头 (双叉 + 本体 + 引线) */
+            seg(6, 2, 6, 5);  seg(10, 2, 10, 5);
+            rrect(4, 5, 12, 11, 2);
+            seg(8, 11, 8, 14);
+            break;
+        case SC_DONATE:    /* 捐赠: 心形 (双圆 + V 底) */
+            ell(5.4f, 5.6f, 2.6f, 2.6f);  ell(10.6f, 5.6f, 2.6f, 2.6f);
+            seg(3.2f, 7.6f, 8, 13);  seg(12.8f, 7.6f, 8, 13);
+            break;
+        case SC_MODES:     /* 搜索模式: 放大镜 */
+            ell(7, 7, 4.5f, 4.5f);
+            seg(10.4f, 10.4f, 14, 14);
+            break;
+        case SC_ABOUT:     /* 关于: 信息圆 (i) */
+            ell(8, 8, 5.5f, 5.5f);
+            seg(8, 4.6f, 8, 5.4f);
+            seg(8, 7.4f, 8, 11.4f);
+            break;
+    }
 }
 
 static void XjsSetPaint(HWND hwnd) {
@@ -1858,23 +1940,28 @@ static void XjsSetPaint(HWND hwnd) {
         if (sy + chh < 0 || sy > vh) continue;      /* 滚出视口的条目不画 */
         float ind = nd.lvl ? SS(14) : 0;   /* 子级缩进一级 (树形层次) */
         XjsRect br = XjsRectF(SS(10) + ind, sy, sideW - SS(10), sy + chh);
+        float textX = br.left + SS(12) + SS(16) + SS(7);   /* 文本 = 图标列 (16u) 之后; 分组行箭头占同列 */
         bool sel = nd.cat == s_set.cat;
         if (sel) {
             s_set.rt->FillRoundedRectangle(XjsRoundedRectF(br, SS(8), SS(8)), s_set.brAccentSoft);
             { const wchar_t* nm_ = XjsT(nd.name);
               s_set.rt->DrawText(nm_, (UINT32)wcslen(nm_), s_set.tfCat,
-                XjsRectF(br.left + SS(12), br.top, br.right, br.bottom), s_set.brAccent); }
+                XjsRectF(textX, br.top, br.right, br.bottom), s_set.brAccent); }
         } else {
             if (si == s_set.hoverSide)
                 s_set.rt->FillRoundedRectangle(XjsRoundedRectF(br, SS(8), SS(8)), s_set.brHover);
             { const wchar_t* nm_ = XjsT(nd.name);
               s_set.rt->DrawText(nm_, (UINT32)wcslen(nm_), s_set.tfCat,
-                XjsRectF(br.left + SS(12), br.top, br.right, br.bottom),
+                XjsRectF(textX, br.top, br.right, br.bottom),
                 nd.grp ? s_set.brText : s_set.brDim); }
         }
-        /* 分组节点的折叠箭头 (文本左侧小折线: 展开=向下 V, 收起=向右 >) */
+        /* 分类图标 (16×16 线性, 圆头笔画): 选中=accent 其余=dim; 分组行不画 (箭头占图标列) */
+        if (!nd.grp)
+            XjsSetCatIconDraw(s_set.rt, nd.cat, br.left + SS(12) + SS(8), sy + chh / 2,
+                              sel ? s_set.brAccent : s_set.brDim, s_set.ssRound);
+        /* 分组节点的折叠箭头 (图标列中心小折线: 展开=向下 V, 收起=向右 >) */
         if (nd.grp) {
-            float ax = br.left + SS(5), ay = sy + chh / 2;
+            float ax = br.left + SS(12) + SS(8), ay = sy + chh / 2;
             float dx = SS(3), dy = SS(2);
             XjsPoint2 apex = s_set.winTreeOpen ? XjsPoint2F(ax, ay + dy) : XjsPoint2F(ax + dx, ay);
             XjsPoint2 tail = s_set.winTreeOpen ? XjsPoint2F(ax - dx, ay - dy) : XjsPoint2F(ax - dx, ay - dy);
@@ -2318,7 +2405,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         case ACT_SORT: {
             /* 默认排序 (每窗): 预设菜单选择; 事实源 = 结果对象, 档案只存初始默认 */
             const char* sf = g_result ? xjs_result_GetSortField(g_result) : NULL;
-            bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口: 引擎 GetSortway 读回相反 */
+            bool sw = XjsResultSortAsc(g_result) != FALSE;   /* 方向读收口 */
             POINT anchor = XjsSetDropdownAnchor(r);
             std::vector<XjsPopupItem> items;
             for (int i = 0; i < 7; i++)
@@ -2463,15 +2550,13 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             XjsToastShow(s_set.hwnd, XjsT(L"提示.历史已清空"), XTOAST_SUCCESS, SS(1));
             break;
         case ACT_TADD: {
-            /* 表格添加一行 (按当前分类): 追加空行并聚焦首格 (正式版同款);
-               文件分类预填下一个空闲类型号 1..254 (用尽 = 留空手填) */
-            const bool isFilter = (s_set.cat == SC_FILTER);
-            auto& pool = isFilter ? s_filterEds : s_aliasEds;
-            const int stride = isFilter ? 3 : 2;
-            const int rows = (int)pool.size() / stride;
-            if (rows >= (isFilter ? 256 : 1024)) break;   /* 删除动作段上限, 到顶即不再加 */
-            for (int k = 0; k < stride; k++) pool.push_back(std::make_unique<XjsEditField>());
-            if (isFilter) {
+            /* 文件分类表添加一行: 追加空行并聚焦首格 (正式版同款);
+               预填下一个空闲类型号 1..254 (用尽 = 留空手填) */
+            auto& pool = s_filterEds;
+            const int rows = (int)pool.size() / 3;
+            if (rows >= 256) break;   /* 删除动作段上限, 到顶即不再加 */
+            for (int k = 0; k < 3; k++) pool.push_back(std::make_unique<XjsEditField>());
+            {
                 bool used[255] = {};
                 for (int i = 0; i < rows; i++) {
                     int t = XjsSetTblTypeParse(pool[i * 3 + 1]->ed.text);
@@ -2481,12 +2566,22 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                 while (next <= 254 && used[next]) next++;
                 if (next <= 254) pool[rows * 3 + 1]->ed.text = std::to_wstring(next);
             }
-            pool[rows * stride]->SetFocused(s_set.hwnd, true);   /* 新行首格 (area 下帧渲染回写) */
+            pool[rows * 3]->SetFocused(s_set.hwnd, true);   /* 新行首格 (area 下帧渲染回写) */
+            break;
+        }
+        case ACT_ALIAS_TADD: {
+            /* 别名表添加一行 (2026-10-06 两表同页后按 act 区分, 不再按当前分类路由) */
+            const int rows = (int)s_aliasEds.size() / 2;
+            if (rows >= 1024) break;
+            for (int k = 0; k < 2; k++) s_aliasEds.push_back(std::make_unique<XjsEditField>());
+            s_aliasEds[rows * 2]->SetFocused(s_set.hwnd, true);
             break;
         }
         case ACT_TSAVE:
-            if (s_set.cat == SC_FILTER) XjsSetFilterSave();
-            else XjsSetAliasSave();
+            XjsSetFilterSave();
+            break;
+        case ACT_ALIAS_TSAVE:
+            XjsSetAliasSave();
             break;
         case ACT_COPYVER: {   /* 复制版本信息 (排查问题用, 直接粘贴给对方; 含显示模式技术名) */
             const char* ver = xjs_GetVersion();
@@ -3252,9 +3347,9 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 return 0;
             }
             if (wParam == ID_TIMER_SETLIVE) {
-                /* 内存/性能分析页: 实时数据 1s 采样 — 签名比对, 数据变了才重建行模型
+                /* 性能与内存页: 实时数据 1s 采样 — 签名比对, 数据变了才重建行模型
                    (对话框开着时冻结底层; 其余分类空转零开销) */
-                if ((p->cat == SC_MEMORY || p->cat == SC_PERF) && !p->dlgOpen) {
+                if (p->cat == SC_PERF && !p->dlgOpen) {
                     std::wstring sig = XjsSetLiveSignature();
                     if (sig != p->liveSig) {
                         p->liveSig = std::move(sig);
@@ -3319,7 +3414,7 @@ void XjsSettingsShow(int cat) {
         InvalidateRect(s_set.hwnd, NULL, FALSE);
         ShowWindow(s_set.hwnd, SW_RESTORE);
         SetForegroundWindow(s_set.hwnd);
-        SetTimer(s_set.hwnd, ID_TIMER_SETLIVE, 1000, NULL);   /* 内存/性能分析页实时刷新 (其余分类空转) */
+        SetTimer(s_set.hwnd, ID_TIMER_SETLIVE, 1000, NULL);   /* 性能与内存页实时刷新 (其余分类空转) */
         return;
     }
     s_set.scale = g_s;   /* 初值取主窗尺度 (通常同屏); 跨屏由 WM_DPICHANGED 纠正 */
@@ -3347,7 +3442,7 @@ void XjsSettingsShow(int cat) {
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, x, y, w, h, g_hWnd, NULL, GetModuleHandleW(NULL), NULL);
     if (!hwnd) return;
     s_set.hwnd = hwnd;
-    SetTimer(hwnd, ID_TIMER_SETLIVE, 1000, NULL);   /* 内存/性能分析页实时刷新 (其余分类空转) */
+    SetTimer(hwnd, ID_TIMER_SETLIVE, 1000, NULL);   /* 性能与内存页实时刷新 (其余分类空转) */
     SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)XjsAppIconBig());     /* 窗口级图标 (设置窗有任务栏按钮) */
     SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)XjsAppIconSmall());
     BOOL dark = TRUE;

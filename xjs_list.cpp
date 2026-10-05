@@ -827,7 +827,7 @@ void XjsListRender() {
     /* 排序态以结果对象为事实源 (GetSortField/GetSortway): 宿主不持影子状态,
        未就绪/无结果对象时无高亮无箭头 (此刻也无结果可排) */
     const char* sortFieldNow = g_result ? xjs_result_GetSortField(g_result) : NULL;
-    BOOL sortAscNow = XjsResultSortAsc(g_result);   /* 方向读收口: 引擎 GetSortway 读回相反 */
+    BOOL sortAscNow = XjsResultSortAsc(g_result);   /* 方向读收口 */
     for (int i = 0; i < V.n; i++) {
         XjsColSpec* col = V.c[i];
         XjsRect cr = XjsRectF(xs[i], L.listHead.top, xs[i] + ws[i], L.listHead.bottom);
