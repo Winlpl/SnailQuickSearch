@@ -1148,11 +1148,18 @@ void XjsShowAppMenu() {
         }
         items.push_back(nw);
     }
-    items.push_back({ IDM_MENU_BASE + 47, XjsT(L"菜单.严密模式"), L"", g_viewMode == VM_DENSE, false, false, false });
-    items.push_back({ IDM_MENU_BASE + 41, XjsT(L"菜单.紧凑视图"), L"", g_viewMode == VM_LIST, false, false, false });
-    items.push_back({ IDM_MENU_BASE + 42, XjsT(L"菜单.详情视图"), L"", g_viewMode == VM_DETAILS, false, false, false });
-    items.push_back({ IDM_MENU_BASE + 43, XjsT(L"菜单.中等图标"), L"", g_viewMode == VM_MEDIUM, false, false, false });
-    items.push_back({ IDM_MENU_BASE + 44, XjsT(L"菜单.大图标"), L"", g_viewMode == VM_LARGE, false, false, false });
+    {   /* 视图档位子菜单 (与"创建新窗口"同款级联): 五档收纳, 当前档带 ✓。
+           子项 id = IDM_MENU_BASE+41..47 (分发见 XjsOnPopupResult, 与原平铺项相同) */
+        XjsPopupItem vw;
+        vw.id = 0;   /* 父行只展开不下发 */
+        vw.title = XjsT(L"菜单.视图");
+        vw.children.push_back({ IDM_MENU_BASE + 47, XjsT(L"菜单.严密模式"), L"", g_viewMode == VM_DENSE, false, false, false });
+        vw.children.push_back({ IDM_MENU_BASE + 41, XjsT(L"菜单.紧凑视图"), L"", g_viewMode == VM_LIST, false, false, false });
+        vw.children.push_back({ IDM_MENU_BASE + 42, XjsT(L"菜单.详情视图"), L"", g_viewMode == VM_DETAILS, false, false, false });
+        vw.children.push_back({ IDM_MENU_BASE + 43, XjsT(L"菜单.中等图标"), L"", g_viewMode == VM_MEDIUM, false, false, false });
+        vw.children.push_back({ IDM_MENU_BASE + 44, XjsT(L"菜单.大图标"), L"", g_viewMode == VM_LARGE, false, false, false });
+        items.push_back(vw);
+    }
     items.push_back({ IDM_MENU_BASE + 14, XjsT(L"菜单.预览面板"), L"", g_previewVisible, false, false, false });
     items.push_back({ 0, L"", L"", false, true, false, false });
     /* 皮肤/自启动/关于 → 独立设置窗口 (皮肤列表 18 项曾把菜单撑出屏幕); 重建索引也已移入设置 */

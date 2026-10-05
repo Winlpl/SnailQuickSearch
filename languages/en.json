@@ -513,5 +513,6 @@
  "错误.别名路径重复": "Duplicate path: {0}",
  "错误.表格配置无效": "Invalid configuration: please check your entries",
  "错误.数据库正忙": "Database is busy (scanning/saving/loading), please try again later",
- "错误.表格保存失败": "Save failed, please try again later"
+ "错误.表格保存失败": "Save failed, please try again later",
+ "菜单.视图": "View"
 }

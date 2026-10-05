@@ -513,5 +513,6 @@
  "错误.别名路径重复": "Laluan berulang: {0}",
  "错误.表格配置无效": "Konfigurasi tidak sah: sila semak kemasukan anda",
  "错误.数据库正忙": "Pangkalan data sibuk (sedang imbas/simpan/muat), sila cuba lagi nanti",
- "错误.表格保存失败": "Simpan gagal, sila cuba lagi nanti"
+ "错误.表格保存失败": "Simpan gagal, sila cuba lagi nanti",
+ "菜单.视图": "Paparan"
 }
