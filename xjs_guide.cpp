@@ -242,7 +242,17 @@ void XjsGuideMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     XjsGuide& gd = g_guide;
     switch (msg) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
-            if (wParam == VK_ESCAPE) GuideStop();   /* Esc = 跳过 (不记"不再提示", 源样式同) */
+            if (wParam == VK_ESCAPE) { GuideStop(); return; }   /* Esc = 跳过 (不记"不再提示", 源样式同) */
+            if (wParam == VK_LEFT && gd.idx > 0) {              /* ← = 上一步 (与点按钮同径) */
+                gd.idx--;
+                GuideResetStep();
+                return;
+            }
+            if (wParam == VK_RIGHT || wParam == VK_RETURN || wParam == VK_SPACE) {   /* →/Enter/Space = 下一步·完成 */
+                if (gd.idx < gd.count - 1) { gd.idx++; GuideResetStep(); }
+                else GuideFinish();   /* 最后一步 = 完成, 记忆 (源样式同) */
+                return;
+            }
             return;                                 /* 其余按键一律吞掉 */
         case WM_LBUTTONDOWN: {
             POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };

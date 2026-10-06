@@ -1729,7 +1729,9 @@ void XjsOnPopupResult(int id);
 
 /* 通用模态询问框 (删除确认/多选打开/定位 等一切"询问"点共用; 禁止再用系统 MessageBoxW):
  * buttonsJson = 按钮数组 [{"text":"确定","style":"primary|danger|default"},...]; owner 背景钟罩虚化
- * (源样式 .exit-mask 口径)。同步阻塞到关闭, 返回被点按钮下标; 点蒙层空白/Esc/失活 = -1。 */
+ * (源样式 .exit-mask 口径)。同步阻塞到关闭, 返回被点按钮下标; 点蒙层空白/Esc/失活 = -1。
+ * 键盘口径 (2026-10-06): 打开即焦点落主动作钮 (0 号 — 各调用点主动作在前/取消在末),
+ * Enter/Space=触发焦点钮, ←/→/↑/↓ 与 Tab/Shift+Tab 移动焦点 (循环), 焦点钮画外圈焦点环。 */
 int  XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, const char* buttonsJson);
 /* buttonsJson 的解析 (JSON 细节在 xjs_engine.cpp, 本头文件不见 JSON 类型):
    style: 0=default 1=primary(强调实心) 2=danger(红); 无有效按钮时实现回退返回单个"确定" */

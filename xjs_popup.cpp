@@ -2172,6 +2172,7 @@ struct XjsAskState {
     float cardW = 0, cardH = 0, descH = 0, titleH = 0;   /* titleH: 标题实测高 (超宽换行, 窗高随动) */
     int hoverBtn = -1;
     int pressBtn = -1;   /* 按钮按下待定 (松开触发) */
+    int focusBtn = 0;    /* 键盘焦点按钮: 方向键/Tab 移动, Enter/Space 触发; 打开即落主动作钮 (恒 0 号, 危险/主按钮在前) */
     int result = -1;
     bool trackingLeave = false;
     XjsHwndRt* rt = NULL;
@@ -2249,7 +2250,8 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                                 XSF(20) + s.titleH + XSF(8) + s.descH), s.brTextDim);
                 for (size_t i = 0; i < s.btns.size(); i++) {
                     const XjsRect& r = s.btnRects[i];
-                    bool hov = (s.hoverBtn == (int)i);
+                    bool hov = (s.hoverBtn == (int)i) || (s.focusBtn == (int)i);   /* 键盘焦点 = 悬停同款着色 (Enter 目标要看得见) */
+                    bool foc = (s.focusBtn == (int)i);
                     if (s.btns[i].style == 1) {          /* primary: accent 实心 + 白字 */
                         s.rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), s.brAccent);
                         s.rt->DrawText(s.btns[i].text.c_str(), (UINT32)s.btns[i].text.length(), s.tfBtn, r, s.brWhite);
@@ -2261,6 +2263,11 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         s.rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), s.brPanel2);
                         s.rt->DrawRoundedRectangle(XjsRoundedRectF(r, XSF(8), XSF(8)), hov ? s.brTextDim : s.brBorder);
                         s.rt->DrawText(s.btns[i].text.c_str(), (UINT32)s.btns[i].text.length(), s.tfBtn, r, s.brText);
+                    }
+                    if (foc) {   /* 焦点环: 按钮外 3px 同圆角描边 (danger 红环 / 其余 accent 环) */
+                        XjsRect fr(r.left - XSF(3), r.top - XSF(3), r.right + XSF(3), r.bottom + XSF(3));
+                        s.rt->DrawRoundedRectangle(XjsRoundedRectF(fr, XSF(8) + XSF(3), XSF(8) + XSF(3)),
+                                                   s.btns[i].style == 2 ? s.brErr : s.brAccent);
                     }
                 }
                 HRESULT hr = s.rt->EndDraw();
@@ -2305,9 +2312,24 @@ static LRESULT CALLBACK Xjs_AskWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 XjsAskFinish(press);
             return 0;
         }
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
+            int n = (int)s.btns.size();
             if (wParam == VK_ESCAPE) { XjsAskFinish(-1); return 0; }
+            if (wParam == VK_RETURN || wParam == VK_SPACE) {   /* Enter/Space = 触发焦点按钮 (打开时焦点=主动作钮) */
+                XjsAskFinish((s.focusBtn >= 0 && s.focusBtn < n) ? s.focusBtn : -1);
+                return 0;
+            }
+            int d = 0;   /* ←/↑=左移, →/↓=右移 (到头循环); Tab/Shift+Tab 前后循环 */
+            if (wParam == VK_LEFT || wParam == VK_UP) d = -1;
+            else if (wParam == VK_RIGHT || wParam == VK_DOWN) d = 1;
+            else if (wParam == VK_TAB) d = (GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1;
+            if (d != 0 && n > 0) {
+                int fb = (s.focusBtn < 0 || s.focusBtn >= n) ? 0 : s.focusBtn;
+                s.focusBtn = (fb + d + n) % n;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
+        }
         case WM_ACTIVATE: {
             /* 点蒙层空白(=owner 窗)/切别的程序 = 取消 (源样式"点遮罩空白处取消")。
                本方弹窗菜单若悬于其上须豁免 (同别名框口径, 虽然询问框目前不开菜单) */
@@ -2352,6 +2374,7 @@ int XjsShowAskDialog(HWND owner, const wchar_t* title, const wchar_t* desc, cons
     s.result = -1;
     s.hoverBtn = -1;
     s.pressBtn = -1;
+    s.focusBtn = 0;   /* 焦点落主动作钮 (0 号 = 危险/主按钮, 各调用点均按此序; Enter 即确认主动作) */
     /* 文本格式 (owner 尺度: 调用点在 owner 窗口过程流程内, g_s 即 owner 尺度; 随 WM_DESTROY 释放) */
     g_dw->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, 16 * g_s * XjsUiZoom(), L"zh-cn", &s.tfTitle);
