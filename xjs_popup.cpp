@@ -265,14 +265,14 @@ static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
             seg(10.5f, 5.5f, 13, 8, wN);
             seg(13, 8, 10.5f, 10.5f, wN);
             break;
-        case XMI_FOLDER: {   /* 打开路径: 文件夹 */
-            seg(1.5f, 5.5f, 14.5f, 5.5f, wN);
-            seg(5.5f, 3.5f, 8, 3.5f, wN);
-            seg(8, 3.5f, 9.5f, 5.5f, wN);
-            XjsRoundedRect rr = XjsRoundedRectF(
-                XjsRectF(cx - XSF(8) + XSF(3), cy - XSF(8) + XSF(5.5f), cx - XSF(8) + XSF(13), cy - XSF(8) + XSF(13)),
-                XSF(1.5f), XSF(1.5f));
-            rt->DrawRoundedRectangle(rr, br, wN, ss);
+        case XMI_FOLDER: {   /* 打开路径: 文件夹 (闭合轮廓 + 左上标签; 顶线必须与盒身对齐,
+                                顶线宽出身 = 小尺寸读成带盖垃圾桶) */
+            seg(2, 13, 2, 3.5f, wN);          /* 左缘: 底左 → 标签左 */
+            seg(2, 3.5f, 5.5f, 3.5f, wN);     /* 标签顶 */
+            seg(5.5f, 3.5f, 7, 5.5f, wN);     /* 标签斜坡落到身顶 */
+            seg(7, 5.5f, 14, 5.5f, wN);       /* 身顶 (与左右缘对齐) */
+            seg(14, 5.5f, 14, 13, wN);        /* 右缘 */
+            seg(14, 13, 2, 13, wN);           /* 底缘闭合 */
             break;
         }
         case XMI_RENAME: {   /* 重命名/复制名称: 铅笔+两条底线 */

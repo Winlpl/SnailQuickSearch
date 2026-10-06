@@ -50,6 +50,8 @@ struct XjsMarketState {
         *brDim = NULL, *brFaint = NULL, *brAccent = NULL, *brAccent2 = NULL, *brAccentSoft = NULL,
         *brPanel = NULL, *brPanel2 = NULL, *brHover = NULL, *brOk = NULL, *brWhite = NULL;
     XjsGradBrush* brBgGrad = NULL;
+    XjsColor bg2;                /* 背景纵渐变末端色 (bg1 在 brBg 里), 轴重建时取用 */
+    float bgGradH = -1;          /* 背景纵渐变轴的窗口高 (轴必须随窗口高重建, 钉死 = 最大化下半截钳到末端色) */
     XjsFormat *tfTitle = NULL, *tfSub = NULL, *tfName = NULL, *tfMeta = NULL, *tfDesc = NULL,
         *tfBtn = NULL, *tfCat = NULL, *tfCount = NULL, *tfEmpty = NULL, *tfSearch = NULL;
     int brushEpoch = -1;
@@ -247,6 +249,7 @@ static void XjsMkFreeResources() {
                               &s_mk.brDotR, &s_mk.brDotY, &s_mk.brDotB, &s_mk.brWhite, &s_mk.brWarn };
     for (auto* pb : brs) if (*pb) { (*pb)->Release(); *pb = NULL; }
     if (s_mk.brBgGrad) { s_mk.brBgGrad->Release(); s_mk.brBgGrad = NULL; }
+    s_mk.bgGradH = -1;
     if (s_mk.ssRound) { s_mk.ssRound->Release(); s_mk.ssRound = NULL; }
     for (auto& ic : s_mk.icons) if (ic.bmp) ic.bmp->Release();   /* 图标位图绑本窗 RT, 随资源重建作废 */
     s_mk.icons.clear();
@@ -266,6 +269,7 @@ static void XjsMkEnsureResources(HWND hwnd) {
     if (!s_mk.rt) return;
     XjsColor bg1 = g_skin.bg1; bg1.a = 1.0f;   /* HwndRT 无逐像素 alpha */
     XjsColor bg2 = g_skin.bg2; bg2.a = 1.0f;
+    s_mk.bg2 = bg2;   /* 背景纵渐变轴在绘制期按窗口高懒重建 (见 XjsMkPaint), 这里只存末端色 */
     s_mk.rt->CreateSolidColorBrush(bg1, &s_mk.brBg);
     s_mk.rt->CreateSolidColorBrush(g_skin.border, &s_mk.brBorder);
     s_mk.rt->CreateSolidColorBrush(g_skin.borderStrong, &s_mk.brBorderStrong);
@@ -281,8 +285,6 @@ static void XjsMkEnsureResources(HWND hwnd) {
     s_mk.rt->CreateSolidColorBrush(g_skin.ok, &s_mk.brOk);
     s_mk.rt->CreateSolidColorBrush(g_skin.warn, &s_mk.brWarn);
     s_mk.rt->CreateSolidColorBrush(XjsColor(1, 1, 1, 1), &s_mk.brWhite);   /* 开关圆钮 (恒白, 设置页同款) */
-    XjsGradientStop gs[2] = { { 0.0f, bg1 }, { 1.0f, bg2 } };
-    s_mk.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, (FLOAT)rc.bottom + 1), gs, 2, &s_mk.brBgGrad);
     float px = SS(1);
     g_gfx->RoundStroke(&s_mk.ssRound);   /* 矢量字形圆头笔画 (两端圆头, 同菜单/设置分类图标) */
     s_mk.rt->CreateSolidColorBrush(XjsColor(0.90f, 0.44f, 0.36f), &s_mk.brDotR);   /* 彩点固定色 (不随皮肤) */
@@ -311,8 +313,13 @@ static void XjsMkEnsureResources(HWND hwnd) {
                             s_mk.tfBtn, s_mk.tfCat, s_mk.tfCount, s_mk.tfEmpty, s_mk.tfSearch };
     for (auto* f : nowrap)
         if (f) { f->SetWordWrapping(XJS_WRAP_NONE); f->SetCharEllipsis(); }
-    /* 简介两行词换行 + 末行省略号 (英文按空格断行不劈词, 中文仍逐字) */
-    if (s_mk.tfDesc) { s_mk.tfDesc->SetWordWrapping(XJS_WRAP_WORD); s_mk.tfDesc->SetCharEllipsis(); }
+    /* 简介两行词换行 + 末行省略号 (英文按空格断行不劈词, 中文仍逐字); 顶对齐 —
+       布局盒封顶绘制时超长内容必须从盒顶起排 (居中会让超长块向上下双向溢出, CLIP 切掉首行) */
+    if (s_mk.tfDesc) {
+        s_mk.tfDesc->SetWordWrapping(XJS_WRAP_WORD);
+        s_mk.tfDesc->SetCharEllipsis();
+        s_mk.tfDesc->SetParagraphAlignment(XJS_PARA_NEAR);
+    }
     s_mk.brushEpoch = g_skinEpoch;
     s_mk.unit = unit;
 }
@@ -361,7 +368,7 @@ static XjsBitmap* XjsMkIconGet(const std::wstring& path) {
 static void XjsMkGlyphDraw(int glyph, float cx, float cy) {
     XjsRt* rt = s_mk.rt;
     if (!rt || !s_mk.brAccent || !s_mk.ssRound) return;
-    float u = SS(1.7f);   /* 16 格 → ~27u, 44u 色板内留边 */
+    float u = SS(2.1f);   /* 16 格 → ~34u, 无底色后随图标区放大 (原 1.7f 是 44u 色板内留边档) */
     auto P = [&](float x, float y) { return XjsPoint2F(cx - 8 * u + x * u, cy - 8 * u + y * u); };
     float w = SS(2.0f);
     XjsBrush* br = s_mk.brAccent;
@@ -418,6 +425,64 @@ static void XjsMkSearchGlyph(XjsRt* rt, float cx, float cy, XjsBrush* br) {
     rt->DrawLine(XjsPoint2F(cx + SS(2), cy + SS(2)), XjsPoint2F(cx + SS(5.4f), cy + SS(5.4f)), br, SS(1.3f));
 }
 
+/* 卡片文本省略绘制 — 必须经 s_mk.rt (本窗自建 RT): 全局 XjsDrawEllText 绑 g_rt=主窗 RT,
+   第二窗口跨 RT 域用其画刷 = 绘制被静默丢弃 (同 XjsLineEdit 的 target==g_rt 双路口径)。
+   两个 D2D 硬约束决定了这里不能只靠布局选项 (2026-10-07 实测):
+   ① DrawTextLayout 的 CLIP 选项裁的是文本度量包围盒而非布局盒 — 垂直溢出形同虚设;
+   ② DWrite 省略号签名只在宽度溢出 (单行) 触发, 换行后的高度溢出不裁也不出 "…"。
+   故: 单行走布局级 SetCharEllipsis (宽度触发, 可靠); 多行自己二分 "前缀+…" 压进槽位;
+   最终一律 PushAxisAlignedClip 硬裁 (XjsLineEdit 同款原语) — 清单文本再长也不越出卡片。 */
+static void XjsMkDrawEllLayout(XjsTextLayout* lay, const XjsRect& r, XjsBrush* br) {
+    s_mk.rt->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    s_mk.rt->DrawTextLayout(XjsPoint2F(r.left, r.top), lay, br, D2D1_DRAW_TEXT_OPTIONS_NONE);
+    s_mk.rt->PopAxisAlignedClip();
+}
+static void XjsMkDrawEllText(const std::wstring& s, const XjsRect& r, XjsFormat* fmt, XjsBrush* br) {
+    if (s.empty() || !s_mk.rt || !fmt) return;
+    float maxW = r.right - r.left, maxH = r.bottom - r.top;
+    if (maxW <= 0 || maxH <= 0) return;
+    XjsTextLayout* lay = NULL;
+    if (FAILED(g_dw->CreateTextLayout(s.c_str(), (UINT32)s.length(), fmt, maxW, maxH, &lay)) || !lay) return;
+    lay->SetWordWrapping(XJS_WRAP_NONE);
+    lay->SetCharEllipsis();
+    XjsMkDrawEllLayout(lay, r, br);
+    lay->Release();
+}
+static void XjsMkDrawEllLines(const std::wstring& s, const XjsRect& r, XjsFormat* fmt, XjsBrush* br) {
+    if (s.empty() || !s_mk.rt || !fmt) return;
+    float maxW = r.right - r.left, maxH = r.bottom - r.top;
+    if (maxW <= 0 || maxH <= 0) return;
+    XjsTextLayout* lay = NULL;
+    if (FAILED(g_dw->CreateTextLayout(s.c_str(), (UINT32)s.length(), fmt, maxW, 10000, &lay)) || !lay) return;
+    XjsTextMetrics m = {};
+    bool fits = SUCCEEDED(lay->GetMetrics(&m)) && m.height <= maxH;
+    if (fits) {   /* 两行内装得下: 整段直画 */
+        XjsMkDrawEllLayout(lay, r, br);
+        lay->Release();
+        return;
+    }
+    lay->Release();
+    /* 超高: 二分最长前缀使 "前缀+…" 仍装得下 (词换行的实际断点以最终整串实测为准) */
+    size_t lo = 0, hi = s.size();
+    std::wstring best = L"…";
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        std::wstring t = s.substr(0, mid);
+        if (!t.empty() && (t.back() == L' ' || t.back() == L'\t')) t.pop_back();   /* 截点悬空空白 */
+        t += L"…";
+        XjsTextLayout* tl = NULL;
+        if (FAILED(g_dw->CreateTextLayout(t.c_str(), (UINT32)t.length(), fmt, maxW, 10000, &tl))) break;
+        XjsTextMetrics tm = {};
+        if (SUCCEEDED(tl->GetMetrics(&tm)) && tm.height <= maxH) { best = t; lo = mid; }
+        else hi = mid - 1;
+        tl->Release();
+    }
+    if (SUCCEEDED(g_dw->CreateTextLayout(best.c_str(), (UINT32)best.length(), fmt, maxW, 10000, &lay))) {
+        XjsMkDrawEllLayout(lay, r, br);
+        lay->Release();
+    }
+}
+
 /* 启用开关 (设置页 XjsSetDrawSwitch 同款: 42×24 胶囊轨道 + 18 白圆钮, 开=accent 轨道+钮右移) */
 static void XjsMkDrawSwitch(const XjsRect& tr, bool checked) {
     float r = SS(12);
@@ -441,6 +506,12 @@ static void XjsMkPaint(HWND hwnd) {
         s_mk.searchEd.Attach(hwnd, [hwnd] { InvalidateRect(hwnd, NULL, FALSE); });
     XjsSizeU sz = s_mk.rt->GetPixelSize();
     float w = (float)sz.width, vh = (float)sz.height;
+    if (s_mk.bgGradH != vh) {   /* 背景纵渐变轴跟随窗口高: 钉死创建时高度, 拉伸/最大化后下半截会被钳到末端色 */
+        XjsGradientStop gs[2] = { { 0.0f, s_mk.brBg->GetColor() }, { 1.0f, s_mk.bg2 } };
+        if (s_mk.brBgGrad) { s_mk.brBgGrad->Release(); s_mk.brBgGrad = NULL; }
+        s_mk.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, vh + 1), gs, 2, &s_mk.brBgGrad);
+        s_mk.bgGradH = vh;
+    }
     float headH = XjsMkHeaderH();
     XjsMkGrid g = XjsMkGridGeom(w, vh);
     float maxScroll = s_mk.contentH - vh;
@@ -530,16 +601,15 @@ static void XjsMkPaint(HWND hwnd) {
             hovered ? s_mk.brPanel2 : s_mk.brPanel);
         s_mk.rt->DrawRoundedRectangle(XjsRoundedRectF(cr, SS(10), SS(10)),
             hovered ? s_mk.brBorderStrong : s_mk.brBorder, SS(1.2f));
-        /* 图标位: 圆角色板 + 插件图标 (清单 "图标" 装载; 演示卡/未声明/失败 = 矢量字形) */
-        XjsRect ir = XjsRectF(cr.left + SS(16), cr.top + SS(14), cr.left + SS(60), cr.top + SS(58));
-        s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(ir, SS(10), SS(10)), s_mk.brAccentSoft);
+        /* 图标位: 无底色, 插件图标等比放大占满图标区 (清单 "图标" 装载; 演示卡/未声明/失败 = 矢量字形)。
+           区顶对齐标题带 (12), 底缘止于简介上缘 (56) — 占满后图标不得压简介首行 */
+        XjsRect ir = XjsRectF(cr.left + SS(16), cr.top + SS(12), cr.left + SS(60), cr.top + SS(56));
         XjsBitmap* icb = e.iconPath.empty() ? NULL : XjsMkIconGet(e.iconPath);
         if (icb) {
             XjsSizeU bs = icb->GetPixelSize();
-            if (bs.width > 0 && bs.height > 0) {   /* 等比适配色板内缩 7u */
+            if (bs.width > 0 && bs.height > 0) {   /* 等比适配占满图标区 */
                 float bw = (float)bs.width, bh = (float)bs.height;
-                float box = SS(30);
-                float k = std::min(box / bw, box / bh);
+                float k = std::min((ir.right - ir.left) / bw, (ir.bottom - ir.top) / bh);
                 float dw = bw * k, dh = bh * k;
                 float icx = (ir.left + ir.right - dw) / 2, icy = (ir.top + ir.bottom - dh) / 2;
                 s_mk.rt->DrawBitmap(icb, XjsRectF(icx, icy, icx + dw, icy + dh), 1.0f, 2);
@@ -551,8 +621,7 @@ static void XjsMkPaint(HWND hwnd) {
         float tx = cr.left + SS(72);
         XjsRect ctl = e.installed ? XjsMkSwitchRect(cr) : XjsMkBtnRect(cr);
         float txr = ctl.left - SS(10);
-        s_mk.rt->DrawText(e.name.c_str(), (UINT32)e.name.length(), s_mk.tfName,
-            XjsRectF(tx, cr.top + SS(12), txr, cr.top + SS(34)), s_mk.brText);
+        XjsMkDrawEllText(e.name, XjsRectF(tx, cr.top + SS(12), txr, cr.top + SS(34)), s_mk.tfName, s_mk.brText);
         std::wstring meta;
         if (!e.version.empty()) meta = L"v" + e.version;
         if (!e.author.empty()) {
@@ -560,17 +629,17 @@ static void XjsMkPaint(HWND hwnd) {
             meta += e.author;
         }
         if (!meta.empty())
-            s_mk.rt->DrawText(meta.c_str(), (UINT32)meta.length(), s_mk.tfMeta,
-                XjsRectF(tx, cr.top + SS(34), txr, cr.top + SS(52)), s_mk.brDim);
-        /* 简介两行 (词换行 + 末行省略号), 独占下部整行; 有异常状态时警色替代 (错误比简介重要) */
+            XjsMkDrawEllText(meta, XjsRectF(tx, cr.top + SS(34), txr, cr.top + SS(52)), s_mk.tfMeta, s_mk.brDim);
+        /* 简介两行: 词换行 + 末行省略号, 布局盒高度硬界 — 清单简介再长也绝不溢出卡片
+           (2026-10-07 用户口径); 有异常状态时警色替代 (错误比简介重要) */
         if (e.statusErr.empty())
-            s_mk.rt->DrawText(e.desc.c_str(), (UINT32)e.desc.length(), s_mk.tfDesc,
+            XjsMkDrawEllLines(e.desc,
                 XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
-                s_mk.brDim);
+                s_mk.tfDesc, s_mk.brDim);
         else
-            s_mk.rt->DrawText(e.statusErr.c_str(), (UINT32)e.statusErr.length(), s_mk.tfDesc,
+            XjsMkDrawEllLines(e.statusErr,
                 XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
-                s_mk.brWarn);
+                s_mk.tfDesc, s_mk.brWarn);
         /* 右上角控件: 已安装 = 启用开关 (设置页同款, 可点, 启停走设置页同一执行端);
            未安装/演示卡 = "安装" 主行动钮 (accent 实底, 悬停 accent2, 松开触发)。
            高亮只认控件级悬停 hoverCtl — 整卡悬停点亮按钮违反直觉 (2026-10-06 用户口径) */
@@ -820,6 +889,7 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 dir.icon = XMI_FOLDER;
                 unins.id = IDM_MKCTX_UNINSTALL;
                 unins.title = XjsT(L"商城.卸载");
+                unins.icon = XMI_DELETE;
                 unins.accent = true;   /* 破坏性动作以强调色示出 */
                 std::vector<XjsPopupItem> items;
                 items.push_back(std::move(dir));

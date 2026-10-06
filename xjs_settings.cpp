@@ -207,7 +207,9 @@ struct XjsSettingsState {
         *brBorderStrong = NULL, *brDanger = NULL, *brWhite = NULL, *brAccentSoft = NULL,
         *brMask = NULL, *brOkFill = NULL, *brOkHover = NULL, *brWarn = NULL;
     XjsStroke* ssRound = NULL;       /* 侧栏分类图标圆头描边 (同源样式 SVG stroke-linecap=round, 菜单图标同款) */
-    XjsGradBrush* brBgGrad = NULL;   /* 窗口底 bg1→bg2 纵渐变 (同源样式 body) */
+    XjsGradBrush* brBgGrad = NULL;   /* 窗口底 bg1→bg2 纵渐变 (同源样式 body); 轴按窗口高绘制期懒重建 */
+    XjsColor bg2;                    /* 背景纵渐变末端色 (bg1 在 brBg 里), 轴重建时取用 */
+    float bgGradH = -1;              /* 背景纵渐变轴的窗口高 (钉死创建时高度 = 最大化下半截钳到末端色) */
     XjsFormat *tfName = NULL, *tfDesc = NULL, *tfTitle = NULL, *tfCat = NULL, *tfBtn = NULL,
         *tfNameC = NULL, *tfDescC = NULL;   /* C 变体 = 水平居中 (捐赠页引导语/二维码标题) */
     int brushEpoch = -1;
@@ -1229,6 +1231,7 @@ static void XjsSetFreeResources() {
     s_set.brBorderStrong = s_set.brDanger = s_set.brWhite = s_set.brAccentSoft = NULL;
     s_set.brMask = s_set.brOkFill = s_set.brOkHover = s_set.brWarn = NULL;
     if (s_set.brBgGrad) { s_set.brBgGrad->Release(); s_set.brBgGrad = NULL; }
+    s_set.bgGradH = -1;
     if (s_set.tfName) { s_set.tfName->Release(); s_set.tfName = NULL; }
     if (s_set.tfDesc) { s_set.tfDesc->Release(); s_set.tfDesc = NULL; }
     if (s_set.tfTitle) { s_set.tfTitle->Release(); s_set.tfTitle = NULL; }
@@ -1250,6 +1253,7 @@ static void XjsSetEnsureResources(HWND hwnd) {
     if (!s_set.rt) return;
     XjsColor bg1 = g_skin.bg1; bg1.a = 1.0f;   /* HwndRT 无逐像素 alpha */
     XjsColor bg2 = g_skin.bg2; bg2.a = 1.0f;
+    s_set.bg2 = bg2;   /* 背景纵渐变轴在绘制期按窗口高懒重建 (见 XjsSetPaint), 这里只存末端色 */
     s_set.rt->CreateSolidColorBrush(bg1, &s_set.brBg);
     s_set.rt->CreateSolidColorBrush(g_skin.border, &s_set.brBorder);
     s_set.rt->CreateSolidColorBrush(g_skin.rowHover, &s_set.brHover);
@@ -1268,8 +1272,6 @@ static void XjsSetEnsureResources(HWND hwnd) {
     s_set.rt->CreateSolidColorBrush(g_skin.borderStrong, &s_set.brBorderStrong);
     s_set.rt->CreateSolidColorBrush(XjsCol(0xe0442e), &s_set.brDanger);   /* 官方固定红 */
     s_set.rt->CreateSolidColorBrush(XjsColorF(1, 1, 1, 1), &s_set.brWhite);
-    XjsGradientStop gs[2] = { { 0.0f, bg1 }, { 1.0f, bg2 } };
-    s_set.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, (FLOAT)rc.bottom + 1), gs, 2, &s_set.brBgGrad);
     g_gfx->RoundStroke(&s_set.ssRound);   /* 分类图标圆头笔画 (两端同源样式) */
     float px = SS(1);
     g_dw->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -1784,6 +1786,12 @@ static void XjsSetPaint(HWND hwnd) {
     if (hasImageRow && !s_set.imgTried) XjsSetLoadDonateImages();
     XjsSizeU sz = s_set.rt->GetPixelSize();
     float w = (float)sz.width, vh = (float)sz.height;
+    if (s_set.bgGradH != vh) {   /* 背景纵渐变轴跟随窗口高: 钉死创建时高度, 拉伸/最大化后下半截会被钳到末端色 */
+        XjsGradientStop gs[2] = { { 0.0f, s_set.brBg->GetColor() }, { 1.0f, s_set.bg2 } };
+        if (s_set.brBgGrad) { s_set.brBgGrad->Release(); s_set.brBgGrad = NULL; }
+        s_set.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, vh + 1), gs, 2, &s_set.brBgGrad);
+        s_set.bgGradH = vh;
+    }
     float maxScroll = s_set.contentH - vh;
     if (maxScroll < 0) maxScroll = 0;
     if (s_set.scroll > maxScroll) s_set.scroll = maxScroll;

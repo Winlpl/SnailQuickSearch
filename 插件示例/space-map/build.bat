@@ -70,6 +70,7 @@ if errorlevel 1 (
     exit /b 1
 )
 copy /y manifest.json "..\..\plugins\space-map\manifest.json" >nul
+copy /y icon.png "..\..\plugins\space-map\icon.png" >nul
 echo.
 echo Build succeeded: space-map.dll
 echo Deployed to plugins\space-map\  (enable it in Settings - Plugins)
