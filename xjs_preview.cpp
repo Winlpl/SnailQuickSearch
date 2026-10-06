@@ -1177,7 +1177,8 @@ void XjsPreviewRender() {
     s_hits.maxBtn = XjsRectF(body.right - XSF(68), p.top + XSF(8), body.right - XSF(44), p.top + XSF(32));
     s_hits.closeBtn = XjsRectF(body.right - XSF(40), p.top + XSF(8), body.right - XSF(16), p.top + XSF(32));
     XjsPanelHeaderBtn(s_hits.lockBtn, 0, g_previewLocked, XjsPvHover(3));
-    XjsPanelHeaderBtn(s_hits.maxBtn, 1, false, XjsPvHover(2));
+    /* 宽窄钮激活态 = 存储值已到(或超过)本窗极限 (显示侧已被钳到列表最小宽) — 点击将回落 400 窄档 */
+    XjsPanelHeaderBtn(s_hits.maxBtn, 1, g_previewWidth >= XjsPreviewWidthMaxDip(g_layout.w), XjsPvHover(2));
     XjsPanelHeaderBtn(s_hits.closeBtn, 2, false, XjsPvHover(1));
     g_rt->FillRectangle(XjsRectF(body.left, p.top + headH, body.right, p.top + headH + 1), g_br[XTH_BORDER]);
 
@@ -1533,7 +1534,11 @@ static void XjsPreviewRunCmd(int cmd) {
         XjsSaveConfig();
         XjsClampScroll();
     } else if (cmd == 2) {
-        g_previewWidth = (g_previewWidth >= 640) ? 400 : 640;
+        /* 宽窄切换: 宽档 = 窗口当前能给的极限宽 (列表压到最小宽 XJS_LIST_MIN_W, 上限唯一来源
+           XjsPreviewWidthMaxDip); 已达极限 = 再点回落 400 窄档预设。存点击瞬间的极限值 =
+           所见即所得 (同拖拽口径), 显示侧布局每帧仍按窗口宽钳制: 窗口变窄压显示、变宽回跳 */
+        int mx = XjsPreviewWidthMaxDip(g_layout.w);
+        g_previewWidth = (g_previewWidth < mx) ? mx : 400;
         XjsSaveConfig();
         XjsPreviewPanelSyncSize(true);   /* 面板接管中: 宽窄切换即世代同步 (会话若未开是空操作) */
     } else if (cmd == 3) {
@@ -1588,8 +1593,13 @@ bool XjsPreviewMouseMove(POINT pt) {
         return true;
     }
     if (!g_previewDrag) return false;
-    float newW = (float)g_layout.w - pt.x - XSF(6);
-    g_previewWidth = ximax(280, ximin(800, (int)newW));
+    /* 分隔线拖拽: 面板宽 = 窗口右缘 - 指针 - 间距 (物理像素), 换算回 DIP 存储 (曾漏除缩放,
+       高 DPI 下拖一次存进去的是物理值, 布局再乘一次缩放 = 面板跳宽)。上限只由列表最小宽
+       导出 (XjsPreviewWidthMaxDip), 无固定最大宽 (2026-10-06 用户口径) */
+    float s = XSF(1.0f);
+    float newW = s > 0 ? ((float)g_layout.w - (float)pt.x - XSF(6)) / s : (float)g_previewWidth;
+    int mx = XjsPreviewWidthMaxDip(g_layout.w);
+    g_previewWidth = ximax(XJS_PREVIEW_MIN_W, ximin(mx, (int)(newW + 0.5f)));
     XjsSearchWindow::Cur()->Invalidate();
     return true;
 }

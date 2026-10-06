@@ -83,6 +83,9 @@
 #define ID_TIMER_GUIDE      14  /* 新手引导动画驱动 30ms (呼吸环/点击演示; 关引导自摘表) */
 #define ID_TIMER_GUIDE_START 15  /* 新手引导自启动一次性 (主窗创建 +800ms, 未"不再提示"才播) */
 #define XJS_MARQUEE_PV_MS   60  /* 框选拖动中预览重载最小间隔 (时间戳节流, 同单击打开的防重口径; 完全实时=逐行读盘/解码会拖垮帧率) */
+#define XJS_PREVIEW_MIN_W   280 /* 预览面板最小宽 (DIP): 拖拽/载入/插件写入的钳制下限 (布局不会比它更窄, 除非窗口最小宽还不够两栏) */
+#define XJS_LIST_MIN_W      320 /* 列表框最小宽 (DIP): 预览加宽的唯一约束 (2026-10-06 用户口径 — 限制的是列表最小宽, 不是预览最大宽;
+                                   窗口放不下时压预览显示、存储值不动, 窗口恢复变宽预览自动回跳) */
 #define XJS_SYNC_POLL_MS    100   /* 同步轮询周期 (源样式 m_线程时钟.时钟周期=100) */
 #define XJS_SYNC_REFRESH_MS 200   /* 真实时钟最小刷新间隔: 距上次实际刷新不足则顺延一拍 (同步风暴时刷新率恒有上限) */
 #define ID_HOTKEY_SHOW      1     /* 全局快捷键注册基址: id = 本值+档案槽 (登记在主窗 hwnd) */
@@ -477,6 +480,9 @@ void XjsSkinReset();                            /* 恢复内置默认 (skin-dark
 bool XjsSkinLoad(const wchar_t* name);          /* 复位默认后解析皮肤文件覆盖; 找不到/解析失败=假(即内置默认) */
 void XjsSkinApply();                            /* g_skin → 主题画刷/渐变 (需已建 RT), 重建弹窗画刷 */
 std::vector<std::wstring> XjsSkinEnumerate();   /* 扫描可用皮肤名 (skin目录/exe目录 skin-*.css) */
+/* 换肤唯一入口 (设置页皮肤下拉 / 插件 settings.set "皮肤" 同落点): 写窗字段 + 全局镜像 +
+   载入 + 应用(纪元+1) + 落盘 + 插件换肤事件; name 与窗字段相同 = 无操作 (xjs_app.cpp) */
+void XjsApplySkinToWindow(XjsSearchWindow* w, const std::wstring& name);
 extern std::vector<std::wstring> g_skinMenuNames;  /* ☰菜单"皮肤"分组当前条目 (点击 id 换算索引) */
 
 void XjsPopupReleaseResources();                /* 释放弹窗RT/画刷 (换肤后下次打开按新皮肤重建) */
@@ -1523,6 +1529,16 @@ inline float xf_min(float a, float b) { return a < b ? a : b; }
 inline float xf_max(float a, float b) { return a > b ? a : b; }
 inline int ximax(int a, int b) { return a > b ? a : b; }
 inline int ximin(int a, int b) { return a < b ? a : b; }
+
+/* 预览面板宽度上限 (DIP, 由窗口客户宽物理像素导出): 保证列表区不小于 XJS_LIST_MIN_W。
+   拖拽钳制 (xjs_preview) 与布局钳制 (xjs_chrome) 的唯一来源 —— 预览无固定上限
+   (2026-10-06 用户口径, 取代旧 800 硬上限); 窗口窄到连 280 都给不出时回落 280。 */
+inline int XjsPreviewWidthMaxDip(float winW) {
+    float s = XSF(1);
+    if (s <= 0) return XJS_PREVIEW_MIN_W;
+    int m = (int)((winW - XSF(6) - XSF((float)XJS_LIST_MIN_W)) / s);
+    return ximax(XJS_PREVIEW_MIN_W, m);
+}
 inline bool XjsPtIn(const XjsRect& r, const POINT& pt) {
     return pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom;
 }

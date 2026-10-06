@@ -11,12 +11,17 @@
 
 /* ==================== 行/卡片模型 ==================== */
 
-enum XjsSetCtrl { CT_INFO = 0, CT_SWITCH, CT_OPTION, CT_BUTTON, CT_PILL, CT_IMAGE, CT_INPUT, CT_TROW, CT_MDDOC };
+enum XjsSetCtrl { CT_INFO = 0, CT_SWITCH, CT_BUTTON, CT_PILL, CT_IMAGE, CT_INPUT, CT_TROW, CT_MDDOC };
 enum XjsSetAct {
     ACT_NONE = 0, ACT_PREVIEW, ACT_AUTOSTART, ACT_REBUILD, ACT_GITHUB, ACT_SITE, ACT_DONORS, ACT_GLM,
     ACT_COPYVER = 8,  /* 关于页: 复制版本信息 (排查问题时直接粘给对方) */
-    ACT_VIEW = 200,   /* +0..4 视图模式 (枚举序 = 显示序 = 滚轮档序: 严密/紧凑/详情/中等/大, 见 xjs_app.h) */
-    ACT_SKIN = 100,   /* +皮肤索引 (g_skinMenuNames) */
+    ACT_VIEW = 200,   /* 视图行: 点击开下拉菜单 (结果 id 见 ACT_VIEW_MENU 段; 档序 = 枚举序 = 滚轮档序, 见 xjs_app.h) */
+    ACT_SKIN = 100,   /* 皮肤行: 点击开下拉菜单 (结果 id 见 ACT_SKIN_MENU 段) */
+    /* 下拉菜单项 id 独立段: 菜单结果 id 与"行动作 id"分离 —— 双击 Ctrl 下拉项 id = 2+档案槽
+       (无硬上限), 档案多时 2+槽 会扫过低位段; 视图/皮肤菜单项因此用设置窗私有尾段 3500/3600
+       (3400/3401 = 别名表保存/添加; 避开主窗 IDM_* 段与无上界段, 便于 grep 时一眼归类) */
+    ACT_VIEW_MENU = 3500,   /* +0..4 视图档序 (下拉结果) */
+    ACT_SKIN_MENU = 3600,   /* +皮肤索引 (下拉结果, 上限 = 扫描到的皮肤数) */
     ACT_MATCH = 300,  /* +0..7 搜索匹配开关 (下发 SetSearchSettings) */
     ACT_EXCL_ADD = 310,
     ACT_DCCTRL = 311,
@@ -77,7 +82,9 @@ static_assert(ACT_PERF_SYNCLR + 1 <= ACT_EXCL_DEL, "内存/性能动作段越界
 static_assert(ACT_WINGM_DEL + 64 <= ACT_TSAVE, "窗口管理删除段与 文件分类/别名 表格段重叠");
 static_assert(ACT_FDEL + 256 <= ACT_ADEL, "文件分类删除段与别名删除段重叠");
 static_assert(ACT_ADEL + 1024 <= ACT_ALIAS_TSAVE, "别名删除段与别名表保存/添加动作重叠");
-static_assert(ACT_ALIAS_TADD + 1 <= 4096, "别名表动作越出保留区");
+static_assert(ACT_ALIAS_TADD + 1 <= ACT_VIEW_MENU, "别名表动作段与视图/皮肤下拉结果段重叠");
+static_assert(ACT_VIEW_MENU + 5 <= ACT_SKIN_MENU, "视图下拉结果段与皮肤下拉结果段重叠");
+static_assert(ACT_SKIN_MENU + 300 <= 4096, "皮肤下拉结果段越出保留区 (扫描皮肤数上限 300)");
 static_assert(ACT_EXCL_DEL + 1024 <= ACT_WINGM_REN, "排除目录删除段与重命名段重叠");
 static_assert(ACT_WINGM_REN + 60 <= ACT_OPEN, "窗口重命名段 (上限 59 档案) 与打开行为段重叠");
 
@@ -480,7 +487,7 @@ static bool XjsSetActIsDropdown(int act) {
     switch (act) {
         case ACT_ENGINE: case ACT_DCCTRL: case ACT_BLUR: case ACT_APPEAR:
         case ACT_ZOOM: case ACT_SORT: case ACT_DEFSEL: case ACT_MOUSEOPEN:
-        case ACT_CREATEFILL:
+        case ACT_CREATEFILL: case ACT_VIEW: case ACT_SKIN:
             return true;
     }
     return false;
@@ -745,8 +752,8 @@ static bool XjsSetBuildRows() {
             r.h = rowHPlain;
         } else {
             /* 行高随说明文字换行实测自适应: 文本区右缘按行尾控件组实际宽度让位;
-               textL 与绘制侧 (cx0 + 选项槽/左缩进) 同源 — 侧栏自适应后不再抄旧常量 132 */
-            float textL = cx0Build + (ctrl == CT_OPTION ? SS(44) : SS(18));
+               textL 与绘制侧 (cx0 + 左缩进) 同源 — 侧栏自适应后不再抄旧常量 132 */
+            float textL = cx0Build + SS(18);
             float span = XjsSetRowCtrlSpan(r);
             float textR = cx1Build - SS(18) - (span > 0 ? span + SS(14) : 0);
             float descH = XjsSetMeasureDescHeight(r.desc, textR - textL);
@@ -861,13 +868,12 @@ static bool XjsSetBuildRows() {
             addRow(ACT_ZOOM, CT_BUTTON, XjsT(L"设置.外观.界面缩放"),
                    XjsT(L"设置.外观.界面缩放.说明"),
                    std::to_wstring(g_uiZoomTenths * 10) + L"%", false, false);
-            newCard(XjsT(L"设置.外观.主题皮肤"));
+            /* 主题皮肤 (每窗): 下拉选择 — 皮肤十几种, 逐项铺行把页面撑长 (2026-10-06 用户口径改组合框) */
             g_skinMenuNames = XjsSkinEnumerate();
-            int maxSkin = (int)g_skinMenuNames.size() < 16 ? (int)g_skinMenuNames.size() : 16;
-            for (int i = 0; i < maxSkin; i++)
-                addRow(ACT_SKIN + i, CT_OPTION, g_skinMenuNames[i].c_str(), L"",
-                       L"", g_skinMenuNames[i] == g_skinName, false);
-            if (maxSkin == 0)
+            if (!g_skinMenuNames.empty())
+                addRow(ACT_SKIN, CT_BUTTON, XjsT(L"设置.外观.主题皮肤"), L"",
+                       XjsSearchWindow::Cur()->skinName, false, false);
+            else
                 addRow(ACT_NONE, CT_INFO, XjsT(L"设置.外观.无皮肤"), XjsT(L"设置.外观.无皮肤.说明"), L"", false, false);
             break;
         }
@@ -893,11 +899,15 @@ static bool XjsSetBuildRows() {
                    XjsT(L"设置.列表.悬停高亮.说明"), L"", g_rowHover, false);
             addRow(ACT_HOVERFADE, CT_SWITCH, XjsT(L"设置.列表.悬停残影"),
                    XjsT(L"设置.列表.悬停残影.说明"), L"", g_rowHoverFade, false, !g_rowHover);
-            const wchar_t* const VN[5] = { XjsT(L"通用词.严密模式"), XjsT(L"通用词.紧凑视图"),
-                                                  XjsT(L"通用词.详情视图"), XjsT(L"通用词.中等图标"),
-                                                  XjsT(L"通用词.大图标") };
-            for (int m = 0; m < 5; m++)
-                addRow(ACT_VIEW + m, CT_OPTION, VN[m], L"", L"", g_viewMode == m, false);
+            {
+                /* 视图模式 (每窗): 下拉选择 (五档选项行改组合框, 2026-10-06 用户口径; 菜单项 id = ACT_VIEW_MENU+档序) */
+                const wchar_t* const VN[5] = { XjsT(L"通用词.严密模式"), XjsT(L"通用词.紧凑视图"),
+                                                      XjsT(L"通用词.详情视图"), XjsT(L"通用词.中等图标"),
+                                                      XjsT(L"通用词.大图标") };
+                int vm = (int)g_viewMode;
+                if (vm < 0 || vm > 4) vm = VM_LIST;
+                addRow(ACT_VIEW, CT_BUTTON, XjsT(L"菜单.视图"), L"", VN[vm], false, false);
+            }
             break;
         }
         case SC_DATA: {  /* 索引 (原"数据维护", 2026-10-06 用户口径更名): 重建索引/清历史/排除目录 */
@@ -1948,16 +1958,15 @@ static void XjsSetPaint(HWND hwnd) {
             if (r.act2 != ACT_NONE && r.ctrlW2 > 0)
                 XjsSetDrawButton(cx1 - SS(18) - r.ctrlW - SS(10), rcy, r.value2, r.danger2, false);
             if (r.ctrl == CT_IMAGE || r.ctrl == CT_MDDOC) continue;   /* 图片/文档行整行自绘, 不走通用文本 */
-            float textL = cx0 + (r.ctrl == CT_OPTION ? SS(44) : SS(18));   /* 选项行留 ✓ 槽位 */
+            float textL = cx0 + SS(18);
             float ctrlSpan = XjsSetRowCtrlSpan(r);
-            float textR = (r.ctrl == CT_INFO || r.ctrl == CT_OPTION) ? cx1 - SS(18)
+            float textR = (r.ctrl == CT_INFO) ? cx1 - SS(18)
                         : (r.ctrl == CT_INPUT ? cx1 - SS(18) - SS(272)
                                               : cx1 - SS(18) - (ctrlSpan > 0 ? ctrlSpan + SS(14) : 0));   /* 与构建同源: 按控件组实宽让位 */
             /* 名称 + 描述 (源样式 .row-label; centerText 行用居中变体; link 行名称 accent 色 = 链接观感;
                disabled 行整体置灰 = 依赖项未开启) */
             XjsBrush* nameBr = r.disabled ? (XjsBrush*)s_set.brFaint
                               : r.link ? (XjsBrush*)s_set.brAccent
-                              : (r.ctrl == CT_OPTION && r.checked) ? (XjsBrush*)s_set.brAccent
                               : (XjsBrush*)s_set.brText;
             if (r.desc.empty()) {
                 XjsRect nr = XjsRectF(textL, ry0, textR, ry1);
@@ -1983,13 +1992,6 @@ static void XjsSetPaint(HWND hwnd) {
                     r.centerText ? s_set.tfDescC : s_set.tfDesc,
                     XjsRectF(textL, mid - SS(2), textR, ry1 - SS(6)),
                     r.warnText ? (XjsBrush*)s_set.brWarn : (XjsBrush*)s_set.brFaint);
-            }
-            /* 选项行 ✓ (视图/皮肤当前项, 同勾选画法) */
-            if (r.ctrl == CT_OPTION && r.checked) {
-                XjsPoint2 c = { cx0 + SS(28), rcy };
-                float rk = SS(4);
-                s_set.rt->DrawLine(XjsPoint2F(c.x - rk, c.y), XjsPoint2F(c.x - rk * 0.2f, c.y + rk * 0.8f), s_set.brAccent, 2.0f);
-                s_set.rt->DrawLine(XjsPoint2F(c.x - rk * 0.2f, c.y + rk * 0.8f), XjsPoint2F(c.x + rk * 0.9f, c.y - rk * 0.7f), s_set.brAccent, 2.0f);
             }
         }
     }
@@ -2300,6 +2302,26 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             XjsShowPopupMenu(s_set.hwnd, anchor, items, XSF(220));
             break;
         }
+        case ACT_VIEW: {
+            /* 视图模式 (每窗): 五档菜单选择 (选序 = 枚举序 = 滚轮档序, 见 xjs_app.h; 结果回 WM_POPUP_RESULT) */
+            const wchar_t* const T[5] = { XjsT(L"通用词.严密模式"), XjsT(L"通用词.紧凑视图"),
+                                                XjsT(L"通用词.详情视图"), XjsT(L"通用词.中等图标"),
+                                                XjsT(L"通用词.大图标") };
+            XjsSetShowChoiceMenu(r, ACT_VIEW_MENU, T, 5, (int)g_viewMode, XSF(160));
+            break;
+        }
+        case ACT_SKIN: {
+            /* 主题皮肤 (每窗): 下拉选择 (名字取自 XjsSkinEnumerate 扫描结果);
+               菜单项文字即皮肤文件名, 不进 i18n; 选中经 WM_POPUP_RESULT → XjsApplySkinToWindow */
+            POINT anchor = XjsSetDropdownAnchor(r);
+            std::vector<XjsPopupItem> items;
+            for (int i = 0; i < (int)g_skinMenuNames.size(); i++)
+                items.push_back({ ACT_SKIN_MENU + i, g_skinMenuNames[i], L"",
+                                  g_skinMenuNames[i] == XjsSearchWindow::Cur()->skinName,
+                                  false, false, false, false });
+            XjsShowPopupMenu(s_set.hwnd, anchor, items, XSF(200));
+            break;
+        }
         case ACT_DEFSEL: {
             /* 自动选中第一项 (每窗): 菜单选择 */
             const wchar_t* const T[2] = { XjsT(L"通用词.不自动选中"), XjsT(L"通用词.自动选中") };
@@ -2577,19 +2599,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                     s_aliasEds.erase(s_aliasEds.begin() + i * 2, s_aliasEds.begin() + i * 2 + 2);
                 break;
             }
-            if (act >= ACT_VIEW && act < ACT_VIEW + 5) { XjsSetViewMode(act - ACT_VIEW); break; }
-            if (act >= ACT_SKIN && act < ACT_SKIN + (int)g_skinMenuNames.size()) {
-                int si = act - ACT_SKIN;
-                if (g_skinMenuNames[si] != g_skinName) {
-                    /* 皮肤每窗独立: 写到打开设置的窗口 (s_curWin=opener), 全局镜像随当前窗走 */
-                    XjsSearchWindow::Cur()->skinName = g_skinMenuNames[si];
-                    g_skinName = g_skinMenuNames[si];
-                    XjsSkinLoad(g_skinName.c_str());
-                    XjsSkinApply();   /* 纪元+1 → 本窗口画刷随绘制重建 */
-                    XjsSaveConfig();  /* 每窗档案落盘 xjs_config.json (uiWindows) */
-                    XjsPluginOnSkinChanged(XjsPluginCurWindowToken());   /* 已订阅插件 (自建窗口) 取新皮肤重绘 */
-                }
-            }
+            /* 视图/皮肤改下拉 (2026-10-06): 行本体只开菜单 (见上方显式 case), 应用走 WM_POPUP_RESULT */
             break;
     }
     s_set.rowsDirty = true;   /* 勾选态/视图/皮肤状态可能已变, 下次绘制重建行模型 */
@@ -2850,6 +2860,22 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                                               SORT_PRESETS[id - ACT_SORT].asc ? TRUE : FALSE);
                     XjsSaveConfig();
                     XjsSearchNow(false);
+                    s_set.rowsDirty = true;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (id >= ACT_VIEW_MENU && id < ACT_VIEW_MENU + 5) {
+                    /* 视图模式下拉结果 (每窗): 锚点保持切档 (XjsSetViewMode 内含落盘+重绘) */
+                    XjsWindowScope scope(XjsSetOwner());
+                    XjsSetViewMode(id - ACT_VIEW_MENU);
+                    s_set.rowsDirty = true;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (id >= ACT_SKIN_MENU && id < ACT_SKIN_MENU + (int)g_skinMenuNames.size()) {
+                    /* 主题皮肤下拉结果 (每窗): 换肤唯一入口 XjsApplySkinToWindow (owner 作用域内) */
+                    XjsWindowScope scope(XjsSetOwner());
+                    XjsApplySkinToWindow(XjsSearchWindow::Cur(), g_skinMenuNames[id - ACT_SKIN_MENU]);
                     s_set.rowsDirty = true;
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;

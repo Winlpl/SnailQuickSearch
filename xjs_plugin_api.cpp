@@ -155,21 +155,10 @@ static int ApiSettingsGet(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, i
     return PluginBufOut(buf, cap, j);
 }
 
-/* 皮肤应用 = 设置页换肤同一落点 (写窗字段 + 全局镜像 + 载入 + 应用 + 落盘 + 插件换肤事件)。
-   重入闸: EVT_SKIN 同步派发, 订阅者在处理器里回写 "皮肤" = ApplySkin 无限递归爆栈
-   (msg.* 有 s_msgDepth 深度闸、输入拦截有 s_interceptDepth, 本环同口径; 仅 UI 线程, 裸 static 即可) */
+/* 皮肤应用 = 设置页换肤同一落点 (唯一入口 XjsApplySkinToWindow: 写窗字段 + 全局镜像 + 载入 +
+   应用 + 落盘 + 插件换肤事件 + EVT_SKIN 重入闸, 见 xjs_app.cpp); 本文件只做转发 */
 static void ApplySkin(XjsSearchWindow* w, const std::wstring& name) {
-    static int s_skinDepth = 0;
-    if (s_skinDepth > 0) return;   /* 事件处理器内的嵌套换肤请求忽略 (防环) */
-    s_skinDepth++;
-    w->skinName = name;
-    g_skinName = name;
-    XjsSkinLoad(g_skinName.c_str());
-    XjsSkinApply();   /* 纪元+1 → 本窗口画刷随绘制重建 */
-    XjsSaveConfig();
-    XjsPluginOnSkinChanged(XjsPluginApiTokenOf(w));
-    w->Invalidate();
-    s_skinDepth--;
+    XjsApplySkinToWindow(w, name);
 }
 
 /* 预览开关 = XjsPreviewToggle 的定向版 (藏面板先结束接管会话; 开启回填当前选中) */
@@ -240,8 +229,7 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
             ApplyPreviewVisible(w, b);
         } else if (m.key == L"预览宽度") {
             MemberInt(m, &n);
-            if (n < 160) n = 160;
-            if (n > 2000) n = 2000;
+            if (n < XJS_PREVIEW_MIN_W) n = XJS_PREVIEW_MIN_W;   /* 无固定上限: 显示侧按列表最小宽钳制 (同主链路口径) */
             w->previewWidth = n;
             XjsSaveConfig();
             w->Invalidate();

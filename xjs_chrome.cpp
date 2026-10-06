@@ -25,10 +25,12 @@ void XjsChromeLayout() {
     L.h = (float)(rc.bottom - rc.top);
     L.titlebar = XjsRectF(0, 0, L.w, XSF(40));
 
-    /* 预览面板 (右缘): 3px resizer + 面板 */
+    /* 预览面板 (右缘): 3px resizer + 面板。宽度上限只由"列表最小宽"导出 (XjsPreviewWidthMaxDip):
+       窗口放不下时压预览显示、存储值不动, 窗口恢复变宽预览自动回跳 (2026-10-06 用户口径, 无固定最大宽) */
     float sbH = g_showStatusbar ? XSF(36) : 0;   /* 状态栏可按每窗设置隐藏 (列表/预览底缘贴窗口底) */
     if (g_previewVisible) {
-        L.preview = XjsRectF(L.w - XSF((float)g_previewWidth) - XSF(3), XSF(40), L.w, L.h - sbH);
+        float pvW = (float)ximin(g_previewWidth, XjsPreviewWidthMaxDip(L.w));
+        L.preview = XjsRectF(L.w - XSF(pvW) - XSF(3), XSF(40), L.w, L.h - sbH);
     } else {
         L.preview = XjsRectF(L.w, XSF(40), L.w, L.h - sbH);
     }

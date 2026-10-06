@@ -1892,8 +1892,8 @@ void XjsLoadConfig() {
 
     g_previewVisible = XjsConfig::Bool(g_cfg.Root(), K_PREVIEW, true);
     g_previewWidth = XjsConfig::Int(g_cfg.Root(), K_PREVW, 400);
-    if (g_previewWidth < 280) g_previewWidth = 280;
-    if (g_previewWidth > 800) g_previewWidth = 800;
+    if (g_previewWidth < XJS_PREVIEW_MIN_W) g_previewWidth = XJS_PREVIEW_MIN_W;
+    /* 无固定上限 (2026-10-06): 存储保留用户意图, 显示侧按窗口宽导出的列表最小宽钳制 (XjsPreviewWidthMaxDip) */
 
     /* 列布局 (顶层全局默认兜底; 扁平子键名同源样式 columns.*): 顺序/宽度/弹性/显隐全按字段名记忆 */
     {
@@ -1972,8 +1972,7 @@ void XjsLoadConfig() {
             p.mode = XjsModeIndexFromName(XjsConfig::Str(o, K_SEARCHMODE, g_modeIni[legacyMode]));
             p.previewVisible = XjsConfig::Bool(o, K_PREVIEW, true);
             p.previewWidth = XjsConfig::Int(o, K_PREVW, 400);
-            if (p.previewWidth < 280) p.previewWidth = 280;
-            if (p.previewWidth > 800) p.previewWidth = 800;
+            if (p.previewWidth < XJS_PREVIEW_MIN_W) p.previewWidth = XJS_PREVIEW_MIN_W;   /* 无固定上限, 同全局块口径 */
             p.mediaVolPct = XjsConfig::Int(o, K_MEDIAVOL, 100);
             if (p.mediaVolPct < 0) p.mediaVolPct = 0;
             if (p.mediaVolPct > 100) p.mediaVolPct = 100;

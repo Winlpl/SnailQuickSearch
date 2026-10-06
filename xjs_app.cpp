@@ -182,6 +182,24 @@ void XjsSearchWindow::SyncSkin() {
     }
 }
 
+/* 换肤唯一入口 (设置页皮肤下拉 / 插件 settings.set "皮肤"): 写窗字段+全局镜像+载入+应用+落盘+
+   插件换肤事件。重入闸: EVT_SKIN 同步派发, 订阅者在处理器里回写 "皮肤" = 无限递归爆栈
+   (msg.* 的 s_msgDepth / 输入拦截的 s_interceptDepth 同口径; 仅 UI 线程, 裸 static 即可) */
+void XjsApplySkinToWindow(XjsSearchWindow* w, const std::wstring& name) {
+    if (!w || name.empty() || name == w->skinName) return;
+    static int s_skinDepth = 0;
+    if (s_skinDepth > 0) return;   /* 事件处理器内的嵌套换肤请求忽略 (防环) */
+    s_skinDepth++;
+    XjsWindowScope scope(w);       /* 画刷/格式按目标窗 (RT 域) 重建, 与"当前窗"无关 */
+    w->skinName = name;
+    g_skinName = name;
+    XjsSkinLoad(g_skinName.c_str());
+    XjsSkinApply();   /* 纪元+1 → 该窗画刷随绘制重建 (内部已 Invalidate 当前窗=w) */
+    XjsSaveConfig();
+    XjsPluginOnSkinChanged(XjsPluginCurWindowToken());
+    s_skinDepth--;
+}
+
 void XjsSearchWindow::Invalidate() {
     if (hWnd) InvalidateRect(hWnd, NULL, FALSE);
 }
