@@ -1488,6 +1488,7 @@ extern const wchar_t* g_modeName[5];
 extern const wchar_t* g_modeDesc[5];
 extern const wchar_t* g_modeHint[5];
 extern const wchar_t* g_modeIni[5];
+const wchar_t* XjsModeTypeName(int mode);   /* 当前搜索模式显示名 (译文现取, 禁 static 缓存) */
 
 /* 列表/筛选 (筛选进程共享: DB 级分类, 各窗内容一致, 库加载/扫描完成时刷新);
    搜索历史已每窗化 (g_history 宏 → Cur()->history, 见宏区) */

@@ -475,7 +475,8 @@ XjsRowData* XjsEnsureRowData(int idx, int fileId) {
         XjsFillDriveInfo(rd, rd.name);
         /* 驱动器行: 名称列不分段高亮 */
         rd.nameSegs.push_back({rd.name, false});
-        /* 驱动器别名 (引擎按 fileId 同表存储, 右键"设置别名"可设, 2026-09-16 用户口径) */
+        /* 驱动器评分/别名 (引擎按 fileId 同表存储, 评分列对驱动器显示评分, 2026-10-07 用户口径) */
+        rd.rating = xjs_db_GetRating(g_engine, fileId);
         const char* daliasA = xjs_db_GetAlias(g_engine, fileId);
         if (daliasA && daliasA[0]) { rd.alias = Utf8ToUtf16(daliasA); rd.hasAlias = true; }
     } else {

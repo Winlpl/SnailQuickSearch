@@ -555,6 +555,14 @@ void XjsUiOwnedStringsDropHwnd(HWND hwnd) {
 
 const int g_modeToKeyword[5] = { XJS_KEYWORD_WILDCARD, XJS_KEYWORD_REGEX, XJS_KEYWORD_SQL, XJS_KEYWORD_LUA, XJS_KEYWORD_LUA_EXEC };
 const wchar_t* g_modeName[5] = { L"通配符", L"正则表达式", L"SQL", L"Lua 过滤", L"Lua 执行" };
+const wchar_t* XjsModeTypeName(int mode) {
+    /* 与 g_modeName 同名表但走译文 (模式菜单用原文名是既有口径; 空态等整句译文的语境用这份)。
+       译文指针每次现取: static 数组会冻结首调时的表内指针, 换语言重装表后即悬垂 (同 XjsMdlgTypeName 口径) */
+    if (mode < 0 || mode >= XMODE_COUNT) mode = XMODE_WILDCARD;
+    const wchar_t* N[XMODE_COUNT] = { XjsT(L"搜索模式.通配符"), XjsT(L"搜索模式.正则表达式"), L"SQL",
+                                      XjsT(L"搜索模式.Lua过滤"), XjsT(L"搜索模式.Lua执行") };
+    return N[mode];
+}
 const wchar_t* g_modeDesc[5] = {
     L"支持 * ? 通配与拼音/首拼搜索",
     L"按正则语法匹配文件名",

@@ -58,7 +58,34 @@ double XjsListContentHeight() {
     }
     return (double)rows * XjsRowHd();
 }
-float XjsListViewHeight() { return g_layout.list.bottom - g_layout.list.top; }
+/* ---- 滚动条可见判定 (渲染裁剪/视口扣减/列让位 三处同口径, 收口这两查) ---- */
+
+double XjsColumnsContentWidth(bool listView);                       /* 定义在列几何节 */
+static void XjsHTrackGeom(float* trackL, float* trackW, float* trackY, float* trackH);  /* 定义在滚动条几何节 */
+
+/* 横向滚动条可见 = 列表型视图且列内容(存储宽)超宽 — 与 XjsClampHScroll/XjsHThumbGeom 同式。
+   查询函数不夹取 g_hScroll; 网格/详情视图无横向滚动条 */
+static bool XjsHScrollVisible() {
+    return XjsIsListTypeView() && XjsColumnsContentWidth(true) > (double)g_layout.list.right;
+}
+/* 纵向滚动条可见 = 内容高于行视口 (XjsVThumbGeom / 列几何右侧让位 同式) */
+static bool XjsVScrollVisible() {
+    double view = (double)XjsListViewHeight();
+    return view > 0 && XjsListContentHeight() > view;
+}
+
+/* 行视口高: 横向滚动条可见时底部让出横条带 (带顶 = 横轨上缘, 几何唯一来源 XjsHTrackGeom) —
+   滚动条区域内不显示表项, 滚到底时末行完整落在条带上方。滚动范围/翻页/EnsureVisible
+   (经 XjsMaxScroll) 与渲染裁剪 (XjsRowsClipRect) 都从这里取高, 天然同源 */
+float XjsListViewHeight() {
+    float h = g_layout.list.bottom - g_layout.list.top;
+    if (XjsHScrollVisible()) {
+        float tl, tw, ty, th;
+        XjsHTrackGeom(&tl, &tw, &ty, &th);
+        h -= g_layout.list.bottom - ty;
+    }
+    return h;
+}
 double XjsMaxScroll() { double m = XjsListContentHeight() - (double)XjsListViewHeight(); return m > 0 ? m : 0; }
 
 void XjsClampScroll() {
@@ -200,7 +227,7 @@ void XjsGetColumnRects(float listWidth, bool listView, float* xs, float* ws) {
     /* 垂直滚动条显示时右侧让位 (源样式 has-vscroll: 右 padding 20→34)。
        不让位则末列右缘伸进 vtrack 命中区 ~5px, 有纵向溢出时点行尾会误触发翻页 */
     double rightPad = pad;
-    if (XjsListContentHeight() > (double)XjsListViewHeight()) rightPad += XSF(14);
+    if (XjsVScrollVisible()) rightPad += XSF(14);
     double avail = (double)listWidth - pad - rightPad;
     double fixedSum = 0, frSum = 0, flexNeed = 0;
     for (int i = 0; i < V.n; i++) {
@@ -539,7 +566,8 @@ static void XjsDrawDriveBar(const XjsRect& row, const XjsRowData& rd, bool listV
     }
 }
 
-/* 横向滚动条几何 (同源样式 htrack: 左起列表左缘, 右缩 3px(有预览)/5px(无), 底部 3px, 高 8px) */
+/* 横向滚动条几何 (同源样式 htrack: 左起列表左缘, 右缩 3px(有预览)/5px(无), 底部 3px, 高 8px)。
+   行视口扣减 (XjsListViewHeight) 与渲染裁剪 (XjsRowsClipRect) 的带顶都由此取 — 改这里两处自动跟随 */
 static void XjsHTrackGeom(float* trackL, float* trackW, float* trackY, float* trackH) {
     XjsLayout& L = g_layout;
     *trackL = L.list.left;
@@ -552,7 +580,7 @@ static void XjsHTrackGeom(float* trackL, float* trackW, float* trackY, float* tr
    返回 false = 内容不高于视口, 无 thumb。maxScroll 回带滚动范围给拖拽换算用 */
 static bool XjsVThumbGeom(float* thumbY, float* thumbH, double* maxScroll) {
     double content = XjsListContentHeight(), view = (double)XjsListViewHeight();
-    if (!(content > view && view > 0)) return false;
+    if (!XjsVScrollVisible()) return false;
     float trackH = g_layout.vtrack.bottom - g_layout.vtrack.top;
     *thumbH = xf_max(XSF(24), (float)(view / content * trackH));
     *maxScroll = content - view;
@@ -574,6 +602,21 @@ static bool XjsHThumbGeom(float* thumbX, double* thumbW, double* smax, XjsRect* 
     *thumbW = xf_max(XSF(24), v / (v + *smax) * (double)trackW);
     *thumbX = trackL + (g_hScroll / *smax) * (double)(trackW - *thumbW);
     return true;
+}
+
+/* 行/格子内容裁剪区 = 列表区扣除"可见滚动条"占用的带区 (滚动条中不显示表项):
+   纵向 thumb 可见 → 右缘收至纵轨左缘 (与列几何 rightPad 让位同口径, 横滚平移的行不再伸进轨道);
+   横向 thumb 可见 → 底缘收至横轨上缘 (XjsListViewHeight 已扣同一 band, 滚到底末行完整在条带上方)。
+   列表/网格渲染与框选矩形的裁剪一律取这里, 禁再直接裁 L.list */
+static XjsRect XjsRowsClipRect() {
+    XjsRect r = g_layout.list;
+    if (XjsVScrollVisible()) r.right = g_layout.vtrack.left;
+    if (XjsHScrollVisible()) {
+        float tl, tw, ty, th;
+        XjsHTrackGeom(&tl, &tw, &ty, &th);
+        r.bottom = ty;
+    }
+    return r;
 }
 
 /* 渲染尾部: 滚动条(纵向+横向) + 框选矩形 (列表/网格共用) */
@@ -606,10 +649,11 @@ static void XjsRenderListTail() {
         if (fill.a < 0.30f) fill.a = 0.30f;
         if (fill.a > 0.55f) fill.a = 0.55f;
         XjsRect mr = g_marqueeRect;
-        if (mr.top < L.list.top) mr.top = L.list.top;
-        if (mr.bottom > L.list.bottom) mr.bottom = L.list.bottom;
-        if (mr.left < L.list.left) mr.left = L.list.left;    /* 横向同样夹回: 捕获期客户坐标可越界, */
-        if (mr.right > L.list.right) mr.right = L.list.right;   /* 拖出列表右/左缘曾画进预览面板带 */
+        XjsRect rowsClip = XjsRowsClipRect();   /* 框选矩形同样不进滚动条带区 (内容坐标未裁剪) */
+        if (mr.top < rowsClip.top) mr.top = rowsClip.top;
+        if (mr.bottom > rowsClip.bottom) mr.bottom = rowsClip.bottom;
+        if (mr.left < rowsClip.left) mr.left = rowsClip.left;    /* 横向同样夹回: 捕获期客户坐标可越界, */
+        if (mr.right > rowsClip.right) mr.right = rowsClip.right;   /* 拖出列表右/左缘曾画进预览面板带 */
         if (mr.bottom > mr.top && mr.right > mr.left) {
             XjsRoundedRect rr = XjsRoundedRectF(mr, XSF(2), XSF(2));
             g_rt->FillRoundedRectangle(rr, XjsTempBrush(fill));
@@ -667,7 +711,7 @@ static void XjsRenderGrid() {
     g_visLast = (int)vLast;
     float boxH = XSF(g_viewMode == VM_LARGE ? 80.0f : 56.0f);   /* 图标盒 (medium 56 / large 80) */
     float iconSize = XSF((float)XJS_ICON_PX[g_viewMode]);
-    g_rt->PushAxisAlignedClip(L.list, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_rt->PushAxisAlignedClip(XjsRowsClipRect(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     for (long long row = firstRow; row <= lastRow; row++) {
         for (int col = 0; col < cols; col++) {
             int idx = (int)(row * cols + col);
@@ -761,15 +805,9 @@ void XjsColDrawFolder(const XjsRect& cell, XjsRowData* rd, int idx, bool listVie
 
 void XjsColDrawRating(const XjsRect& cell, XjsRowData* rd, int idx, bool listView) {
     XjsRect cr = XjsRectF(cell.left + XSF(8), cell.top, cell.right - XSF(8), cell.bottom);
-    if (rd->isDrive) {
-        /* 驱动器行: 评分列=已用容量 */
-        std::wstring used = Utf8ToUtf16(xjs_util_FormatFileSize(rd->driveUsed));
-        XjsDrawEllText(used, cr, g_tfRow, g_br[XTH_TEXT]);
-    } else {
-        wchar_t buf[16];
-        _snwprintf(buf, 16, L"%d", rd->rating);
-        XjsDrawEllText(buf, cr, g_tfRow, g_br[XTH_TEXT_DIM]);
-    }
+    wchar_t buf[16];
+    _snwprintf(buf, 16, L"%d", rd->rating);   /* 驱动器行同显评分, 不再特判已用容量 (2026-10-07 用户口径) */
+    XjsDrawEllText(buf, cr, g_tfRow, g_br[XTH_TEXT_DIM]);
 }
 
 void XjsColDrawSize(const XjsRect& cell, XjsRowData* rd, int idx, bool listView) {
@@ -914,11 +952,11 @@ void XjsListRender() {
     float rowR = (V.n > 0 ? xs[V.n - 1] + ws[V.n - 1] : xs[0]) + XSF(8);
     /* 严密模式可见行仅 18px: 圆角/选中条内缩随行高收一档; 驱动器容量条压成 1px 贴行底缘
        (12.5px 居中文字的行盒占满整行, 只有下缘放得下细线, 见 XjsDrawDriveBar;
-       容量读数在 评分/大小 列仍有文本, 见 XjsColDrawRating/XjsColDrawSize) */
+       容量读数在 大小 列仍有文本, 见 XjsColDrawSize — 评分列已改显评分) */
     bool denseRow = (g_viewMode == VM_DENSE);
     float rowRad = XSF(denseRow ? 5.0f : 9.0f);
     float barIns = XSF(denseRow ? 4.0f : 7.0f);
-    g_rt->PushAxisAlignedClip(L.list, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_rt->PushAxisAlignedClip(XjsRowsClipRect(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     int nullRows = 0;
     for (int idx = first; idx <= last; idx++) {
         /* 防抖中 idx→ID 走快照 (不读过渡态结果数组); 快照区间外 = 空行 */
@@ -1016,7 +1054,6 @@ static std::wstring XjsColTextOf(const char* field, XjsRowData* rd) {
     if (!strcmp(field, "别名")) return rd->hasAlias ? rd->alias : std::wstring(L"-");
     if (!strcmp(field, "文件夹")) return rd->folder;
     if (!strcmp(field, "文件评分")) {
-        if (rd->isDrive) return Utf8ToUtf16(xjs_util_FormatFileSize(rd->driveUsed));
         wchar_t buf[16];
         _snwprintf(buf, 16, L"%d", rd->rating);
         return buf;
@@ -1107,6 +1144,39 @@ XjsRect XjsRenameEditRect() {
     return XjsRectF(xs[nameVi] - XSF(8), y + XSF(2), xs[nameVi] + ws[nameVi] - XSF(4), y + rowHd - XSF(4));
 }
 
+/* 空态副文案模板按 {0}/{1} 占位符切段: 占位段 isKey=true (绘制时 accent 高亮) —
+   源样式 NoMatchSub* 的模式名/分类名是高亮 span, 逐段混色内联; 其余文本段走淡色 */
+static std::vector<XjsHlSeg> XjsEmptySegs(const std::wstring& tpl, const std::wstring* vals, int nvals) {
+    std::vector<XjsHlSeg> segs;
+    std::wstring cur;
+    for (size_t i = 0; i < tpl.length(); ) {
+        if (tpl[i] == L'{' && i + 2 < tpl.length() && tpl[i + 1] >= L'0' && tpl[i + 1] < L'0' + nvals
+            && tpl[i + 2] == L'}') {
+            if (!cur.empty()) { segs.push_back({ cur, false }); cur.clear(); }
+            segs.push_back({ vals[tpl[i + 1] - L'0'], true });
+            i += 3;
+        } else {
+            cur += tpl[i]; i++;
+        }
+    }
+    if (!cur.empty()) segs.push_back({ cur, false });
+    return segs;
+}
+
+/* 空态混色行: 段宽实测后整体居中, 逐段落位绘制 (各段矩形宽=实测宽, 居中格式在等宽矩形内不偏移) */
+static void XjsDrawEmptyMixed(const std::vector<XjsHlSeg>& segs, const XjsRect& r, XjsFormat* fmt) {
+    float total = 0;
+    for (auto& s : segs) total += XjsMeasureText(s.text.c_str(), fmt);
+    float x = (r.left + r.right) / 2 - total / 2;
+    for (auto& s : segs) {
+        float w = XjsMeasureText(s.text.c_str(), fmt);
+        XjsBrush* br = s.isKey ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_FAINT];
+        XjsDrawTextC(s.text.c_str(), (UINT32)s.text.length(), fmt,
+            XjsRectF(x, r.top, x + w + 1, r.bottom), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        x += w;
+    }
+}
+
 /* 空状态 (文件夹+放大镜线稿 + 提示 + 索引进度条) */
 static void XjsRenderEmptyState() {
     XjsLayout& L = g_layout;
@@ -1135,26 +1205,40 @@ static void XjsRenderEmptyState() {
     }
     /* 空态文案 (源样式 search.html 空态框同款 zh.json Search 命名空间):
        扫描中优先接管 (源样式 state3: tip=正在扫描磁盘{盘符}… / sub=正在建立全盘索引，完成后即可搜索);
-       有词无结果 = "未找到匹配的文件 / 换个关键词试试", 筛选分类非"全部"时提示分类
-       (源样式 NoMatchSubFiltered 的分类名是高亮 span, 此处「」内联); 空词 = 欢迎语 */
-    std::wstring tip, sub;
+       有词无结果 = "未找到匹配的文件 / 当前搜索模式「x」[, 分类「y」下没有匹配项] / 切换分类或换关键词":
+       模式名恒高亮, 分类名非"全部"才出现并高亮 (源样式 NoMatchSubFiltered 的高亮 span);
+       空词 = 欢迎语 */
+    std::wstring tip, sub, hint;
+    std::vector<XjsHlSeg> subSegs;
     if (g_isScanning) {
         tip = XjsFmt(XjsT(L"列表.空态正在扫描"), g_scanDrive);
         sub = XjsT(L"状态栏.正在建立索引");
     } else if (!XjsSearchGetText().empty()) {
         tip = XjsT(L"列表.空态未找到");
-        if (g_filterSel > 0 && g_filterSel < (int)g_filters.size())
-            sub = XjsFmt(XjsT(L"列表.空态分类无匹配"), g_filters[g_filterSel].name);
-        else
-            sub = XjsT(L"列表.空态换个关键词");
+        bool hasCat = (g_filterSel > 0 && g_filterSel < (int)g_filters.size());
+        std::wstring mode = XjsModeTypeName(g_mode);
+        if (hasCat) {
+            std::wstring vals[2] = { mode, g_filters[g_filterSel].name };
+            subSegs = XjsEmptySegs(XjsT(L"列表.空态无匹配模式分类"), vals, 2);
+            hint = XjsT(L"列表.空态切换分类");
+        } else {
+            subSegs = XjsEmptySegs(XjsT(L"列表.空态无匹配模式"), &mode, 1);
+            hint = XjsT(L"列表.空态换个关键词");
+        }
     } else {
         tip = (g_mode == XMODE_SQL || g_mode == XMODE_LUA || g_mode == XMODE_LUA_EXEC) ? XjsT(L"列表.空态输入语句") : XjsT(L"列表.空态输入关键词");
         sub = XjsT(L"列表.空态欢迎语");
     }
     g_rt->DrawText(tip.c_str(), (UINT32)tip.length(), g_tfTip,
         XjsRectF(cx - XSF(200), cy + XSF(52), cx + XSF(200), cy + XSF(76)), g_br[XTH_TEXT_DIM]);
-    g_rt->DrawText(sub.c_str(), (UINT32)sub.length(), g_tfChip,
-        XjsRectF(cx - XSF(240), cy + XSF(78), cx + XSF(240), cy + XSF(98)), g_br[XTH_TEXT_FAINT]);
+    if (!subSegs.empty())
+        XjsDrawEmptyMixed(subSegs, XjsRectF(cx - XSF(240), cy + XSF(78), cx + XSF(240), cy + XSF(98)), g_tfChip);
+    else
+        g_rt->DrawText(sub.c_str(), (UINT32)sub.length(), g_tfChip,
+            XjsRectF(cx - XSF(240), cy + XSF(78), cx + XSF(240), cy + XSF(98)), g_br[XTH_TEXT_FAINT]);
+    if (!hint.empty())
+        g_rt->DrawText(hint.c_str(), (UINT32)hint.length(), g_tfChip,
+            XjsRectF(cx - XSF(240), cy + XSF(100), cx + XSF(240), cy + XSF(120)), g_br[XTH_TEXT_FAINT]);
     if (g_isScanning && g_scanTotal > 0) {
         int percent = (int)((double)g_scanEnumerated * 100 / g_scanTotal);
         if (percent > 100) percent = 100;
