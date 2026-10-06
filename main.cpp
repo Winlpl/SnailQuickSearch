@@ -555,6 +555,7 @@ void XjsOnPopupResult(int id) {
             case 14: XjsPreviewToggle(); break;
             case 48: XjsGuideStart(); break;   /* 引导动画重开 (手动打开不改"不再提示"记忆) */
             case 50: XjsSettingsShow(); break;   /* 皮肤/自启动/关于在设置窗口 */
+            case 52: XjsMarketShow(); break;   /* 插件商城 (独立顶层窗, xjs_market.cpp) */
         }
     }
     XjsSearchWindow::Cur()->Invalidate();
@@ -1930,6 +1931,7 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     XjsSetPhase(L"register-class");
     XjsRegisterPopupClass(hInstance);
     XjsRegisterSettingsClass(hInstance);
+    XjsRegisterMarketClass(hInstance);
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   /* 无 CS_DBLCLKS 系统不发 WM_LBUTTONDBLCLK, 双击打开失效 */

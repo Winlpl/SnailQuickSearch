@@ -1164,6 +1164,7 @@ void XjsShowAppMenu() {
     items.push_back({ 0, L"", L"", false, true, false, false });
     /* 皮肤/自启动/关于 → 独立设置窗口 (皮肤列表 18 项曾把菜单撑出屏幕); 重建索引也已移入设置 */
     items.push_back({ IDM_MENU_BASE + 50, XjsT(L"菜单.设置"), L"", false, false, false, false });
+    items.push_back({ IDM_MENU_BASE + 52, XjsT(L"菜单.插件商城"), L"", false, false, false, false });   /* 独立顶层窗 (xjs_market.cpp) */
     items.push_back({ 0, L"", L"", false, true, false, false });
     /* 新手引导动画 (首次启动自动播放; 此处重开不改"不再提示"记忆, xjs_guide.cpp) */
     items.push_back({ IDM_MENU_BASE + 48, XjsT(L"引导.菜单项"), L"", false, false, false, false });

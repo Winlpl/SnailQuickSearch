@@ -488,6 +488,10 @@ void XjsSettingsShow(int cat = -1);             /* 打开/前置设置窗口 (�
 void XjsSettingsShowDonate();                   /* ☰菜单"捐赠": 打开设置并直达捐赠页 (分类 id 收在设置模块内, 外部经此入口防下标漂移) */
 bool XjsSettingsOpenFor(HWND ownerSearchHwnd);  /* 设置窗打开中且 owner=该搜索窗 (失焦关闭豁免判定用) */
 
+/* ---- xjs_market (插件商城窗口, 独立顶层窗; 基础样式里程碑: 本机注册表 + 样式演示卡, 市场源未接入) ---- */
+void XjsRegisterMarketClass(HINSTANCE hInst);
+void XjsMarketShow();                           /* 打开/前置插件商城窗口 (单例, owner=发起窗) */
+
 /* ---- xjs_md (通用 Markdown 引擎: md4c 解析 + D2D 排版绘制; 设置"搜索模式"页与未来 .md 预览共用) ----
    用法: Create → SetText(utf8) → Layout(rt, 内容宽, unit) 得总高 → Paint(rt, x, yTop, unit, 裁剪上下界)。
    画刷/文本格式由引擎建在传入的 RT 上 (跨 RT 画刷 = 整帧丢弃), 键 = (RT, 皮肤纪元, 单位尺度);
