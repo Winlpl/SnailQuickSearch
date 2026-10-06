@@ -125,6 +125,7 @@ if errorlevel 1 (
     exit /b 1
 )
 copy /y manifest.json "..\..\plugins\ai-assistant\manifest.json" >nul
+copy /y icon.png "..\..\plugins\ai-assistant\icon.png" >nul
 copy /y mermaid.min.js "..\..\plugins\ai-assistant\mermaid.min.js" >nul
 xcopy /e /i /y katex "..\..\plugins\ai-assistant\katex" >nul
 copy /y "..\..\webview2\x64\WebView2Loader.dll" "..\..\plugins\ai-assistant\WebView2Loader.dll" >nul

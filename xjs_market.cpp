@@ -2,8 +2,11 @@
  * xjs_market.cpp — 插件商城窗口: 独立顶层窗口 (单例, 构型同 xjs_settings:
  * owner 绑定 + 文件级状态 + 自绘 D2D + 每显示器 DPI 尺度 + 换肤 g_skinEpoch 重建画刷)。
  * 布局 = 头部 (标题/副标题/搜索框) + 左侧分类栏 (全部/已安装/可安装) + 右侧插件卡片栅格。
- * 数据 = 本机插件注册表 (与设置-插件页同源) + 样式演示占位卡 (市场下载源尚未接入,
- * 示例卡按钮点击仅提示; 接入真实市场源后删 MK_DEMO 并在此接拉取管线)。
+ * 数据 = 本机插件注册表 (本机唯一管理入口: 原设置-插件页已撤销并入, 2026-10-06 —
+ * 启停开关在卡片右上, 侧栏底部 重扫描/打开插件目录, 卡片右键打开该插件目录) + 样式演示
+ * 占位卡 (市场下载源尚未接入, 示例卡按钮点击仅提示; 接入真实市场源后删 MK_DEMO 并在此接拉取管线)。
+ * 卡片图标 = 清单 "图标" 声明的插件目录图片文件 (装载一次缓存绑本窗 RT); 演示卡与
+ * 未声明/装载失败的回退 = 矢量线性字形 (画法同菜单/设置分类图标)。
  * 搜索框走共享输入字段组件 XjsEditField (路由/IME/闪烁全在组件, 宿主只接线)。
  */
 #include "xjs_app.h"
@@ -12,34 +15,51 @@
 
 /* ==================== 状态 (单例; 窗口级状态住结构体, 不落游离全局) ==================== */
 
+/* 矢量回退字形 (XjsMkGlyphDraw 的 switch 分支) */
+enum { MKG_BOX = 0, MKG_MD, MKG_FOLDCOLOR, MKG_DUP };
+
 struct XjsMkEntry {
     std::wstring id, name, version, author, desc;
+    std::wstring iconPath;    /* 清单 "图标" → 插件目录内文件绝对路径 (空 = 矢量字形回退) */
+    int glyph = MKG_BOX;      /* 无位图可画时的矢量字形 (演示卡专属 / 已安装回退 = 包装盒) */
+    std::wstring statusErr;   /* 异常状态 (清单错误/加载失败/需重启生效): 非空时警色替代简介显示 */
     bool installed = false;   /* 本机注册表条目 (已安装) */
-    bool enabled = false;     /* 用户启用开关 (徽章展示, 设置页才是操作入口) */
+    bool enabled = false;     /* 用户启用开关 (卡片右上开关可点, 即时落盘) */
     bool demo = false;        /* 样式演示占位卡 (市场源未接入) */
 };
 
 enum { MK_CAT_ALL = 0, MK_CAT_INSTALLED, MK_CAT_AVAILABLE, MK_CAT_N };
 
+/* 卡片右键菜单项 id (商城窗自有段: 与字段编辑菜单 IDM_FCTX_BASE 9000 段错开) */
+enum { IDM_MKCTX_OPENDIR = 4600, IDM_MKCTX_UNINSTALL = 4601 };
+
 /* 样式演示占位卡 (文案存点分 i18n 主键; 文件级 static 表初始化器禁调 XjsT) */
-static const struct { const wchar_t* nameKey; const wchar_t* descKey; } MK_DEMO[3] = {
-    { L"商城.示例.Markdown阅读器",  L"商城.示例.Markdown阅读器.描述"  },
-    { L"商城.示例.彩色文件夹图标",  L"商城.示例.彩色文件夹图标.描述"  },
-    { L"商城.示例.重复文件查找",    L"商城.示例.重复文件查找.描述"    },
+static const struct { const wchar_t* nameKey; const wchar_t* descKey; int glyph; } MK_DEMO[3] = {
+    { L"商城.示例.Markdown阅读器",  L"商城.示例.Markdown阅读器.描述",  MKG_MD        },
+    { L"商城.示例.彩色文件夹图标",  L"商城.示例.彩色文件夹图标.描述",  MKG_FOLDCOLOR },
+    { L"商城.示例.重复文件查找",    L"商城.示例.重复文件查找.描述",    MKG_DUP       },
 };
+
+/* 卡片图标缓存条目: 位图绑本窗 RT (随 XjsMkFreeResources 一并释放), 键 = 路径+修改时间 */
+struct XjsMkIcon { std::wstring path; unsigned long long ft = 0; XjsBitmap* bmp = NULL; };
 
 struct XjsMarketState {
     HWND hwnd = NULL;
     XjsHwndRt* rt = NULL;
     XjsSolidBrush *brBg = NULL, *brBorder = NULL, *brBorderStrong = NULL, *brText = NULL,
         *brDim = NULL, *brFaint = NULL, *brAccent = NULL, *brAccent2 = NULL, *brAccentSoft = NULL,
-        *brPanel = NULL, *brPanel2 = NULL, *brHover = NULL, *brOk = NULL;
+        *brPanel = NULL, *brPanel2 = NULL, *brHover = NULL, *brOk = NULL, *brWhite = NULL;
     XjsGradBrush* brBgGrad = NULL;
     XjsFormat *tfTitle = NULL, *tfSub = NULL, *tfName = NULL, *tfMeta = NULL, *tfDesc = NULL,
-        *tfBtn = NULL, *tfCat = NULL, *tfCount = NULL, *tfGlyph = NULL, *tfEmpty = NULL, *tfSearch = NULL;
+        *tfBtn = NULL, *tfCat = NULL, *tfCount = NULL, *tfEmpty = NULL, *tfSearch = NULL;
     int brushEpoch = -1;
     float unit = 0;              /* 资源创建时的 SS 单位 (缩放/DPI 变了须重建) */
     float scale = 1.0f;          /* 本窗口显示器 DPI 尺度 (与主窗 g_s 独立) */
+
+    std::vector<XjsMkIcon> icons;   /* 卡片图标位图缓存 (XjsMkIconGet) */
+    XjsStroke* ssRound = NULL;      /* 矢量字形圆头笔画 (画法同菜单/设置分类图标) */
+    XjsSolidBrush *brDotR = NULL, *brDotY = NULL, *brDotB = NULL;   /* 彩色文件夹字形的固定彩点 */
+    XjsSolidBrush* brWarn = NULL;   /* 异常状态行 (g_skin.warn, 设置页同源) */
 
     int cat = MK_CAT_ALL;
     float scroll = 0, contentH = 0;
@@ -49,13 +69,18 @@ struct XjsMarketState {
 
     int hoverSide = -1;          /* 悬停分类条目 (MK_CAT_*) */
     int hoverCard = -1;          /* 悬停卡片 (view 下标) */
+    bool hoverCtl = false;       /* 指针在悬停卡片的控件 (开关/安装钮) 上 — 控件高亮只认它, 不认整卡悬停 */
+    int hoverAct = -1;           /* 悬停侧栏底部动作钮 (0=重扫描 1=打开插件目录) */
     bool trackingLeave = false;
 
     /* 头部搜索框 (共享单行输入字段组件: 键盘/IME/I-beam/闪烁 路由在组件层) */
     XjsEditField searchEd;
     /* 命令类松开触发 (口径同设置窗): 按下只记待定, 松开仍命中同一目标才执行 */
     int pressSide = -1;
-    int pressCard = -1;          /* 按下待定的卡片按钮 (view 下标) */
+    int pressCard = -1;          /* 按下待定的卡片 (view 下标) */
+    bool pressSwitch = false;    /* 待定目标 = 启用开关 (false = 安装钮) */
+    int pressAct = -1;           /* 按下待定的侧栏动作钮 */
+    std::wstring ctxId;          /* 卡片右键菜单所属插件 id (WM_POPUP_RESULT 回传时按它现查注册表) */
 };
 static XjsMarketState s_mk;
 
@@ -82,6 +107,14 @@ static void XjsMkRebuildEntries() {
         e.desc = b.description;
         e.installed = true;
         e.enabled = b.enabled;
+        if (!b.iconFile.empty()) e.iconPath = b.dir + L"\\" + b.iconFile;
+        /* 异常状态行 (口径 = 原设置-插件页 行3): 错误信息比简介更重要, 非空时替代简介警色显示 */
+        if (!b.declared)
+            e.statusErr = XjsT(L"设置.插件.清单错误前缀") + b.manifestErr;
+        else if (b.enabled && b.hasDll && !b.loaded && !b.loadErr.empty())
+            e.statusErr = XjsT(L"设置.插件.加载失败前缀") + b.loadErr;
+        else if (b.enabled && b.staleDll)
+            e.statusErr = XjsT(L"设置.插件.需重启说明");
         s_mk.entries.push_back(std::move(e));
     }
     for (const auto& d : MK_DEMO) {
@@ -89,6 +122,7 @@ static void XjsMkRebuildEntries() {
         e.name = XjsT(d.nameKey);
         e.desc = XjsT(d.descKey);
         e.author = XjsT(L"商城.示例作者");
+        e.glyph = d.glyph;
         e.demo = true;
         s_mk.entries.push_back(std::move(e));
     }
@@ -134,7 +168,7 @@ static int XjsMkCatCount(int cat) {
 
 static float XjsMkHeaderH() { return SS(88); }
 static float XjsMkSideW()   { return SS(176); }
-static float XjsMkCardH()   { return SS(124); }
+static float XjsMkCardH()   { return SS(100); }   /* 控件在右上带, 简介独占下部 (2026-10-06 收窄) */
 
 struct XjsMkGrid { float x0 = 0, x1 = 0, y0 = 0, colW = 0; int cols = 1; };
 
@@ -162,11 +196,41 @@ static XjsRect XjsMkCardRect(const XjsMkGrid& g, int vi, float scroll) {
     return XjsRectF(x, y, x + g.colW, y + XjsMkCardH());
 }
 
-/* 卡片内按钮/徽章矩形 (绘制/命中同源): 卡片右下角。
-   上缘 = bottom-36, 与简介区 (top+56..top+86) 不相交 — 简介两行曾压到徽章上 (2026-10-06) */
+/* 卡片内控件矩形 (绘制/命中同源): 右上角, 与 标题/版本·作者 两行同带垂直居中 (带中心 top+32)。
+   用户口径 (2026-10-06): 控件挪顶部更省空间 — 卡片高度随之收窄, 简介独占下部整行 */
+/* 安装钮宽 = 文本实测 + 24u 内边距 (设置页按钮同式): 短钮给标题让位 (2026-10-06 用户口径) */
+static float XjsMkBtnW() {
+    if (!s_mk.tfBtn) return SS(72);
+    return XjsMeasureText(XjsT(L"商城.安装"), s_mk.tfBtn) + SS(24);
+}
+
 static XjsRect XjsMkBtnRect(const XjsRect& card) {
-    return XjsRectF(card.right - SS(16) - SS(92), card.bottom - SS(36),
-                    card.right - SS(16), card.bottom - SS(10));
+    float w = XjsMkBtnW();
+    return XjsRectF(card.right - SS(16) - w, card.top + SS(19),
+                    card.right - SS(16), card.top + SS(45));
+}
+
+/* 已安装卡片右上角 = 启用开关 (设置页同款 42×24 胶囊, 垂直居中于标题带) */
+static XjsRect XjsMkSwitchRect(const XjsRect& card) {
+    XjsRect br = XjsMkBtnRect(card);
+    float cy = (br.top + br.bottom) / 2, th = SS(24), tw = SS(42);
+    return XjsRectF(card.right - SS(16) - tw, cy - th / 2, card.right - SS(16), cy + th / 2);
+}
+
+/* 侧栏底部动作钮 (插件页撤销后并入: 0=重新扫描 1=打开插件目录), 底部锚定随窗高。
+   重扫描/打开目录 文案复用原设置页键 (设置.插件.*) */
+static XjsRect XjsMkSideActRect(float vh, int i) {
+    float h = SS(30);
+    float y = vh - SS(12) - (2 - i) * (h + SS(8));
+    return XjsRectF(SS(10), y, XjsMkSideW() - SS(10), y + h);
+}
+
+static int XjsMkSideActHit(float vh, float y) {
+    for (int i = 0; i < 2; i++) {
+        XjsRect r = XjsMkSideActRect(vh, i);
+        if (y >= r.top && y < r.bottom) return i;
+    }
+    return -1;
 }
 
 /* ==================== 资源 (换肤纪元/DPI 变化重建) ==================== */
@@ -179,11 +243,15 @@ static void XjsMkFreeResources() {
        (2026-10-06 实锤: 关商城→重开商城, WM_PAINT 重建路径崩) */
     XjsSolidBrush** brs[] = { &s_mk.brBg, &s_mk.brBorder, &s_mk.brBorderStrong, &s_mk.brText,
                               &s_mk.brDim, &s_mk.brFaint, &s_mk.brAccent, &s_mk.brAccent2,
-                              &s_mk.brAccentSoft, &s_mk.brPanel, &s_mk.brPanel2, &s_mk.brHover, &s_mk.brOk };
+                              &s_mk.brAccentSoft, &s_mk.brPanel, &s_mk.brPanel2, &s_mk.brHover, &s_mk.brOk,
+                              &s_mk.brDotR, &s_mk.brDotY, &s_mk.brDotB, &s_mk.brWhite, &s_mk.brWarn };
     for (auto* pb : brs) if (*pb) { (*pb)->Release(); *pb = NULL; }
     if (s_mk.brBgGrad) { s_mk.brBgGrad->Release(); s_mk.brBgGrad = NULL; }
+    if (s_mk.ssRound) { s_mk.ssRound->Release(); s_mk.ssRound = NULL; }
+    for (auto& ic : s_mk.icons) if (ic.bmp) ic.bmp->Release();   /* 图标位图绑本窗 RT, 随资源重建作废 */
+    s_mk.icons.clear();
     XjsFormat** fmts[] = { &s_mk.tfTitle, &s_mk.tfSub, &s_mk.tfName, &s_mk.tfMeta, &s_mk.tfDesc,
-                           &s_mk.tfBtn, &s_mk.tfCat, &s_mk.tfCount, &s_mk.tfGlyph, &s_mk.tfEmpty, &s_mk.tfSearch };
+                           &s_mk.tfBtn, &s_mk.tfCat, &s_mk.tfCount, &s_mk.tfEmpty, &s_mk.tfSearch };
     for (auto* pf : fmts) if (*pf) { (*pf)->Release(); *pf = NULL; }
     s_mk.brushEpoch = -1;
 }
@@ -211,9 +279,15 @@ static void XjsMkEnsureResources(HWND hwnd) {
     s_mk.rt->CreateSolidColorBrush(g_skin.panel2, &s_mk.brPanel2);
     s_mk.rt->CreateSolidColorBrush(g_skin.rowHover, &s_mk.brHover);
     s_mk.rt->CreateSolidColorBrush(g_skin.ok, &s_mk.brOk);
+    s_mk.rt->CreateSolidColorBrush(g_skin.warn, &s_mk.brWarn);
+    s_mk.rt->CreateSolidColorBrush(XjsColor(1, 1, 1, 1), &s_mk.brWhite);   /* 开关圆钮 (恒白, 设置页同款) */
     XjsGradientStop gs[2] = { { 0.0f, bg1 }, { 1.0f, bg2 } };
     s_mk.rt->CreateLinearGradientBrush(XjsPoint2F(0, 0), XjsPoint2F(0, (FLOAT)rc.bottom + 1), gs, 2, &s_mk.brBgGrad);
     float px = SS(1);
+    g_gfx->RoundStroke(&s_mk.ssRound);   /* 矢量字形圆头笔画 (两端圆头, 同菜单/设置分类图标) */
+    s_mk.rt->CreateSolidColorBrush(XjsColor(0.90f, 0.44f, 0.36f), &s_mk.brDotR);   /* 彩点固定色 (不随皮肤) */
+    s_mk.rt->CreateSolidColorBrush(XjsColor(0.91f, 0.72f, 0.29f), &s_mk.brDotY);
+    s_mk.rt->CreateSolidColorBrush(XjsColor(0.36f, 0.66f, 0.91f), &s_mk.brDotB);
     struct FDef { XjsFormat** out; float size; DWRITE_FONT_WEIGHT weight; };
     const FDef defs[] = {
         { &s_mk.tfTitle, 15, DWRITE_FONT_WEIGHT_SEMI_BOLD },
@@ -224,7 +298,6 @@ static void XjsMkEnsureResources(HWND hwnd) {
         { &s_mk.tfBtn,   11.5f, DWRITE_FONT_WEIGHT_NORMAL },
         { &s_mk.tfCat,   12, DWRITE_FONT_WEIGHT_NORMAL },
         { &s_mk.tfCount, 10, DWRITE_FONT_WEIGHT_NORMAL },
-        { &s_mk.tfGlyph, 18, DWRITE_FONT_WEIGHT_SEMI_BOLD },
         { &s_mk.tfEmpty, 13, DWRITE_FONT_WEIGHT_NORMAL },
         { &s_mk.tfSearch, 12, DWRITE_FONT_WEIGHT_NORMAL },
     };
@@ -235,13 +308,105 @@ static void XjsMkEnsureResources(HWND hwnd) {
     }
     /* 单行文本关自动换行; 溢出处字符省略号 */
     XjsFormat* nowrap[] = { s_mk.tfTitle, s_mk.tfSub, s_mk.tfName, s_mk.tfMeta,
-                            s_mk.tfBtn, s_mk.tfCat, s_mk.tfCount, s_mk.tfGlyph, s_mk.tfEmpty, s_mk.tfSearch };
+                            s_mk.tfBtn, s_mk.tfCat, s_mk.tfCount, s_mk.tfEmpty, s_mk.tfSearch };
     for (auto* f : nowrap)
         if (f) { f->SetWordWrapping(XJS_WRAP_NONE); f->SetCharEllipsis(); }
     /* 简介两行词换行 + 末行省略号 (英文按空格断行不劈词, 中文仍逐字) */
     if (s_mk.tfDesc) { s_mk.tfDesc->SetWordWrapping(XJS_WRAP_WORD); s_mk.tfDesc->SetCharEllipsis(); }
     s_mk.brushEpoch = g_skinEpoch;
     s_mk.unit = unit;
+}
+
+/* ==================== 卡片图标 (清单 "图标" 位图 + 矢量字形回退) ==================== */
+
+/* 整读小文件 (SHARE_READ 不锁插件目录) */
+static bool XjsMkReadIconFile(const std::wstring& path, std::string* out) {
+    out->clear();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[8192]; DWORD rd = 0;
+    while (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd) out->append(buf, rd);
+    CloseHandle(h);
+    return true;
+}
+
+/* 取卡片图标位图 (缓存键 = 路径+修改时间, 插件换图标自动重载; 失败同样入缓存不逐帧重读)。
+   同步一次装载 + 缓存口径同引导光标 PNG (小资产懒解码绑本窗 RT); 预览面板的大图异步
+   管线不适用此量级 (≤256KB 上限防超大图卡帧), 首帧后零磁盘读。 */
+static XjsBitmap* XjsMkIconGet(const std::wstring& path) {
+    unsigned long long ft = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa))
+        ft = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    XjsMkIcon* ic = NULL;
+    for (auto& e : s_mk.icons)
+        if (e.path == path) { ic = &e; break; }
+    if (!ic) {
+        s_mk.icons.push_back(XjsMkIcon());
+        ic = &s_mk.icons.back();
+        ic->path = path;
+    }
+    if (ic->ft == ft) return ic->bmp;   /* 命中 (含失败档 bmp=NULL) */
+    if (ic->bmp) ic->bmp->Release();    /* 旧位图只被已完成的帧引用, 换新前释放安全 */
+    ic->bmp = NULL;
+    ic->ft = ft;
+    std::string bytes;
+    if (ft && XjsMkReadIconFile(path, &bytes) && bytes.size() <= 256 * 1024)
+        ic->bmp = XjsDecodeImageToRt(s_mk.rt, bytes.data(), (int)bytes.size());
+    return ic->bmp;
+}
+
+/* 矢量字形 (16 格网格线性笔画, 画法同 XjsSetCatIconDraw/XjsMenuIconDraw, 圆头):
+   演示占位卡专属字形; 已安装插件未声明 "图标"/装载失败的回退 = 包装盒 (扩展/插件隐喻) */
+static void XjsMkGlyphDraw(int glyph, float cx, float cy) {
+    XjsRt* rt = s_mk.rt;
+    if (!rt || !s_mk.brAccent || !s_mk.ssRound) return;
+    float u = SS(1.7f);   /* 16 格 → ~27u, 44u 色板内留边 */
+    auto P = [&](float x, float y) { return XjsPoint2F(cx - 8 * u + x * u, cy - 8 * u + y * u); };
+    float w = SS(2.0f);
+    XjsBrush* br = s_mk.brAccent;
+    auto seg = [&](float x1, float y1, float x2, float y2) { rt->DrawLine(P(x1, y1), P(x2, y2), br, w, s_mk.ssRound); };
+    auto rrect = [&](float x0, float y0, float x1, float y1, float r) {
+        rt->DrawRoundedRectangle(XjsRoundedRectF(
+            XjsRectF(cx - 8 * u + x0 * u, cy - 8 * u + y0 * u, cx - 8 * u + x1 * u, cy - 8 * u + y1 * u),
+            r * u, r * u), br, w, s_mk.ssRound);
+    };
+    auto dot = [&](float x, float y, XjsBrush* c) {
+        rt->FillEllipse(XjsEllipseF(P(x, y), 1.25f * u, 1.25f * u), c);
+    };
+    switch (glyph) {
+        case MKG_MD: {   /* Markdown 标记: 圆角框内 M + 下箭头 (官方 mark 同构) */
+            rrect(1.6f, 3.4f, 14.4f, 12.6f, 1.8f);
+            seg(4.3f, 10.3f, 4.3f, 5.7f);   seg(4.3f, 5.7f, 6.7f, 8.1f);
+            seg(6.7f, 8.1f, 9.1f, 5.7f);    seg(9.1f, 5.7f, 9.1f, 10.3f);
+            seg(11.9f, 5.7f, 11.9f, 10.5f);
+            seg(10.2f, 8.8f, 11.9f, 10.5f); seg(11.9f, 10.5f, 13.6f, 8.8f);
+            break;
+        }
+        case MKG_FOLDCOLOR: {   /* 彩色文件夹: 文件夹 + 三彩点 (固定色, 不随皮肤) */
+            seg(5.4f, 3.6f, 7.6f, 3.6f);   seg(7.6f, 3.6f, 9.2f, 5.5f);   seg(9.2f, 5.5f, 14, 5.5f);
+            rrect(2, 5.5f, 14, 12.6f, 1.6f);
+            if (s_mk.brDotR) dot(5.4f, 9.1f, s_mk.brDotR);
+            if (s_mk.brDotY) dot(8, 9.1f, s_mk.brDotY);
+            if (s_mk.brDotB) dot(10.6f, 9.1f, s_mk.brDotB);
+            break;
+        }
+        case MKG_DUP: {   /* 重复文件查找: 文档 + 放大镜 */
+            rrect(2.4f, 2.6f, 10.6f, 12.2f, 1.6f);
+            seg(4.8f, 5.8f, 8.2f, 5.8f);   seg(4.8f, 8.2f, 7.2f, 8.2f);
+            rt->DrawEllipse(XjsEllipseF(P(10.7f, 10.7f), 2.7f * u, 2.7f * u), br, w, s_mk.ssRound);
+            seg(12.8f, 12.8f, 14.4f, 14.4f);
+            break;
+        }
+        default: {   /* MKG_BOX 插件/扩展回退: 包装盒 (立体六边形 + 内棱) */
+            seg(8, 1.8f, 13.6f, 4.9f);    seg(13.6f, 4.9f, 13.6f, 11.1f);
+            seg(13.6f, 11.1f, 8, 14.2f);  seg(8, 14.2f, 2.4f, 11.1f);
+            seg(2.4f, 11.1f, 2.4f, 4.9f); seg(2.4f, 4.9f, 8, 1.8f);
+            seg(2.4f, 4.9f, 8, 8);        seg(8, 8, 13.6f, 4.9f);
+            seg(8, 8, 8, 14.2f);
+            break;
+        }
+    }
 }
 
 /* ==================== 绘制 ==================== */
@@ -251,6 +416,16 @@ static void XjsMkSearchGlyph(XjsRt* rt, float cx, float cy, XjsBrush* br) {
     float r = SS(4.2f);
     rt->DrawEllipse(XjsEllipseF(XjsPoint2F(cx - SS(1), cy - SS(1)), r, r), br, SS(1.3f));
     rt->DrawLine(XjsPoint2F(cx + SS(2), cy + SS(2)), XjsPoint2F(cx + SS(5.4f), cy + SS(5.4f)), br, SS(1.3f));
+}
+
+/* 启用开关 (设置页 XjsSetDrawSwitch 同款: 42×24 胶囊轨道 + 18 白圆钮, 开=accent 轨道+钮右移) */
+static void XjsMkDrawSwitch(const XjsRect& tr, bool checked) {
+    float r = SS(12);
+    s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(tr, r, r),
+        checked ? (XjsBrush*)s_mk.brAccent : (XjsBrush*)s_mk.brBorderStrong);
+    float d = SS(18);
+    float cx = checked ? tr.right - SS(3) - d / 2 : tr.left + SS(3) + d / 2;
+    s_mk.rt->FillEllipse(XjsEllipseF(XjsPoint2F(cx, (tr.top + tr.bottom) / 2), d / 2, d / 2), s_mk.brWhite);
 }
 
 static void XjsMkPaint(HWND hwnd) {
@@ -327,6 +502,21 @@ static void XjsMkPaint(HWND hwnd) {
                 sel ? s_mk.brAccent : s_mk.brFaint);
             y += chh;
         }
+        /* 侧栏底部动作 (插件页撤销后并入商城): 重扫描 / 打开插件目录 (松开触发) */
+        static const wchar_t* const ACT_KEYS[2] = { L"设置.插件.重新扫描", L"设置.插件.插件目录" };
+        for (int ai = 0; ai < 2; ai++) {
+            XjsRect abr = XjsMkSideActRect(vh, ai);
+            bool hov = ai == s_mk.hoverAct;
+            s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(abr, SS(8), SS(8)),
+                hov ? (XjsBrush*)s_mk.brPanel2 : (XjsBrush*)s_mk.brPanel);
+            s_mk.rt->DrawRoundedRectangle(XjsRoundedRectF(abr, SS(8), SS(8)),
+                hov ? (XjsBrush*)s_mk.brAccent : (XjsBrush*)s_mk.brBorder, SS(1.2f));
+            const wchar_t* t = XjsT(ACT_KEYS[ai]);
+            float tw = XjsMeasureText(t, s_mk.tfCat);
+            float cx = (abr.left + abr.right - tw) / 2;
+            s_mk.rt->DrawText(t, (UINT32)wcslen(t), s_mk.tfCat,
+                XjsRectF(cx, abr.top, cx + tw, abr.bottom), hov ? s_mk.brText : s_mk.brDim);
+        }
         s_mk.rt->FillRectangle(XjsRectF(XjsMkSideW(), headH + 1, XjsMkSideW() + 1, vh), s_mk.brBorder);
     }
 
@@ -340,17 +530,29 @@ static void XjsMkPaint(HWND hwnd) {
             hovered ? s_mk.brPanel2 : s_mk.brPanel);
         s_mk.rt->DrawRoundedRectangle(XjsRoundedRectF(cr, SS(10), SS(10)),
             hovered ? s_mk.brBorderStrong : s_mk.brBorder, SS(1.2f));
-        /* 图标位: 圆角色板 + 名称首字 (接入真实图标后替换) */
+        /* 图标位: 圆角色板 + 插件图标 (清单 "图标" 装载; 演示卡/未声明/失败 = 矢量字形) */
         XjsRect ir = XjsRectF(cr.left + SS(16), cr.top + SS(14), cr.left + SS(60), cr.top + SS(58));
         s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(ir, SS(10), SS(10)), s_mk.brAccentSoft);
-        if (!e.name.empty()) {
-            wchar_t gl[2] = { e.name[0], 0 };
-            s_mk.rt->DrawText(gl, 1, s_mk.tfGlyph, ir, s_mk.brAccent);
+        XjsBitmap* icb = e.iconPath.empty() ? NULL : XjsMkIconGet(e.iconPath);
+        if (icb) {
+            XjsSizeU bs = icb->GetPixelSize();
+            if (bs.width > 0 && bs.height > 0) {   /* 等比适配色板内缩 7u */
+                float bw = (float)bs.width, bh = (float)bs.height;
+                float box = SS(30);
+                float k = std::min(box / bw, box / bh);
+                float dw = bw * k, dh = bh * k;
+                float icx = (ir.left + ir.right - dw) / 2, icy = (ir.top + ir.bottom - dh) / 2;
+                s_mk.rt->DrawBitmap(icb, XjsRectF(icx, icy, icx + dw, icy + dh), 1.0f, 2);
+            }
+        } else {
+            XjsMkGlyphDraw(e.glyph, (ir.left + ir.right) / 2, (ir.top + ir.bottom) / 2);
         }
-        /* 名称 + 版本·作者 (元信息行) */
+        /* 名称 + 版本·作者 (元信息行): 右界收到控件左侧留缝, 长名/长作者省略号让位右上控件 */
         float tx = cr.left + SS(72);
+        XjsRect ctl = e.installed ? XjsMkSwitchRect(cr) : XjsMkBtnRect(cr);
+        float txr = ctl.left - SS(10);
         s_mk.rt->DrawText(e.name.c_str(), (UINT32)e.name.length(), s_mk.tfName,
-            XjsRectF(tx, cr.top + SS(12), cr.right - SS(16), cr.top + SS(34)), s_mk.brText);
+            XjsRectF(tx, cr.top + SS(12), txr, cr.top + SS(34)), s_mk.brText);
         std::wstring meta;
         if (!e.version.empty()) meta = L"v" + e.version;
         if (!e.author.empty()) {
@@ -359,37 +561,31 @@ static void XjsMkPaint(HWND hwnd) {
         }
         if (!meta.empty())
             s_mk.rt->DrawText(meta.c_str(), (UINT32)meta.length(), s_mk.tfMeta,
-                XjsRectF(tx, cr.top + SS(34), cr.right - SS(16), cr.top + SS(52)), s_mk.brDim);
-        /* 简介 (两行, 词换行 + 末行省略号); 下缘 86 = 按钮上缘 88 之前, 不与右下角状态重叠 */
-        s_mk.rt->DrawText(e.desc.c_str(), (UINT32)e.desc.length(), s_mk.tfDesc,
-            XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
-            s_mk.brDim);
-        /* 右下角状态: 已安装 = 徽章 (启用/禁用); 演示卡 = "敬请期待" 置灰钮 (松开触发)。
-           按钮款 = 设置窗同款描边钮 (文字水平居中, 悬停垫 accentSoft) */
-        XjsRect br = XjsMkBtnRect(cr);
+                XjsRectF(tx, cr.top + SS(34), txr, cr.top + SS(52)), s_mk.brDim);
+        /* 简介两行 (词换行 + 末行省略号), 独占下部整行; 有异常状态时警色替代 (错误比简介重要) */
+        if (e.statusErr.empty())
+            s_mk.rt->DrawText(e.desc.c_str(), (UINT32)e.desc.length(), s_mk.tfDesc,
+                XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
+                s_mk.brDim);
+        else
+            s_mk.rt->DrawText(e.statusErr.c_str(), (UINT32)e.statusErr.length(), s_mk.tfDesc,
+                XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
+                s_mk.brWarn);
+        /* 右上角控件: 已安装 = 启用开关 (设置页同款, 可点, 启停走设置页同一执行端);
+           未安装/演示卡 = "安装" 主行动钮 (accent 实底, 悬停 accent2, 松开触发)。
+           高亮只认控件级悬停 hoverCtl — 整卡悬停点亮按钮违反直觉 (2026-10-06 用户口径) */
         if (e.installed) {
-            s_mk.rt->DrawRoundedRectangle(XjsRoundedRectF(br, SS(6), SS(6)),
-                e.enabled ? s_mk.brOk : s_mk.brBorder, SS(1.2f));
-            const wchar_t* st = XjsT(e.enabled ? L"商城.已启用" : L"商城.已禁用");
-            float tw = XjsMeasureText(st, s_mk.tfBtn);
-            float cx = (br.left + br.right - tw) / 2;
-            s_mk.rt->DrawText(st, (UINT32)wcslen(st), s_mk.tfBtn,
-                XjsRectF(cx, br.top, cx + tw, br.bottom), e.enabled ? s_mk.brOk : s_mk.brDim);
+            XjsMkDrawSwitch(ctl, e.enabled);
         } else {
-            if (hovered) {
-                /* 悬停垫 accentSoft; 按住 (松开触发待定) = accent2 实底反白 (bg1 字) */
-                if (vi == s_mk.pressCard)
-                    s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(br, SS(6), SS(6)), s_mk.brAccent2);
-                else
-                    s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(br, SS(6), SS(6)), s_mk.brAccentSoft);
-            }
-            s_mk.rt->DrawRoundedRectangle(XjsRoundedRectF(br, SS(6), SS(6)), s_mk.brAccent, SS(1.2f));
-            const wchar_t* bt = XjsT(L"商城.敬请期待");
+            bool armed = s_mk.hoverCtl && hovered && vi == s_mk.pressCard && !s_mk.pressSwitch;
+            s_mk.rt->FillRoundedRectangle(XjsRoundedRectF(ctl, SS(6), SS(6)),
+                armed ? (XjsBrush*)s_mk.brAccent2
+                      : (s_mk.hoverCtl && hovered ? (XjsBrush*)s_mk.brAccent : (XjsBrush*)s_mk.brBorderStrong));
+            const wchar_t* bt = XjsT(L"商城.安装");
             float tw = XjsMeasureText(bt, s_mk.tfBtn);
-            float cx = (br.left + br.right - tw) / 2;
+            float cx = (ctl.left + ctl.right - tw) / 2;
             s_mk.rt->DrawText(bt, (UINT32)wcslen(bt), s_mk.tfBtn,
-                XjsRectF(cx, br.top, cx + tw, br.bottom),
-                (hovered && vi == s_mk.pressCard) ? s_mk.brBg : s_mk.brAccent);
+                XjsRectF(cx, ctl.top, cx + tw, ctl.bottom), s_mk.brBg);
         }
     }
 
@@ -464,6 +660,35 @@ static void XjsMkActivateDemoCard(HWND hwnd, int vi) {
     XjsToastShow(hwnd, XjsT(L"商城.提示.市场未接入"), XTOAST_INFO, SS(1));
 }
 
+/* 启停执行端 (口径 = 设置-插件页 XjsSetPluginToggle 同一套): 禁用=闸门关+来源集变化重搜;
+   启用=立即加载, 失败 toast 原因不写回; 两条路都落盘。条目按 id 现查注册表下标
+   (重扫会移动下标, 卡片上不存索引) */
+static int XjsMkPluginIndexById(const std::wstring& id) {
+    for (int i = 0; i < XjsPluginCount(); i++) {
+        XjsPluginBrief b;
+        if (XjsPluginBriefAt(i, &b) && b.id == id) return i;
+    }
+    return -1;
+}
+
+static void XjsMkTogglePlugin(HWND hwnd, const XjsMkEntry& e) {
+    int i = XjsMkPluginIndexById(e.id);
+    if (i < 0) return;
+    XjsPluginBrief b;
+    if (!XjsPluginBriefAt(i, &b)) return;
+    if (b.enabled) {
+        XjsPluginDisable(i);
+        XjsSearchNow(false);   /* 来源集可能变化 (插件搜索模式/托管词条) → 重搜整链 */
+    } else {
+        std::wstring err;
+        if (!XjsPluginEnable(i, &err))
+            XjsToastShow(hwnd, (XjsT(L"设置.插件.启用失败前缀") + err).c_str(), XTOAST_ERROR, SS(1));
+    }
+    XjsSaveConfig();
+    s_mk.modelDirty = true;   /* 启用态以注册表为准, 下一帧重拉条目 */
+    XjsMkInvalidate(hwnd);
+}
+
 static void XjsMkSwitchCat(HWND hwnd, int cat) {
     if (s_mk.cat == cat) return;
     s_mk.cat = cat;
@@ -527,12 +752,25 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             RECT crc;
             GetClientRect(hwnd, &crc);
             XjsMkGrid g = XjsMkGridGeom((float)crc.right, (float)crc.bottom);
-            int hs = -1, hc = -1;
-            if (pt.x < XjsMkSideW()) hs = XjsMkSideHit((float)pt.y);
-            else hc = XjsMkCardHit(g, (float)pt.x, (float)pt.y, p->scroll);
-            if (hs != p->hoverSide || hc != p->hoverCard) {
+            int hs = -1, hc = -1, ha = -1;
+            bool ctl = false;
+            if (pt.x < XjsMkSideW()) {
+                hs = XjsMkSideHit((float)pt.y);
+                if (hs < 0) ha = XjsMkSideActHit((float)crc.bottom, (float)pt.y);
+            } else {
+                hc = XjsMkCardHit(g, (float)pt.x, (float)pt.y, p->scroll);
+                if (hc >= 0) {   /* 控件级悬停: 高亮/手型只认控件矩形, 整卡悬停不算 (用户口径 2026-10-06) */
+                    const XjsMkEntry& en = s_mk.entries[p->view[hc]];
+                    XjsRect crd = XjsMkCardRect(g, hc, p->scroll);
+                    XjsRect r = en.installed ? XjsMkSwitchRect(crd) : XjsMkBtnRect(crd);
+                    ctl = pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom;
+                }
+            }
+            if (hs != p->hoverSide || hc != p->hoverCard || ha != p->hoverAct || ctl != p->hoverCtl) {
                 p->hoverSide = hs;
                 p->hoverCard = hc;
+                p->hoverAct = ha;
+                p->hoverCtl = ctl;
                 XjsMkInvalidate(hwnd);
             }
             if (!p->trackingLeave) {
@@ -540,16 +778,17 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 if (TrackMouseEvent(&tme)) p->trackingLeave = true;
             }
             /* 本处理直接 return 0 不过 DefWindowProc → WM_SETCURSOR 不会到来, 显式设光标 */
-            SetCursor(LoadCursorW(NULL,
-                (hc >= 0 && !s_mk.entries[p->view[hc]].installed) ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursorW(NULL, (ctl || ha >= 0) ? IDC_HAND : IDC_ARROW));
             return 0;
         }
         case WM_MOUSELEAVE:
             p->trackingLeave = false;
             XjsToastHoverReset(hwnd);
-            if (p->hoverSide != -1 || p->hoverCard != -1) {
+            if (p->hoverSide != -1 || p->hoverCard != -1 || p->hoverAct != -1 || p->hoverCtl) {
                 p->hoverSide = -1;
                 p->hoverCard = -1;
+                p->hoverAct = -1;
+                p->hoverCtl = false;
                 XjsMkInvalidate(hwnd);
             }
             return 0;
@@ -568,12 +807,53 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         case WM_RBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             XjsEditFieldContextMenu(hwnd, pt);   /* 输入字段右键=编辑菜单 (未中字段=无操作) */
+            /* 卡片右键 (已安装) = 管理菜单: 打开该插件目录 (插件页撤销后的入口) */
+            RECT crc;
+            GetClientRect(hwnd, &crc);
+            XjsMkGrid g = XjsMkGridGeom((float)crc.right, (float)crc.bottom);
+            int hc = XjsMkCardHit(g, (float)pt.x, (float)pt.y, p->scroll);
+            if (hc >= 0 && s_mk.entries[p->view[hc]].installed) {
+                p->ctxId = s_mk.entries[p->view[hc]].id;
+                XjsPopupItem dir, unins;
+                dir.id = IDM_MKCTX_OPENDIR;
+                dir.title = XjsT(L"设置.插件.插件目录");
+                dir.icon = XMI_FOLDER;
+                unins.id = IDM_MKCTX_UNINSTALL;
+                unins.title = XjsT(L"商城.卸载");
+                unins.accent = true;   /* 破坏性动作以强调色示出 */
+                std::vector<XjsPopupItem> items;
+                items.push_back(std::move(dir));
+                items.push_back(std::move(unins));
+                POINT sp = pt;
+                ClientToScreen(hwnd, &sp);
+                XjsShowPopupMenu(hwnd, sp, items, SS(168));
+            }
             return 0;
         }
         case WM_POPUP_RESULT: {
             int id = (int)wParam;
             if (id >= IDM_FCTX_BASE && id < IDM_FCTX_BASE + 5) {   /* 字段编辑菜单回传必须最先分流 */
                 XjsEditFieldMenuCmd(hwnd, id - IDM_FCTX_BASE);
+                return 0;
+            }
+            if (id == IDM_MKCTX_OPENDIR) {   /* 卡片右键·打开该插件目录 (按 ctxId 现查注册表下标) */
+                int i = XjsMkPluginIndexById(s_mk.ctxId);
+                if (i >= 0) XjsPluginOpenDir(i);
+                return 0;
+            }
+            if (id == IDM_MKCTX_UNINSTALL) {   /* 卡片右键·卸载: 通用询问框二次确认后执行 */
+                int i = XjsMkPluginIndexById(s_mk.ctxId);
+                XjsPluginBrief b;
+                if (i < 0 || !XjsPluginBriefAt(i, &b)) return 0;
+                std::wstring desc = XjsFmt(XjsT(L"商城.卸载确认说明"), b.name);
+                std::string askBtns = std::string("[{\"text\":\"") + XjsTUtf8(L"商城.卸载") +
+                                      "\",\"style\":\"danger\"},{\"text\":\"" + XjsTUtf8(L"通用词.取消") + "\"}]";
+                if (XjsShowAskDialog(hwnd, XjsT(L"商城.卸载"), desc.c_str(), askBtns.c_str()) != 0) return 0;
+                std::wstring err;
+                if (!XjsPluginUninstall(i, &err))
+                    XjsToastShow(hwnd, (XjsT(L"商城.卸载失败前缀") + err).c_str(), XTOAST_ERROR, SS(1));
+                p->modelDirty = true;   /* 下一帧重拉注册表 (被卸条目消失) */
+                XjsMkInvalidate(hwnd);
                 return 0;
             }
             return 0;
@@ -595,14 +875,19 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             XjsMkGrid g = XjsMkGridGeom((float)crc.right, (float)crc.bottom);
             if (pt.x < XjsMkSideW()) {
                 p->pressSide = XjsMkSideHit((float)pt.y);   /* 分类: 记待定, 松开触发 */
+                if (p->pressSide < 0)
+                    p->pressAct = XjsMkSideActHit((float)crc.bottom, (float)pt.y);   /* 底部动作钮同口径 */
                 return 0;
             }
             int hc = XjsMkCardHit(g, (float)pt.x, (float)pt.y, p->scroll);
             if (hc >= 0) {
-                XjsRect br = XjsMkBtnRect(XjsMkCardRect(g, hc, p->scroll));
-                if (!s_mk.entries[p->view[hc]].installed &&
-                    pt.x >= br.left && pt.x <= br.right && pt.y >= br.top && pt.y <= br.bottom)
-                    p->pressCard = hc;   /* 演示卡按钮: 记待定, 松开触发 */
+                const XjsMkEntry& en = s_mk.entries[p->view[hc]];
+                XjsRect crd = XjsMkCardRect(g, hc, p->scroll);
+                XjsRect ctl = en.installed ? XjsMkSwitchRect(crd) : XjsMkBtnRect(crd);
+                if (pt.x >= ctl.left && pt.x <= ctl.right && pt.y >= ctl.top && pt.y <= ctl.bottom) {
+                    p->pressCard = hc;   /* 卡片右下控件: 记待定, 松开触发 */
+                    p->pressSwitch = en.installed;
+                }
             }
             return 0;
         }
@@ -614,8 +899,12 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             /* 命令落地 (松开触发口径): 按下待定 + 松开仍命中同一目标才执行, 拖离=取消 */
             int pendingSide = p->pressSide;
             int pendingCard = p->pressCard;
+            bool pendingSwitch = p->pressSwitch;
+            int pendingAct = p->pressAct;
             p->pressSide = -1;
             p->pressCard = -1;
+            p->pressSwitch = false;
+            p->pressAct = -1;
             RECT crc;
             GetClientRect(hwnd, &crc);
             XjsMkGrid g = XjsMkGridGeom((float)crc.right, (float)crc.bottom);
@@ -624,10 +913,25 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 XjsMkSwitchCat(hwnd, SIDE_CAT[pendingSide]);
                 return 0;
             }
+            if (pendingAct >= 0 && pt.x < XjsMkSideW() &&
+                pendingAct == XjsMkSideActHit((float)crc.bottom, (float)pt.y)) {
+                if (pendingAct == 0) {   /* 重新扫描: 收新目录/刷新清单, 下一帧重拉条目 (设置页同口径) */
+                    XjsPluginRescan();
+                    p->modelDirty = true;
+                    XjsMkInvalidate(hwnd);
+                } else {
+                    XjsPluginOpenDir(-1);   /* 打开插件根目录 (目录被删内部退回 exe 目录) */
+                }
+                return 0;
+            }
             if (pendingCard >= 0) {
-                XjsRect br = XjsMkBtnRect(XjsMkCardRect(g, pendingCard, p->scroll));
-                if (pt.x >= br.left && pt.x <= br.right && pt.y >= br.top && pt.y <= br.bottom)
-                    XjsMkActivateDemoCard(hwnd, pendingCard);
+                const XjsMkEntry& en = s_mk.entries[p->view[pendingCard]];
+                XjsRect crd = XjsMkCardRect(g, pendingCard, p->scroll);
+                XjsRect ctl = pendingSwitch ? XjsMkSwitchRect(crd) : XjsMkBtnRect(crd);
+                if (pt.x >= ctl.left && pt.x <= ctl.right && pt.y >= ctl.top && pt.y <= ctl.bottom) {
+                    if (pendingSwitch) XjsMkTogglePlugin(hwnd, en);
+                    else XjsMkActivateDemoCard(hwnd, pendingCard);
+                }
             }
             return 0;
         }
@@ -691,7 +995,12 @@ static LRESULT CALLBACK Xjs_MarketWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             p->searchEd.area = {};
             p->hwnd = NULL;
             p->hoverSide = p->hoverCard = -1;
+            p->hoverCtl = false;
+            p->hoverAct = -1;
             p->pressSide = p->pressCard = -1;
+            p->pressSwitch = false;
+            p->pressAct = -1;
+            p->ctxId.clear();
             p->scroll = 0;
             p->modelDirty = true;   /* 单例状态复位 (窗销毁后残留会在重开时"复活", 口径同设置窗) */
             return 0;

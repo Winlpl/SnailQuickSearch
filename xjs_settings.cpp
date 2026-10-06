@@ -59,10 +59,7 @@ enum XjsSetAct {
     ACT_PERF_SYNCLR = 397,  /* 同步统计 清零 (xjs_sync_ClearPerformanceText, 无开关 API) */
     ACT_EXCL_DEL = 400,  /* +排除目录索引 (上限 1024) */
     ACT_OPEN = 1500,     /* +0..2 打开文件行为 (每窗: 继承管理员/异步线程/打开后隐藏) */
-    /* 插件管理 (全局, 2026-09-19): 段 1600..1666 上方空闲无邻段 */
-    ACT_PLUGINS_OPENDIR = 1600,  /* 打开插件目录 */
-    ACT_PLUGINS_RESCAN  = 1601,  /* 重新扫描 plugins\ */
-    ACT_PLUGINS_TOGGLE  = 1602,  /* +插件下标 启用/禁用 (上限 200, 同票号上限) */
+    /* (插件管理页已撤 — 启停/重扫/开目录管理并进插件商城窗, 2026-10-06; 段 1600 空闲) */
     /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲。
        两张表已并入同一分类页 (2026-10-06), 不能再按 s_set.cat 路由 — 别名表动作拆独立段 */
     ACT_TSAVE = 2000,            /* 文件分类表 保存 */
@@ -77,7 +74,6 @@ static_assert(ACT_APPEAR + XJS_APPEAR_COUNT <= ACT_MEMLOCK, "出现位置档位�
 static_assert(ACT_PERF_SYNCLR + 1 <= ACT_EXCL_DEL, "内存/性能动作段越界, 与 ACT_EXCL_DEL 重叠");
 /* 段位互斥锁死 (枚举值即运行时命令 id, 曾发生 ACT_WINGM_DEL 段横穿后加常量 = 点删除执行别的动作):
    任何新动作段必须落在已锁段之外并在此补断言 */
-static_assert(ACT_PLUGINS_TOGGLE + 200 <= ACT_WINGM_DEL, "插件段与窗口管理删除段重叠");
 static_assert(ACT_WINGM_DEL + 64 <= ACT_TSAVE, "窗口管理删除段与 文件分类/别名 表格段重叠");
 static_assert(ACT_FDEL + 256 <= ACT_ADEL, "文件分类删除段与别名删除段重叠");
 static_assert(ACT_ADEL + 1024 <= ACT_ALIAS_TSAVE, "别名删除段与别名表保存/添加动作重叠");
@@ -165,7 +161,6 @@ enum { SC_GENERAL = 0,  /* 通用 = 全局设置 (缩放/双击Ctrl/自启) */
        SC_DATA,         /* 数据维护 (全局) */
        SC_FILTER,       /* 分类与别名 (全局: 引擎筛选器/路径别名两张表格, 2026-09-22 抄自正式版) */
        SC_PERF,         /* 性能与内存 (全局: 内存页锁定+索引内存占用 + 引擎队列实时状态 + 各阶段统计采样, 1s 刷新) */
-       SC_PLUGINS,      /* 插件 (全局: 原生插件管理, 2026-09-19) */
        SC_DONATE, SC_MODES, SC_ABOUT, SC_N };
 
 /* 左侧分类树 (两层): "窗口设置"分组节点 (grp, 可折叠, 不可选中) 下的子级缩进一级 ——
@@ -184,7 +179,6 @@ static const XjsSetCatNode SET_TREE[] = {
     { L"设置分类.索引",     SC_DATA,    false, 0 },
     { L"设置分类.分类与别名", SC_FILTER, false, 0 },
     { L"设置分类.性能与内存", SC_PERF,   false, 0 },
-    { L"设置分类.插件",     SC_PLUGINS, false, 0 },
     { L"设置分类.捐赠",     SC_DONATE,  false, 0 },
     { L"设置分类.搜索模式", SC_MODES,   false, 0 },
     { L"设置分类.关于",     SC_ABOUT,   false, 0 },
@@ -477,73 +471,8 @@ static void XjsSetAppendMdPage(int pageIdx, const wchar_t* cardTitle, const wcha
     s_set.cards.back().rows.push_back(r);
 }
 
-/* ==================== 插件页 (全局分类, 2026-09-19) ==================== */
-
-/* 权限/能力徽章文本 (用户视角审计; 声明性说明, 宿主不强制) */
-static std::wstring XjsSetPluginPermsText(unsigned m) {
-    std::wstring s;
-    auto add = [&s](bool on, const wchar_t* key) {
-        if (!on) return;
-        if (!s.empty()) s += L" / ";
-        s += XjsT(key);
-    };
-    add(m & XPP_READ, L"设置.插件.权限.读文件");
-    add(m & XPP_WRITE, L"设置.插件.权限.写文件");
-    add(m & XPP_EXEC, L"设置.插件.权限.执行程序");
-    add(m & XPP_UI, L"设置.插件.权限.界面操作");
-    add(m & XPP_SETTINGS, L"设置.插件.权限.设置");
-    return s.empty() ? XjsT(L"设置.插件.权限.无") : s;
-}
-static std::wstring XjsSetPluginCapsText(unsigned m) {
-    std::wstring s;
-    auto add = [&s](bool on, const wchar_t* key) {
-        if (!on) return;
-        if (!s.empty()) s += XjsT(L"设置.插件.徽章分隔");
-        s += XjsT(key);
-    };
-    add(m & XPC_FILECTX, L"设置.插件.能力.文件右键");
-    add(m & XPC_SEARCHBOXMENU, L"设置.插件.能力.搜索框菜单");
-    add(m & XPC_SEARCHMODES, L"设置.插件.能力.搜索模式");
-    add(m & XPC_HOSTED, L"设置.插件.能力.托管词条");
-    add(m & XPC_INPUTINTERCEPT, L"设置.插件.能力.输入拦截");
-    add(m & XPC_STATUSBAR, L"设置.插件.能力.状态栏");
-    add(m & XPC_EVENTS, L"设置.插件.能力.事件");
-    add(m & XPC_PREVIEW, L"设置.插件.能力.预览");
-    add(m & XPC_PANEL, L"设置.插件.能力.面板接管");
-    add(m & XPC_BATCHRENAME, L"设置.插件.能力.批量重命名");
-    return s.empty() ? XjsT(L"设置.插件.能力.无") : s;
-}
-
-/* 状态文本 (单一来源): 清单错误/已禁用/加载失败/需重启生效/已加载/已启用(纯声明式) */
-static std::wstring XjsSetPluginStatusText(const XjsPluginBrief& b) {
-    if (!b.declared) return XjsT(L"设置.插件.状态.清单错误");
-    if (!b.enabled) return XjsT(L"设置.插件.状态.已禁用");
-    if (!b.hasDll) return XjsT(L"设置.插件.状态.已启用");
-    if (!b.loaded) return XjsT(L"设置.插件.状态.加载失败");
-    return b.staleDll ? XjsT(L"设置.插件.状态.需重启生效") : XjsT(L"设置.插件.状态.已加载");
-}
-
-/* 启用开关执行端: 禁用=闸门关 (已注入菜单下次构建自然消失, 不置灰 — 照源样式口径), 即时落盘;
-   启用=直接生效并立即加载; 失败 toast + 状态列显示原因, 不写回启用态 (设计稿 §2.2)。
-   (风险确认框已随权限降级为纯声明移除 — manifest「权限」能力说明在管理页徽章展示) */
-static void XjsSetPluginToggle(int i) {
-    XjsPluginBrief b;
-    if (!XjsPluginBriefAt(i, &b)) return;
-    if (b.enabled) {
-        XjsPluginDisable(i);
-        XjsSearchNow(false);   /* 来源集可能变化 (插件搜索模式/托管词条) → 重搜整链 */
-        XjsSaveConfig();
-        s_set.rowsDirty = true;
-        InvalidateRect(s_set.hwnd, NULL, FALSE);
-        return;
-    }
-    std::wstring err;
-    if (!XjsPluginEnable(i, &err))
-        XjsToastShow(s_set.hwnd, (XjsT(L"设置.插件.启用失败前缀") + err).c_str(), XTOAST_ERROR, SS(1));
-    XjsSaveConfig();
-    s_set.rowsDirty = true;
-    InvalidateRect(s_set.hwnd, NULL, FALSE);
-}
+/* (插件页整段已撤 2026-10-06: 启停/重扫/开目录/状态展示管理并进插件商城窗 xjs_market.cpp;
+   仅「设置.插件.启用失败前缀」等键仍被商城复用) */
 
 /* 下拉选择器行 (行尾按钮带 ∨ 箭头, 点击弹窗锚定控件左下角 — 与主窗筛选器同口径):
    新增下拉行 = 此处加 act + XjsSetActivateRow 加菜单分支, 禁止再走 GetCursorPos 锚点 */
@@ -1094,46 +1023,7 @@ static bool XjsSetBuildRows() {
             }
             break;
         }
-        case SC_PLUGINS: {  /* 插件 (全局: 原生插件管理; 目录发现/加载/闸门在 xjs_plugin.cpp) */
-            newCard(XjsT(L"设置分类.插件"));
-            addRow(ACT_PLUGINS_OPENDIR, CT_BUTTON, XjsT(L"设置.插件.插件目录"),
-                   XjsT(L"设置.插件.插件目录.说明"), XjsT(L"通用词.打开"), false, false);
-            addRow(ACT_PLUGINS_RESCAN, CT_BUTTON, XjsT(L"设置.插件.重新扫描"),
-                   XjsT(L"设置.插件.重新扫描.说明"), XjsT(L"通用词.刷新"), false, false);
-            int n = XjsPluginCount();
-            if (n == 0) {
-                addRow(ACT_NONE, CT_INFO, XjsT(L"设置.插件.无插件"), XjsT(L"设置.插件.无插件.说明"), L"", false, false);
-                break;
-            }
-            for (int i = 0; i < n; i++) {
-                XjsPluginBrief b;
-                if (!XjsPluginBriefAt(i, &b)) continue;
-                /* 行 1 = 启用开关: 名称 + 版本·作者·状态 */
-                std::wstring meta = L"v" + (b.version.empty() ? std::wstring(L"-") : b.version)
-                                  + (b.author.empty() ? L""
-                                                      : XjsT(L"设置.插件.作者分隔") + b.author)
-                                  + XjsT(L"设置.插件.状态分隔") + XjsSetPluginStatusText(b);
-                addRow(ACT_PLUGINS_TOGGLE + i, CT_SWITCH, b.name.c_str(), meta.c_str(), L"", b.enabled, false);
-                /* 行 2 = 审计块: 能力+权限 与 简介 合并成一个自动换行文本块 (block 行, 名称留空 = 说明占整块)。
-                   曾拆 名称=审计/说明=简介 两段: 非块行"上下两半垂直居中"排布会把多行简介挤出行框 ——
-                   简介尾部叠画到下一个插件行上、审计行悬在大半空行中间 (开关下方一片空白), 2026-09-27 实锤 */
-                std::wstring body = XjsT(L"设置.插件.审计.能力前缀") + XjsSetPluginCapsText(b.caps)
-                                  + XjsT(L"设置.插件.审计.分隔")
-                                  + XjsT(L"设置.插件.审计.权限前缀") + XjsSetPluginPermsText(b.perms)
-                                  + L"\n"
-                                  + (b.description.empty() ? std::wstring(XjsT(L"设置.插件.无简介")) : b.description);
-                addRow(ACT_NONE, CT_INFO, L"", body.c_str(), L"", false, false);
-                s_set.cards.back().rows.back().block = true;
-                /* 行 3 = 仅异常时: 清单错误 / 加载失败原因 / 需重启说明 */
-                if (!b.declared)
-                    addRow(ACT_NONE, CT_INFO, (XjsT(L"设置.插件.清单错误前缀") + b.manifestErr).c_str(), L"", L"", false, false);
-                else if (b.enabled && b.hasDll && !b.loaded && !b.loadErr.empty())
-                    addRow(ACT_NONE, CT_INFO, (XjsT(L"设置.插件.加载失败前缀") + b.loadErr).c_str(), L"", L"", false, false);
-                else if (b.enabled && b.staleDll)
-                    addRow(ACT_NONE, CT_INFO, XjsT(L"设置.插件.需重启说明"), L"", L"", false, false);
-            }
-            break;
-        }
+        /* (SC_PLUGINS 插件页已撤 2026-10-06 — 管理并进插件商城窗) */
         case SC_OPEN: {  /* 打开 (每窗配置: 各窗口独立一份, 随 uiWindows 档案持久化) */
             newCard(XjsT(L"通用词.打开文件"));
             addRow(ACT_MOUSEOPEN, CT_BUTTON, XjsT(L"设置.打开.鼠标打开方式"),
@@ -1843,11 +1733,6 @@ static void XjsSetCatIconDraw(XjsRt* rt, int cat, float cx, float cy, XjsBrush* 
             rt->FillEllipse(XjsEllipseF(P(8, 9), SS(1.1f), SS(1.1f)), br);
             break;
         }
-        case SC_PLUGINS:   /* 插件: 插头 (双叉 + 本体 + 引线) */
-            seg(6, 2, 6, 5);  seg(10, 2, 10, 5);
-            rrect(4, 5, 12, 11, 2);
-            seg(8, 11, 8, 14);
-            break;
         case SC_DONATE:    /* 捐赠: 心形 (双圆 + V 底) */
             ell(5.4f, 5.6f, 2.6f, 2.6f);  ell(10.6f, 5.6f, 2.6f, 2.6f);
             seg(3.2f, 7.6f, 8, 13);  seg(12.8f, 7.6f, 8, 13);
@@ -2436,12 +2321,6 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         case ACT_CTRLBTN:   toggle(g_showCtrlBtns); break;   /* owner 标题栏立即重排 */
         case ACT_FILTERBOX: toggle(g_showFilterBox); break;
         case ACT_STATUSBAR: toggle(g_showStatusbar); break;
-        case ACT_PLUGINS_OPENDIR: XjsPluginOpenDir(-1); break;          /* 全局: exe\plugins */
-        case ACT_PLUGINS_RESCAN:
-            XjsPluginRescan();
-            s_set.rowsDirty = true;                                     /* 清单/新目录即时上列表 */
-            InvalidateRect(s_set.hwnd, NULL, FALSE);
-            break;
         case ACT_TASKBAR:
             toggle(g_taskbarIcon, false);
             XjsSearchWindow::Cur()->ApplyTaskbarIcon();   /* 立即装卸 WS_EX_TOOLWINDOW (scope 内 Cur()=owner) */
@@ -2601,10 +2480,6 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         case ACT_DONORS:    ShellExecuteW(NULL, L"open", L"https://www.xunjieso.com/donate", NULL, NULL, SW_SHOWNORMAL); break;   /* 捐赠名单页 (后续可指到专页) */
         case ACT_GLM:       ShellExecuteW(NULL, L"open", L"https://open.bigmodel.cn/", NULL, NULL, SW_SHOWNORMAL); break;  /* GLM 官网 (智谱开放平台 BigModel) */
         default:
-            if (act >= ACT_PLUGINS_TOGGLE && act < ACT_PLUGINS_TOGGLE + 200) {
-                XjsSetPluginToggle(act - ACT_PLUGINS_TOGGLE);   /* 插件启用开关 */
-                break;
-            }
             if (act >= ACT_MATCH && act < ACT_MATCH + 8) {
                 /* 与 搜索匹配 组行序一致; 每窗设置: 切换只下发 owner 的结果对象并落盘 (scope 内 Cur()=owner)。
                    成员指针而非 &g_xxx: static 表只初始化一次, 写 &g_match.xxx 会把地址钉在"首次执行时

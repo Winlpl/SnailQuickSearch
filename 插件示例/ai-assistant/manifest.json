@@ -2,6 +2,7 @@
   "标识": "ai-assistant",
   "名称": "AI 助手",
   "版本": "2.16.1",
+  "图标": "icon.png",
   "类型": "library",
   "动态库": "ai-assistant.dll",
   "接口版本": 4,

@@ -427,9 +427,9 @@ void XjsDeviceResize(int w, int h) {
     }
 }
 
-/* 内存图片 (PNG 等) → D2D 位图 */
-XjsBitmap* XjsDecodeImage(const void* data, int len) {
-    if (!g_wic || !g_rt || !data || len <= 0) return NULL;
+/* 内存图片 (PNG 等) → 指定 RT 域 D2D 位图 (RT 绑定资源每窗一份: 位图建在调用方 RT 上) */
+XjsBitmap* XjsDecodeImageToRt(XjsRt* rt, const void* data, int len) {
+    if (!g_wic || !rt || !data || len <= 0) return NULL;
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len);
     if (!hMem) return NULL;
     void* p = GlobalLock(hMem);
@@ -446,13 +446,18 @@ XjsBitmap* XjsDecodeImage(const void* data, int len) {
         SUCCEEDED(dec->GetFrame(0, &frame)) && frame &&
         SUCCEEDED(g_wic->CreateFormatConverter(&conv)) && conv &&
         SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom))) {
-        g_rt->CreateBitmapFromWicBitmap(conv, NULL, &bmp);
+        rt->CreateBitmapFromWicBitmap(conv, NULL, &bmp);
     }
     if (conv) conv->Release();
     if (frame) frame->Release();
     if (dec) dec->Release();
     stream->Release();
     return bmp;
+}
+
+/* 内存图片 (PNG 等) → 当前 RT 域 D2D 位图 */
+XjsBitmap* XjsDecodeImage(const void* data, int len) {
+    return XjsDecodeImageToRt(g_rt, data, len);
 }
 
 /* 裸 32bpp BGRA (预乘 alpha) 像素 → 本 RT 域位图 (插件预览交付用):

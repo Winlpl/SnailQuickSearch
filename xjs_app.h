@@ -1640,6 +1640,7 @@ void XjsEllSignCacheDropFormat(XjsFormat* fmt);   /* 格式被单独释放 (弹�
 void XjsRecreateTextFormats();   /* 页面缩放变化后按新倍率重建文本格式 */
 void XjsSyncTextFormats();       /* 窗口上下文切换后调用: 当前窗 DPI/缩放与格式构建时失配 → 重建 */
 XjsBitmap* XjsDecodeImage(const void* data, int len);
+XjsBitmap* XjsDecodeImageToRt(XjsRt* rt, const void* data, int len);   /* 显式 RT 版 (非搜索窗自持 RT 用, 商城卡片图标) */
 bool XjsImageFileDims(const std::wstring& path, int* w, int* h);   /* 读头取尺寸 (不解码, 异步装载前定占位比) */
 bool XjsDecodeFileImagePixels(const std::wstring& path, int dstW, int dstH, int rot,
                               std::vector<uint8_t>* out, int* stride);   /* 解码+Fant缩放+旋转 → PBGRA 字节 (工作线程) */
@@ -1944,6 +1945,7 @@ std::wstring XjsPluginRootDir();              /* exe\plugins 运行时目录 (�
 /* 设置-插件 页数据源 */
 struct XjsPluginBrief {
     std::wstring id, name, version, author, description;
+    std::wstring iconFile;        /* 清单 "图标" = 插件目录内图标文件名 (商城卡片; 空=无) */
     bool declared = false;        /* manifest 解析成功 */
     std::wstring manifestErr;
     bool enabled = false;         /* 用户开关 (禁用 = 宿主闸门依据) */
@@ -1961,6 +1963,7 @@ bool XjsPluginBriefAt(int i, XjsPluginBrief* out);
 bool XjsPluginEnable(int i, std::wstring* err);    /* 闸门开 + 有 DLL 时立即加载; 失败=false+原因, 不写回启用态 */
 void XjsPluginDisable(int i);                      /* 闸门关 (不卸载); 其搜索模式/托管来源由调用方剔除并重搜 */
 void XjsPluginOpenDir(int i);
+bool XjsPluginUninstall(int i, std::wstring* err);   /* 卸载: 停用+目录挪待删区+注册表摘除; 失败=false+原因 (商城) */
 
 /* 用户状态 (启用) — XjsLoadConfig/XjsSaveConfig 经此读写顶层 "插件" 键 (picojson 留 engine 文件)
    (旧配置条目里的「已确认版本」键随风险确认框移除已废弃, 读到忽略即可) */

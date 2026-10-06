@@ -455,11 +455,15 @@ static bool PluginLoadOne(XjsPluginEntry& e, std::wstring* err) {
     return true;
 }
 
+static void PluginTrashSweep();   /* 定义在卸载节 (XjsPluginOpenDir 后): 待删区清扫 */
+
 void XjsPluginStartup() {
     if (s_started) return;
     s_started = true;
     s_uiThread = GetCurrentThreadId();
     InitializeCriticalSectionAndSpinCount(&s_storageCs, 100);
+    XjsSetPhase(L"plugin-trash-sweep");
+    PluginTrashSweep();   /* 上会话卸载的插件此时 DLL 已无锁, 彻底删除 */
     XjsSetPhase(L"plugin-scan");
     PluginScan();
     for (int i = 0; i < (int)s_plugins.size(); i++) {
@@ -540,6 +544,46 @@ void XjsPluginOpenDir(int i) {
         ShellExecuteW(NULL, L"open", XjsGetExeDir().c_str(), NULL, NULL, SW_SHOWNORMAL);   /* 目录被删 → 退回 exe 目录 */
 }
 
+/* ==================== 卸载 (插件商城, 2026-10-06) ==================== */
+
+/* 卸载待删区 (exe 根, 不在 plugins\ 内 — 免被扫描器当插件拾回):
+   目录整体挪入 = 立即从列表消失; DLL 加载中直删文件必共享违规,
+   真正删除 = XjsPluginStartup 顶部清扫 (进程重启后本会话 DLL 已无锁) */
+static std::wstring PluginTrashDir() { return XjsGetExeDir() + L"\\插件卸载待删"; }
+
+/* 清扫待删区 (启动期调): 删剩的锁死文件留到下次再清, 不阻塞启动 */
+static void PluginTrashSweep() {
+    std::wstring from = PluginTrashDir();
+    DWORD fa = GetFileAttributesW(from.c_str());
+    if (fa == INVALID_FILE_ATTRIBUTES || !(fa & FILE_ATTRIBUTE_DIRECTORY)) return;
+    std::wstring fromStar = from + L"\\*";
+    fromStar.push_back(L'\0');   /* SHFileOperation 的 pFrom 需双 NUL 结尾 (std::wstring 隐式终止符之外再补一个) */
+    SHFILEOPSTRUCTW op = { 0 };
+    op.wFunc = FO_DELETE;
+    op.pFrom = fromStar.c_str();
+    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    SHFileOperationW(&op);
+    RemoveDirectoryW(from.c_str());   /* 已空连根目录一起收; 非空失败无碍, 下次启动再收 */
+}
+
+bool XjsPluginUninstall(int i, std::wstring* err) {
+    if (i < 0 || i >= (int)s_plugins.size() || !err) return false;
+    XjsPluginEntry& e = s_plugins[i];
+    XjsPluginDisable(i);   /* 闸门关+用户态同步+面板会话结束+下线信号 (幂等; 不卸载不 Shutdown, 同禁用口径) */
+    std::wstring trash = PluginTrashDir();
+    CreateDirectoryW(trash.c_str(), NULL);
+    std::wstring dest = trash + L"\\" + e.mf.id, base = dest;
+    for (int n = 1; GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES; n++)
+        dest = base + L"_" + std::to_wstring(n);
+    if (!MoveFileW(e.dir.c_str(), dest.c_str())) {   /* 改名同卷瞬时; 锁定中的 DLL 不破映像映射 */
+        *err = L"插件目录移动失败 (文件被其它程序占用?)";
+        return false;
+    }
+    s_plugins.erase(s_plugins.begin() + i);   /* 注册表摘除 (下次 XjsSaveConfig 连用户启用态一并落掉) */
+    XjsPluginOnPluginsChanged();   /* 注册表变化信号 (plugins.list 订阅者重查) */
+    return true;
+}
+
 /* ==================== 设置页数据源 ==================== */
 
 int XjsPluginCount() { return s_scanned ? (int)s_plugins.size() : 0; }
@@ -552,6 +596,7 @@ bool XjsPluginBriefAt(int i, XjsPluginBrief* out) {
     out->version = e.mf.version;
     out->author = e.mf.author;
     out->description = e.mf.description;
+    out->iconFile = e.mf.iconFile;
     out->declared = e.mf.ok;
     out->manifestErr = e.mf.err;
     out->enabled = e.enabled;
