@@ -1174,6 +1174,12 @@ void XjsEngineApplySavedConfigs() {
     if (!g_engine) return;
     /* sync=FALSE: 行数据要么此前已应用过别名/分类 (加载的库), 要么正随扫描入库时套用当前配置 */
 
+    /* 目录大小级联同步开关 (宿主恒开) 的幂等兜底: 正常路径已在 xjs_Create 之后、Load/ScanPath
+       之前下发过, 库为空时置真零成本; 此处 Is 判一次只为防"引擎重建/未来新增下发点"漏设。
+       绝不能无条件重下 —— 引擎侧"事后开启会立即对现有数据级联重算", 加载路径下就是拿
+       450 万行旧库白重算一遍 (35=库忙时还会连开关一起废掉) */
+    if (!xjs_db_IsParentSizeSync(g_engine)) xjs_db_SetParentSizeSync(g_engine, TRUE);
+
     /* 筛选器默认源 (别名同款优先链): 配置 "文件分类" 键 (设置页保存/首次播种后才有) 优先;
        键空回落 exe 目录 Config\ 子目录随包发布的 Filter.json 内置词典 —— 原文透传, 引擎解析器
        自理该宽松 JSONC; 文件缺席 = 跳过 (引擎自动用内置默认表)。程序不写回该文件 */

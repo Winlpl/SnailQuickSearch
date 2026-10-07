@@ -769,6 +769,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                     空引擎指针会流入 xjs_db_Load/插件加载 */
                 }
                 xjs_SetDefaultEngine(g_engine);
+                /* 目录大小级联同步: 本宿主恒开 (引擎默认关 = 目录大小只算直接子文件)。
+                   必须在 xjs_db_Load / xjs_db_ScanPath 之前下发 —— 引擎侧"中途/事后开启会对现有
+                   数据立即级联重算", 放到加载完成之后就是拿 450 万行旧库白重算一遍; 此刻库为空,
+                   置真零成本, 之后入库与文件同步的大小变更自动向上级目录级联 */
+                xjs_db_SetParentSizeSync(g_engine, TRUE);
                 xjs_SetCallback(g_engine, XJS_EVENT_LOAD_COMPLETE, (const void*)Xjs_LoadComplete, NULL);
                 xjs_SetCallback(g_engine, XJS_EVENT_ENUM_PARTITION, (const void*)Xjs_EnumPartition, NULL);
                 xjs_SetCallback(g_engine, XJS_EVENT_ENUM_PROGRESS, (const void*)Xjs_EnumProgress, NULL);
