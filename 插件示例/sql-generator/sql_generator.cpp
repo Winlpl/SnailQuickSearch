@@ -782,7 +782,20 @@ static int EdColAt(Gdiplus::Graphics& g, const std::wstring& line, float x) {
     return (int)line.size();
 }
 
-/* ==================== 控件命中表 (ComputeLayout 产出, 绘制/命中共用) ==================== */
+/* ==================== 控件命中表 (ComputeLayout 产出, 绘制/命中共用) ====================
+   坐标系: cfg 内容流控件 = 内容坐标 (相对 cfg 内容原点, rel=true, 绘制/命中统一经
+   cfg.Y - cfgScroll 变换); bar/标题栏/预览控件 = 窗口视口坐标 (rel=false, 直接用)。 */
+struct Layout {
+    RectF titlebar, cfg, preview, bar;
+    RectF phead, editor, tpl, status;
+    RectF btnRun, btnCopy;
+    /* cfg 卡片 (sec) 与标题/hint 矩形 (绘制用; 内容流由 ComputeLayout 现算) */
+    RectF sec1, sec2, sec3, hintRc;
+    std::wstring hintText;
+    float contentW;
+    float cfgMaxY;   /* cfg 视口底 */
+};
+static Layout g_lo;
 enum CtlId {
     CI_NONE = 0, CI_CLOSE,
     CI_SELMODE, CI_COLCHK, CI_AGGCHIP, CI_GROUPBY, CI_HAVING,
@@ -790,13 +803,20 @@ enum CtlId {
     CI_ADDCOND, CI_ORDERF, CI_ORDERD, CI_ORDERF2, CI_ORDERD2, CI_LIMIT, CI_NOSH,
     CI_EDITOR, CI_TPL, CI_RUN, CI_COPY
 };
-struct CtlRect { int id; RectF rc; int row; int idx; };
+struct CtlRect { int id; RectF rc; int row; int idx; bool rel; };
 static std::vector<CtlRect> g_ctls;
+/* 控件视口矩形 (命中/悬停共用的变换落点) */
+static RectF CtlViewRc(const CtlRect& c) {
+    RectF rc = c.rc;
+    if (c.rel) { rc.Y += g_lo.cfg.Y - g_cfgScroll; }
+    return rc;
+}
 static const CtlRect* HitCtl(POINT pt) {
-    for (int i = (int)g_ctls.size() - 1; i >= 0; i--)
-        if (pt.x >= g_ctls[i].rc.X && pt.x < g_ctls[i].rc.X + g_ctls[i].rc.Width &&
-            pt.y >= g_ctls[i].rc.Y && pt.y < g_ctls[i].rc.Y + g_ctls[i].rc.Height)
+    for (int i = (int)g_ctls.size() - 1; i >= 0; i--) {
+        RectF rc = CtlViewRc(g_ctls[i]);
+        if (pt.x >= rc.X && pt.x < rc.X + rc.Width && pt.y >= rc.Y && pt.y < rc.Y + rc.Height)
             return &g_ctls[i];
+    }
     return NULL;
 }
 static CtlRect* CtlOf(int id, int row = -1) {
@@ -811,17 +831,7 @@ static int  g_hotId = 0, g_hotRow = -1;
 static bool SameCtl(int id, int row, const CtlRect* c) { return c && c->id == id && (row < 0 || c->row == row); }
 
 /* ==================== 布局 (页面 CSS 值折算; 控件矩形全量产出) ==================== */
-struct Layout {
-    RectF titlebar, cfg, preview, bar;
-    RectF phead, editor, tpl, status;
-    RectF btnRun, btnCopy;
-    /* cfg 卡片 (sec) 与标题/hint 矩形 (绘制用; 内容流由 ComputeLayout 现算) */
-    RectF sec1, sec2, sec3, hintRc;
-    std::wstring hintText;
-    float contentW;
-    float cfgMaxY;   /* cfg 视口底 */
-};
-static Layout g_lo;
+
 static float DropW(Gdiplus::Graphics& g, const std::vector<std::wstring>& items, float minW) {
     float w = minW;
     for (auto& s : items) w = std::max(w, MeasureStr(g, s, F(S(12), false)) + S(26));
@@ -875,14 +885,15 @@ static void ComputeLayout() {
     g_lo.status = RectF(px, S(40) + g_lo.preview.Height - statusH, pw, statusH);
     g_lo.tpl = RectF(px, g_lo.status.Y - tplH, pw, tplH);
     g_lo.editor = RectF(px, g_lo.phead.Y + g_lo.phead.Height, pw, g_lo.tpl.Y - (S(40) + S(34)));
-    /* --- cfg 内容流 (页面 .cfg padding 12/14; 卡片间 gap 12) --- */
+    /* --- cfg 内容流 (页面 .cfg padding 12/14; 卡片间 gap 12) ---
+     y 为内容坐标 (相对 cfg 内容原点; 绘制/命中经 cfg.Y - cfgScroll 变换) */
     float cw = cfgW - S(28);
     g_lo.contentW = cw;
-    float y = S(40) + S(12);
+    float y = S(12);
     float x0 = S(14);
     float xEnd = cfgW - S(14);
     auto ctl = [&](int id, const RectF& rc, int row = -1, int idx = -1) {
-        g_ctls.push_back({ id, rc, row, idx });
+        g_ctls.push_back({ id, rc, row, idx, true });
     };
     auto lblW = [&](const std::wstring& t) { return MeasureStr(gi, t, F(S(12), false)); };
     auto newCard = [&](const char* key, const wchar_t* def, RectF* secOut) {
@@ -1061,7 +1072,7 @@ static void ComputeLayout() {
         g_lo.hintRc = RectF(x0, y, cw, hh);
         y += hh + S(12);
     }
-    g_cfgContentH = y - S(40);
+    g_cfgContentH = y;
     g_cfgMaxScroll = std::max(0.0f, g_cfgContentH - g_lo.cfg.Height);
     if (g_cfgScroll > g_cfgMaxScroll) g_cfgScroll = g_cfgMaxScroll;
     if (g_cfgScroll < 0) g_cfgScroll = 0;
@@ -1076,20 +1087,22 @@ static void ComputeLayout() {
     float maxEdX = std::max(0.0f, edLineW - (pw - S(28)));
     if (g_edScrollX > maxEdX) g_edScrollX = maxEdX;
     if (g_edScrollX < 0) g_edScrollX = 0;
-    /* --- bar 按钮 (btn-main / btn) --- */
+    /* --- bar 按钮 (btn-main / btn; 视口坐标 rel=false) --- */
     {
         float by = g_lo.bar.Y + S(8);
         float rw = MeasureStr(gi, SG("Run", L"填入搜索框执行"), F(S(13), true)) + S(44);
         g_lo.btnRun = RectF(S(14), by, rw, S(32));
-        ctl(CI_RUN, g_lo.btnRun);
+        g_ctls.push_back({ CI_RUN, g_lo.btnRun, -1, -1, false });
         float cw2 = MeasureStr(gi, SG("Copy", L"复制 SQL"), F(S(12), false)) + S(32);
         g_lo.btnCopy = RectF(g_lo.btnRun.X + g_lo.btnRun.Width + S(8), by, cw2, S(32));
-        ctl(CI_COPY, g_lo.btnCopy);
+        g_ctls.push_back({ CI_COPY, g_lo.btnCopy, -1, -1, false });
     }
-    /* 标题栏关闭钮 (页面 .close-btn: 32×32, 右缘 6px, 上 4px 垂直居中于 40px) */
-    ctl(CI_CLOSE, RectF(W - S(6) - S(32), S(4), S(32), S(32)));
-    /* 模板下拉 (页面 .tpl: padding 8/12, select 宽 100% 高 30) */
-    ctl(CI_TPL, RectF(g_lo.tpl.X + S(12), g_lo.tpl.Y + S(8), pw - S(24), S(30)));
+    /* 标题栏关闭钮 (页面 .close-btn: 32×32, 右缘 6px; 视口坐标) */
+    g_ctls.push_back({ CI_CLOSE, RectF(W - S(6) - S(32), S(4), S(32), S(32)), -1, -1, false });
+    /* 模板下拉 (页面 .tpl: padding 8/12, select 宽 100% 高 30; 视口坐标) */
+    g_ctls.push_back({ CI_TPL, RectF(g_lo.tpl.X + S(12), g_lo.tpl.Y + S(8), pw - S(24), S(30)), -1, -1, false });
+    /* SQL 预览编辑器命中矩形 (整块 textarea 区; 视口坐标) */
+    g_ctls.push_back({ CI_EDITOR, g_lo.editor, -1, -1, false });
 }
 
 static std::vector<std::wstring> TplItems() {
@@ -1480,7 +1493,8 @@ static void DrawSecTitle(Gdiplus::Graphics& g, const RectF& sec, float y, const 
     DrawStr(g, text, F(S(12), true), RectF(sec.X + S(12) + S(3) + S(6), y - S(3), sec.Width - S(40), S(18)), Br(g_sk.dim), 0, 1);
 }
 static void DrawCfg(Gdiplus::Graphics& g) {
-    /* 背景已由整帧渐变出 (页面 body 渐变); 卡片区带滚动裁剪 */
+    /* 背景已由整帧渐变出 (页面 body 渐变); 卡片区带滚动裁剪。
+       cfg 控件表 = 内容坐标: 绘制统一 + (cfg.Y - cfgScroll) 变换 (与命中 CtlViewRc 同式) */
     Gdiplus::GraphicsState st = g.Save();
     g.SetClip(g_lo.cfg);
     float oy = g_lo.cfg.Y - g_cfgScroll;   /* 内容 → 视口偏移 */
@@ -2236,10 +2250,12 @@ static void OnMouseMove(POINT pt) {
 }
 static void OnLButtonUp(POINT pt) {
     (void)pt;
-    if (GetCapture() == g_hwnd) ReleaseCapture();
-    g_edDrag = false; g_lineDrag = false; g_sbDrag = false;
+    /* 先取按压动作再释放捕获: ReleaseCapture 会同步发 WM_CAPTURECHANGED,
+       CAPTURECHANGED 分支清 g_pressId — 若先释放后取值, 三个按钮动作全被吞 (实锤) */
     int pid = g_pressId;
     g_pressId = 0;
+    if (GetCapture() == g_hwnd) ReleaseCapture();
+    g_edDrag = false; g_lineDrag = false; g_sbDrag = false;
     switch (pid) {
         case CI_CLOSE: if (g_hwnd) DestroyWindow(g_hwnd); return;
         case CI_RUN:   DoRun(); return;
@@ -2561,8 +2577,7 @@ static void OpenWindow(XjsWindowToken ownerToken) {
     }
     g_hwnd = hwnd;
     ResetWindowState();
-    ComputeLayout();
-    ShowWindow(hwnd, SW_SHOW);
+    ComputeLayout();    ShowWindow(hwnd, SW_SHOW);
     if (g_host) g_host->Summon(g_ctx, hwnd);   /* 借前台唤起 (与宿主同实现) */
 }
 
