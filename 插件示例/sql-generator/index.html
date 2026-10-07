@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SQL 生成器</title>
+<!-- 蜗牛快搜 (D2D) 演示宿主: 皮肤色 = C++ 侧按宿主皮肤 JSON 派生的 CSS 变量 (pluginContext.vars 推送),
+     原版的 <link href="../../skin/skin-*.css"> 外链皮肤文件随宿主形态改为内联 style 容器 (#wv2uiSkin)。 -->
+<style id="wv2uiSkin"></style>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+        font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+        font-size: 13px; color: var(--text);
+        background: linear-gradient(180deg, var(--bg1), var(--bg2));
+        overflow: hidden; -webkit-font-smoothing: antialiased;
+    }
+    .app { height: 100vh; display: flex; flex-direction: column; }
+    .titlebar {
+        position: relative; flex-shrink: 0; height: 40px; display: flex; align-items: center;
+        gap: 12px; padding: 0 6px 0 16px;
+        background: var(--panel); border-bottom: 1px solid var(--border);
+    }
+    .titlebar .title { font-size: 13px; font-weight: 600; color: var(--text); flex-shrink: 0; }
+    .titlebar .tag { font-size: 11px; color: var(--text-faint); background: var(--panel-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 10px; }
+    .titlebar .close-btn {
+        width: 32px; height: 32px; border: none; border-radius: 8px;
+        background: transparent; color: var(--text-dim); cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        transition: all .12s; margin-left: auto; flex-shrink: 0;
+    }
+    .titlebar .close-btn:hover { background: #e0442e; color: #fff; }
+    .titlebar .close-btn svg { width: 16px; height: 16px; }
+
+    .main { flex: 1; min-height: 0; display: flex; gap: 0; }
+    /* 左侧配置区 */
+    .cfg { width: 54%; min-width: 380px; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+    .sec { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+    .sec-title { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+    .sec-title::before { content: ''; width: 3px; height: 12px; border-radius: 2px; background: var(--accent); }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; flex-wrap: wrap; }
+    .row:last-child { margin-bottom: 0; }
+    label.lbl { font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
+    select, input[type=text], input[type=number], input[type=date] {
+        height: 28px; padding: 0 8px; background: var(--panel-2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 7px; outline: none;
+        font-size: 12px; font-family: inherit;
+    }
+    select:focus, input:focus { border-color: var(--accent); }
+    select { cursor: pointer; }
+    input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+    .cols-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 10px; }
+    .cols-grid label { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text); cursor: pointer; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { padding: 4px 10px; border-radius: 14px; font-size: 11px; cursor: pointer; user-select: none;
+            background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); transition: all .12s; }
+    .chip.on { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border-color: var(--accent); }
+    /* WHERE 条件行 */
+    .wrow { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .wrow .wconn { width: 62px; flex-shrink: 0; }
+    .wrow .wtype { width: 96px; flex-shrink: 0; }
+    .wrow .wctl { flex: 1; min-width: 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .wrow .wctl select, .wrow .wctl input { flex-shrink: 1; min-width: 0; }
+    .wrow .wctl input[type=text] { flex: 1; }
+    .wrow .wctl input[type=number] { width: 86px; }
+    .wrow .wctl input[type=date] { width: 128px; }
+    .wrow .wctl .unit { width: 52px; flex-shrink: 0; }
+    .wdel { width: 24px; height: 24px; border: none; border-radius: 6px; background: transparent;
+            color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1; flex-shrink: 0; }
+    .wdel:hover { background: rgba(224,68,46,.15); color: #e0442e; }
+    .add-cond { margin-top: 2px; height: 26px; padding: 0 12px; border-radius: 7px; border: 1px dashed var(--border-strong);
+            background: transparent; color: var(--text-dim); font-size: 12px; cursor: pointer; font-family: inherit; }
+    .add-cond:hover { color: var(--accent); border-color: var(--accent); }
+    .hint { font-size: 11px; color: var(--text-faint); line-height: 1.5; }
+    /* 右侧预览区 */
+    .preview { width: 46%; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--panel); }
+    .preview .phead { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    .preview .phead .ptitle { font-size: 12px; font-weight: 600; color: var(--text-dim); flex: 1; }
+    .preview textarea {
+        flex: 1; min-height: 0; resize: none; border: none; outline: none; padding: 12px 14px;
+        background: transparent; color: var(--text); font-family: "Cascadia Code", "Consolas", monospace;
+        font-size: 12px; line-height: 1.7; white-space: pre; overflow: auto;
+    }
+    .preview .tpl { flex-shrink: 0; border-top: 1px solid var(--border); padding: 8px 12px; }
+    .preview .tpl select { width: 100%; height: 30px; }
+    .status { flex-shrink: 0; font-size: 11px; color: var(--text-faint); padding: 6px 14px; border-top: 1px solid var(--border); min-height: 14px; }
+    .bar { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--border); background: var(--panel); }
+    .bar .btn-main {
+        flex-shrink: 0; height: 32px; padding: 0 22px; border: none; border-radius: 8px;
+        background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 600;
+    }
+    .bar .btn-main:active { opacity: .8; }
+    .bar .btn {
+        flex-shrink: 0; height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--border);
+        background: var(--panel-2); color: var(--text-dim); cursor: pointer; font-size: 12px; font-family: inherit;
+    }
+    .bar .btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .bar .spacer { flex: 1; }
+    .bar .tip { font-size: 11px; color: var(--text-faint); }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--scroll-thumb, rgba(128,128,128,.4)); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+    ::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover, rgba(128,128,128,.6)); }
+    ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="app">
+    <div class="titlebar" onmousedown="onTitlebarDown(event)">
+        <span class="title" data-i18n="Title">SQL 生成器</span>
+        <span class="tag">蜗牛快搜 SQL</span>
+        <button class="close-btn" id="btnClose" title="关闭" data-i18n-title="Close">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l6 6M9 3 3 9"/></svg>
+        </button>
+    </div>
+    <div class="main">
+        <!-- ======== 左侧: 配置 ======== -->
+        <div class="cfg">
+            <div class="sec">
+                <div class="sec-title" data-i18n="SecSelect">SELECT 输出</div>
+                <div class="row">
+                    <label class="lbl" data-i18n="Mode">模式</label>
+                    <select id="selMode">
+                        <option value="star" data-i18n="ModeStar">SELECT * (全部字段)</option>
+                        <option value="cols" data-i18n="ModeCols">指定字段</option>
+                        <option value="agg" data-i18n="ModeAgg">聚合统计</option>
+                    </select>
+                </div>
+                <div class="cols-grid" id="colGrid" style="display:none">
+                    <label><input type="checkbox" value="Path"> Path</label>
+                    <label><input type="checkbox" value="ParentPath"> ParentPath</label>
+                    <label><input type="checkbox" value="AnyParent"> AnyParent</label>
+                    <label><input type="checkbox" value="FName"> FName</label>
+                    <label><input type="checkbox" value="Ext"> Ext</label>
+                    <label><input type="checkbox" value="Size"> Size</label>
+                    <label><input type="checkbox" value="ModTime"> ModTime</label>
+                    <label><input type="checkbox" value="FileType"> FileType</label>
+                    <label><input type="checkbox" value="IsDir"> IsDir</label>
+                    <label><input type="checkbox" value="FAttr"> FAttr</label>
+                    <label><input type="checkbox" value="FileContent"> FileContent</label>
+                    <label><input type="checkbox" value="MD5(FileContent)"> MD5(FileContent)</label>
+                </div>
+                <div id="aggGrid" style="display:none">
+                    <div class="row">
+                        <label class="lbl" data-i18n="Agg">聚合</label>
+                        <div class="chips" id="aggChips">
+                            <span class="chip on" data-agg="COUNT(*)" style="pointer-events:none">COUNT(*)</span>
+                            <span class="chip" data-agg="SUM(Size)">SUM(Size)</span>
+                            <span class="chip" data-agg="AVG(Size)">AVG(Size)</span>
+                            <span class="chip" data-agg="MIN(ModTime)">MIN(ModTime)</span>
+                            <span class="chip" data-agg="MAX(Size)">MAX(Size)</span>
+                            <span class="chip" data-agg="COUNT(DISTINCT Ext)">COUNT(DISTINCT Ext)</span>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <label class="lbl" data-i18n="GroupBy">分组</label>
+                        <select id="groupBy">
+                            <option value="" data-i18n="GroupNone">(不分组)</option>
+                            <option value="FileType" data-i18n="GroupFileType">FileType 类型</option>
+                            <option value="Ext" data-i18n="GroupExt">Ext 扩展名</option>
+                            <option value="IsDir" data-i18n="GroupIsDir">IsDir 目录标记</option>
+                            <option value="ParentPath" data-i18n="GroupParent">ParentPath 父目录</option>
+                            <option value="FName" data-i18n="GroupFName">FName 文件名</option>
+                        </select>
+                    </div>
+                    <div class="row">
+                        <label class="lbl">HAVING</label>
+                        <input type="text" id="having" placeholder="如 COUNT(*) &gt; 10 (可选)" spellcheck="false" style="flex:1" data-i18n-ph="HavingPh">
+                    </div>
+                </div>
+            </div>
+
+            <div class="sec">
+                <div class="sec-title" data-i18n="SecWhere">WHERE 条件</div>
+                <div id="wlist"></div>
+                <button class="add-cond" id="addCond" data-i18n="AddCond">+ 添加条件</button>
+            </div>
+
+            <div class="sec">
+                <div class="sec-title" data-i18n="SecOrder">排序与限制</div>
+                <div class="row">
+                    <label class="lbl" data-i18n="Order">排序</label>
+                    <select id="orderField">
+                        <option value="" data-i18n="None">(无)</option>
+                        <option value="Size" data-i18n="OrderSize">Size 大小</option>
+                        <option value="ModTime" data-i18n="OrderModTime">ModTime 修改时间</option>
+                        <option value="FName" data-i18n="OrderFName">FName 文件名</option>
+                        <option value="Ext" data-i18n="OrderExt">Ext 扩展名</option>
+                        <option value="Path" data-i18n="OrderPath">Path 路径</option>
+                        <option value="FileType" data-i18n="OrderFileType">FileType 类型</option>
+                    </select>
+                    <select id="orderDir"><option value="DESC" data-i18n="Desc">降序</option><option value="ASC" data-i18n="Asc">升序</option></select>
+                    <label class="lbl" data-i18n="Secondary">次级</label>
+                    <select id="orderField2"><option value="" data-i18n="None">(无)</option>
+                        <option value="Size">Size</option><option value="ModTime">ModTime</option>
+                        <option value="FName">FName</option><option value="Ext">Ext</option>
+                        <option value="Path">Path</option><option value="FileType">FileType</option>
+                    </select>
+                    <select id="orderDir2"><option value="DESC" data-i18n="Desc">降序</option><option value="ASC" data-i18n="Asc">升序</option></select>
+                </div>
+                <div class="row">
+                    <label class="lbl">LIMIT</label>
+                    <input type="number" id="limit" placeholder="最多行数 (可选)" style="width:120px" min="0" data-i18n-ph="LimitPh">
+                    <label class="lbl" style="margin-left:12px"><input type="checkbox" id="noSH" checked> <span data-i18n="NoSH">排除系统/隐藏文件 (FAttr !~ '[SH]')</span></label>
+                </div>
+            </div>
+            <div class="hint" data-i18n="Hint">搜索词原样交给蜗牛快搜, 自动识别为 SQL 后按 SQL 执行 (无视通配符/正则设置); 匹配文件直接显示在主窗口文件列表。可手动修改右侧预览后执行。</div>
+        </div>
+
+        <!-- ======== 右侧: 预览 ======== -->
+        <div class="preview">
+            <div class="phead"><span class="ptitle" data-i18n="PreviewTitle">SQL 预览 (可编辑)</span></div>
+            <textarea id="preview" spellcheck="false">SELECT * FROM alltable</textarea>
+            <div class="tpl">
+                <select id="tplSel">
+                    <option value="" data-i18n="TplPlaceholder">-- 常用模板 --</option>
+                </select>
+            </div>
+            <div class="status" id="status"></div>
+        </div>
+    </div>
+    <div class="bar">
+        <button class="btn-main" id="btnRun" data-i18n="Run">填入搜索框执行</button>
+        <button class="btn" id="btnCopy" data-i18n="Copy">复制 SQL</button>
+        <div class="spacer"></div>
+        <span class="tip" data-i18n="FooterTip">SQL 生成器 · 蜗牛快搜 SQL 搜索</span>
+    </div>
+</div>
+<script>
+// ==================== D2D 宿主桥适配层 (唯一非照抄段) ====================
+// 原版宿主 (wv2ui) 向页面注入 window.xjs / window.wv2ui 两个桥对象; D2D 演示宿主不注入,
+// 在此按原版同名接口自建, 全部转发为 chrome.webview 消息给插件 C++ 侧 (post 定义见下方原版段)。
+// - xjs.ready()            → 页面就绪, 请求插件上下文 (C++ 回 pluginContext + applyLanguage)
+// - xjs.searchSql(sql)     → SQL 填入发起窗口搜索框并执行 (C++ SearchSetText mode=sql execute=1)
+// - wv2ui.closePlugin()    → 关闭插件窗口
+// - wv2ui.buttonRects(r)   → 标题栏按钮区域上报 (原版离屏渲染模式宿主 WM_NCHITTEST 用; D2D 转发留存)
+// - wv2ui.windowDrag()     → 标题栏空白 mousedown 触发系统拖动 (C++ WM_NCLBUTTONDOWN HTCAPTION)
+// - wv2ui.onSearchMode(cb) → 注册"自定义搜索模式"回调 (C++ OnSearchMode 接管型模式回推 searchMode 消息)
+var __onSearchModeCb = null;
+window.xjs = {
+    ready: function () { post({ type: 'ready' }); },
+    searchSql: function (sql) { post({ type: 'searchSql', sql: String(sql == null ? '' : sql) }); }
+};
+window.wv2ui = {
+    closePlugin: function () { post({ type: 'close' }); },
+    buttonRects: function (rects) { post({ type: 'buttonRects', rects: rects || [] }); },
+    windowDrag: function () { post({ type: 'drag' }); },
+    onSearchMode: function (cb) { __onSearchModeCb = (typeof cb === 'function') ? cb : null; }
+};
+// 标题栏拖动 (真子窗形态: WebView2 覆盖客户区收不到 WM_NCHITTEST, 与原版窗口模式同款页面配合;
+// 关闭钮自带 hover 效果由页面自理, 按下它不触发拖动)
+function onTitlebarDown(e) {
+    if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('.close-btn')) return;
+    wv2ui.windowDrag();
+}
+// 皮肤 = C++ 派生的 CSS 变量表 (原版 applySkin 换 <link> 外链, D2D 无皮肤 CSS 文件)
+function applyVars(vars) {
+    var st = document.getElementById('wv2uiSkin');
+    if (!st || !vars) return;
+    var s = '';
+    for (var k in vars) s += '--' + k + ':' + vars[k] + ';';
+    st.textContent = ':root{' + s + '}';
+}
+// ==================== 插件页面 SDK (与 wv2ui 宿主通信) ====================
+function post(obj) {
+    var s = (typeof obj === 'string') ? obj : JSON.stringify(obj);
+    if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(s);
+    else if (window.parent) window.parent.postMessage({ __wv2ui_to_host: true, data: s }, '*');
+}
+function applySkin(skin) {
+    var link = document.getElementById('wv2uiSkin');
+    if (link) link.href = '../../skin/skin-' + (skin && skin !== 'default' ? skin : 'default') + '.css';
+}
+window.chrome.webview.addEventListener('message', function (e) {
+    var msg = e.data;
+    if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch (err) { return; } }
+    if (msg.type === 'pluginContext') {
+        if (msg.vars) applyVars(msg.vars);          // D2D: 皮肤色变量 (原版换 skin CSS 外链)
+        if (msg.skin) applySkin(msg.skin);
+        if (msg.language) { I18N.lang = msg.language; }
+    } else if (msg.type === 'applyLanguage') {
+        // 语言变化: 更新语言包并重渲染 (宿主在插件窗口开着且语言变化时重发)
+        applyLanguage(msg);
+    } else if (msg.type === 'searchMode') {
+        // D2D 接管型搜索模式执行: C++ OnSearchMode 回推 (窗口开着时), 原版 onSearchMode 同语义
+        if (typeof __onSearchModeCb === 'function') __onSearchModeCb(msg);
+    }
+});
+// ==================== 国际化 (i18n) ====================
+// 语言包与主页面同源 (wvapp.local): 首次打开读主页面 localStorage 缓存的当前语言与语言包全文;
+// 宿主 applyLanguage 消息到达后覆盖。SG(key, def) 取 Sg.* 键, 缺失回退 def (页面硬编码中文)。
+// D2D 宿主无主页面 localStorage: dict 由 C++ 按发起窗口生效语言选包后经 applyLanguage 推送
+// (语言包文件 = 原版语言包 Sg 段原文, RCDATA 打包进 DLL)。
+var I18N = { lang: 'zh-CN', dict: null };
+try {
+    I18N.lang = localStorage.getItem('wv2ui_lang') || 'zh-CN';
+    I18N.dict = JSON.parse(localStorage.getItem('wv2ui_lang_dict') || 'null');
+} catch (e) {}
+function SG(key, def) {
+    if (!I18N.dict || !I18N.dict.Sg) return def;
+    var v = I18N.dict.Sg[key];
+    return (typeof v === 'string' && v) ? v : def;
+}
+function applyLanguage(msg) {
+    if (!msg) return;
+    I18N.lang = msg.lang || I18N.lang;
+    I18N.dict = msg.dict || I18N.dict;
+    try {
+        localStorage.setItem('wv2ui_lang', I18N.lang);
+        localStorage.setItem('wv2ui_lang_dict', JSON.stringify(I18N.dict || {}));
+    } catch (e) {}
+    applyI18n();
+    // 动态文本 (选项/条件行/模板/状态) 按新语言重建
+    rebuildDynamic();
+}
+// 仅替换元素直属文本节点 (保留图标等子元素)
+function setLabelText(el, text) {
+    if (!el) return;
+    var nodes = el.childNodes;
+    for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].nodeType === 3 && nodes[i].textContent.trim()) {
+            nodes[i].textContent = text;
+            return;
+        }
+    }
+    if (!el.querySelector('span,svg,img,button,input')) el.textContent = text;
+}
+function applyI18n(root) {
+    root = root || document;
+    var i, el, k, v;
+    var nodes = root.querySelectorAll('[data-i18n]');
+    for (i = 0; i < nodes.length; i++) {
+        el = nodes[i];
+        k = el.getAttribute('data-i18n');
+        v = SG(k, el.textContent.trim());
+        if (v) setLabelText(el, v);
+    }
+    var phs = root.querySelectorAll('[data-i18n-ph]');
+    for (i = 0; i < phs.length; i++) {
+        el = phs[i];
+        k = el.getAttribute('data-i18n-ph');
+        v = SG(k, el.getAttribute('placeholder') || '');
+        if (v) el.setAttribute('placeholder', v);
+    }
+    var tls = root.querySelectorAll('[data-i18n-title]');
+    for (i = 0; i < tls.length; i++) {
+        el = tls[i];
+        k = el.getAttribute('data-i18n-title');
+        v = SG(k, el.getAttribute('title') || '');
+        if (v) el.setAttribute('title', v);
+    }
+}
+// 动态文本重建 (语言切换后): 文件类型/时间预设/模板下拉/状态栏初始提示
+function rebuildDynamic() {
+    if (typeof $ !== 'function') return;
+    // 时间预设 (WHERE 条件"预设区间"下拉与 SQL 生成共用)
+    buildTimePresets();
+    // 常用模板下拉
+    var tpl = $('tplSel');
+    if (tpl) {
+        tpl.innerHTML = '<option value="">' + SG('TplPlaceholder', '-- 常用模板 --') + '</option>';
+        TEMPLATES.forEach(function (t) { tpl.add(new Option(SG(t.key, t.name), t.sql)); });
+    }
+    // 初始状态提示 (若仍为默认提示)
+    var st = $('status');
+    if (st && !st.dataset.used) setStatus(SG('StatusInit', '配置条件或选择模板生成 SQL, 点"填入搜索框执行"'));
+    // 已存在的条件行: 类型下拉文案重建 (保留用户当前配置)
+    document.querySelectorAll('#wlist .wrow').forEach(function (row) {
+        var ts = row.querySelector('.wtype');
+        if (ts) {
+            var cur = ts.value;
+            ts.innerHTML = WT_OPTIONS.map(function (o) {
+                return '<option value="' + o.v + '"' + (o.v === cur ? ' selected' : '') + '>' + SG(o.k, o.d) + '</option>';
+            }).join('');
+        }
+    });
+}
+// ==================== 页面逻辑 ====================
+var $ = function (id) { return document.getElementById(id); };
+
+// ---------- 常量: 迅捷搜文件类型 / 时间预设 ----------
+var FILE_TYPES = ['视频', '音频', '图片', '文档', '办公', '程序', '压缩', '系统', '其他'];
+var FILE_TYPE_KEYS = ['FTVideo', 'FTAudio', 'FTImage', 'FTDoc', 'FTOffice', 'FTProgram', 'FTArchive', 'FTSystem', 'FTOther'];
+function fileTypeLabel(i) {
+    return SG(FILE_TYPE_KEYS[i], FILE_TYPES[i]);
+}
+var TIME_PRESETS = [];
+function buildTimePresets() {
+    TIME_PRESETS.length = 0;
+    var defs = [
+        { k: 'TPToday', d: '今天', expr: "ModTime >= CURRENT_DATE" },
+        { k: 'TP7d', d: '最近 7 天', expr: "ModTime >= CURRENT_DATE - INTERVAL '7 days'" },
+        { k: 'TP30d', d: '最近 30 天', expr: "ModTime >= CURRENT_DATE - INTERVAL '30 days'" },
+        { k: 'TP90d', d: '最近 90 天', expr: "ModTime >= CURRENT_DATE - INTERVAL '90 days'" },
+        { k: 'TP180d', d: '最近 180 天', expr: "ModTime >= CURRENT_DATE - INTERVAL '180 days'" },
+        { k: 'TP1y', d: '最近 1 年', expr: "ModTime >= CURRENT_DATE - INTERVAL '365 days'" }
+    ];
+    defs.forEach(function (d) { TIME_PRESETS.push({ name: SG(d.k, d.d), expr: d.expr }); });
+}
+buildTimePresets();
+
+// WHERE 条件类型选项 (动态重建用)
+var WT_OPTIONS = [
+    { v: 'filetype', k: 'WTFileType', d: '文件类型' },
+    { v: 'size', k: 'WTSize', d: '大小' },
+    { v: 'path', k: 'WTPath', d: '路径' },
+    { v: 'ext', k: 'WTExt', d: '扩展名' },
+    { v: 'fname', k: 'WTFName', d: '文件名' },
+    { v: 'mtime', k: 'WTModTime', d: '修改时间' },
+    { v: 'content', k: 'WTContent', d: '文件内容' },
+    { v: 'attr', k: 'WTAttr', d: '属性' },
+    { v: 'isdir', k: 'WTIsDir', d: '目录标记' },
+    { v: 'parentname', k: 'WTParentName', d: '父目录名称' },
+    { v: 'parentpath', k: 'WTParentPath', d: '父目录路径' },
+    { v: 'anyparent', k: 'WTAnyParent', d: '任意父目录' },
+    { v: 'score', k: 'WTScore', d: '评分' },
+    { v: 'filenumber', k: 'WTFileNumber', d: '文件编号' },
+    { v: 'custom', k: 'WTCustom', d: '自定义' }
+];
+
+// ---------- WHERE 条件行 (动态) ----------
+function wrowHtml(conn, type) {
+    return '<div class="wrow" data-t="' + type + '">' +
+        '<select class="wconn">' + (conn === 'OR'
+            ? '<option value="AND">AND</option><option value="OR" selected>OR</option>'
+            : '<option value="AND" selected>AND</option><option value="OR">OR</option>') + '</select>' +
+        '<select class="wtype">' + WT_OPTIONS.map(function (o) {
+            return '<option value="' + o.v + '"' + (o.v === type ? ' selected' : '') + '>' + SG(o.k, o.d) + '</option>';
+        }).join('') + '</select>' +
+        '<div class="wctl">' + wctlHtml(type) + '</div>' +
+        '<button class="wdel" title="' + SG('Del', '删除') + '">×</button>' +
+    '</div>';
+}
+function wctlHtml(type) {
+    switch (type) {
+        case 'filetype':
+            return '<select class="wop">' +
+                '<option value="=">=</option><option value="!=">!=</option>' +
+                '<option value="IN">IN ' + SG('IsOneOf', '是其一') + '</option><option value="NOT IN">NOT IN ' + SG('Exclude', '排除') + '</option></select>' +
+                '<select class="wv">' + FILE_TYPES.map(function (t, i) { return '<option>' + fileTypeLabel(i) + '</option>'; }).join('') + '</select>';
+        case 'size':
+            return '<select class="wop">' +
+                '<option value=">">&gt;</option><option value=">=">&gt;=</option>' +
+                '<option value="<">&lt;</option><option value="<=">&lt;=</option>' +
+                '<option value="=">=</option><option value="!=">!=</option><option value="<>">&lt;&gt;</option>' +
+                '<option value="BETWEEN">BETWEEN</option></select>' +
+                '<input type="number" class="wv" value="100" min="0" style="width:90px">' +
+                '<select class="wunit"><option value="">B</option><option value="K">KB</option><option value="M" selected>MB</option><option value="G">GB</option></select>' +
+                '<input type="number" class="wv2" placeholder="' + SG('And', '和') + '" style="width:90px;display:none">' +
+                '<select class="wunit2" style="display:none"><option value="">B</option><option value="K">KB</option><option value="M" selected>MB</option><option value="G">GB</option></select>';
+        case 'path':
+            return '<select class="wop">' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option><option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhPath', '如 D:\\Work') + '" spellcheck="false">' +
+                '<label style="font-size:11px;color:var(--text-dim);white-space:nowrap"><input type="checkbox" class="wsub" checked> ' + SG('IncSub', '含子目录') + '</label>';
+        case 'ext':
+            return '<select class="wop">' +
+                '<option value="IN">IN ' + SG('IsOneOf', '是其一') + '</option><option value="NOT IN">NOT IN ' + SG('Exclude', '排除') + '</option>' +
+                '<option value="=">=</option><option value="!=">!=</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhExt', '如 mp4,mkv,avi') + '" spellcheck="false">';
+        case 'fname':
+            return '<select class="wop">' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option><option value="NOT ILIKE">NOT ILIKE ' + SG('NotIgnoreCase', '不区分大小写不含') + '</option>' +
+                '<option value="~">~ ' + SG('Regex', '正则') + '</option><option value="~*">~* ' + SG('RegexIgnoreCase', '正则忽略大小写') + '</option>' +
+                '<option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhKw', '关键词或正则') + '" spellcheck="false">';
+        case 'mtime':
+            return '<select class="wop">' +
+                '<option value="preset">' + SG('TimePreset', '预设区间') + '</option><option value="after">' + SG('TimeAfter', '指定日期之后') + '</option>' +
+                '<option value="before">' + SG('TimeBefore', '指定日期之前') + '</option><option value="between">' + SG('TimeBetween', '指定日期之间') + '</option></select>' +
+                '<select class="wv">' + TIME_PRESETS.map(function (t, i) {
+                    return '<option value="' + i + '"' + (i === 2 ? ' selected' : '') + '>' + t.name + '</option>';
+                }).join('') + '</select>' +
+                '<input type="date" class="wv2" style="display:none">' +
+                '<input type="date" class="wv3" style="display:none">';
+        case 'content':
+            return '<select class="wop">' +
+                '<option value="~">~ ' + SG('Regex', '正则') + '</option><option value="~*">~* ' + SG('RegexIgnoreCase', '正则忽略大小写') + '</option>' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhContent', '正则表达式 (对文件内容匹配)') + '" spellcheck="false" style="width:100%">';
+        case 'attr':
+            return '<select class="wop">' +
+                '<option value="!~">' + SG('AttrExclude', '排除 [!~]') + '</option><option value="~">' + SG('AttrMatch', '匹配 [~]') + '</option>' +
+                '<option value="!~*">' + SG('AttrExcludeIgnore', '排除忽略大小写') + '</option><option value="~*">' + SG('AttrMatchIgnore', '匹配忽略大小写') + '</option>' +
+                '<option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" value="[SH]" spellcheck="false" style="width:90px">';
+        case 'isdir':
+            return '<select class="wop">' +
+                '<option value="1">' + SG('IsDir1', '目录 (IsDir = 1)') + '</option><option value="0">' + SG('IsDir0', '文件 (IsDir = 0)') + '</option></select>';
+        case 'parentname':
+            return '<select class="wop">' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option><option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhParentName', '如 纪录片') + '" spellcheck="false">';
+        case 'parentpath':
+            return '<select class="wop">' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option><option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhParentPath', '如 D:\\Work\\视频') + '" spellcheck="false">';
+        case 'anyparent':
+            return '<select class="wop">' +
+                '<option value="LIKE">LIKE ' + SG('Contains', '包含') + '</option><option value="NOT LIKE">NOT LIKE ' + SG('NotContains', '不含') + '</option>' +
+                '<option value="ILIKE">ILIKE ' + SG('IgnoreCase', '忽略大小写') + '</option><option value="=">= ' + SG('Exact', '精确') + '</option><option value="!=">!= ' + SG('Exclude', '排除') + '</option></select>' +
+                '<input type="text" class="wv" placeholder="' + SG('PhAnyParent', '如 电影') + '" spellcheck="false">';
+        case 'score':
+            return '<select class="wop">' +
+                '<option value=">=">&gt;=</option><option value=">">&gt;</option>' +
+                '<option value="<">&lt;</option><option value="<=">&lt;=</option>' +
+                '<option value="=">=</option><option value="!=">!=</option><option value="<>">&lt;&gt;</option></select>' +
+                '<input type="number" class="wv" value="80" min="0" max="100" style="width:90px">';
+        case 'filenumber':
+            return '<select class="wop">' +
+                '<option value="=">=</option><option value="!=">!=</option>' +
+                '<option value=">">&gt;</option><option value="<">&lt;</option>' +
+                '<option value=">=">&gt;=</option><option value="<=">&lt;=</option></select>' +
+                '<input type="number" class="wv" placeholder="' + SG('PhFileNumber', '如 100') + '" min="0" style="width:90px">';
+        default: // custom
+            return '<input type="text" class="wv" placeholder="' + SG('PhCustom', '直接写表达式, 如 Size &gt; 100 AND Ext = &apos;txt&apos;') + '" spellcheck="false" style="width:100%">';
+    }
+}
+function bindWrow(row) {
+    var typeSel = row.querySelector('.wtype');
+    var ctl = row.querySelector('.wctl');
+    typeSel.addEventListener('change', function () { ctl.innerHTML = wctlHtml(typeSel.value); });
+    // 大小 BETWEEN: 显示第二个数值
+    ctl.addEventListener('change', function (e) {
+        var op = ctl.querySelector('.wop');
+        var v2 = ctl.querySelector('.wv2'), u2 = ctl.querySelector('.wunit2');
+        if (op && op.value === 'BETWEEN' && v2) { v2.style.display = ''; if (u2) u2.style.display = ''; }
+        else if (v2) { v2.style.display = 'none'; if (u2) u2.style.display = 'none'; }
+        // 时间: 指定日期输入
+        if (op && op.value === 'after' || op && op.value === 'before') {
+            var d2 = ctl.querySelector('.wv2'), d3 = ctl.querySelector('.wv3');
+            if (d2) d2.style.display = ''; if (d3) d3.style.display = 'none';
+            var pv = ctl.querySelector('.wv'); if (pv) pv.style.display = 'none';
+        } else if (op && op.value === 'between') {
+            var d2b = ctl.querySelector('.wv2'), d3b = ctl.querySelector('.wv3');
+            if (d2b) d2b.style.display = ''; if (d3b) d3b.style.display = '';
+            var pv2 = ctl.querySelector('.wv'); if (pv2) pv2.style.display = 'none';
+        } else {
+            var pv3 = ctl.querySelector('.wv');
+            if (pv3 && pv3.style.display === 'none') pv3.style.display = '';
+        }
+    });
+    row.querySelector('.wdel').addEventListener('click', function () { row.remove(); refresh(); });
+    row.addEventListener('change', refresh);
+    row.addEventListener('input', refresh);
+}
+// 字符串字面量: 单引号翻倍 ('' 表示字面 '); 反斜杠是普通字符不转义 (=/!= 精确匹配与正则 ~/~* 用, 参考 PostgreSQL)
+function escStr(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+// LIKE/ILIKE 模式串: 反斜杠是模式转义字符须双写 (\\ 表示字面 \, 参考 PostgreSQL); 单引号仍由 escStr 处理
+function escLike(s) { return String(s).replace(/\\/g, '\\\\'); }
+// 读取一行条件生成 SQL 片段
+function wrowExpr(row) {
+    var type = row.querySelector('.wtype').value;
+    var ctl = row.querySelector('.wctl');
+    var op, v, v2, u, u2, sub;
+    switch (type) {
+        case 'filetype':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            if (op === 'IN' || op === 'NOT IN') return 'FileType ' + op + ' (' + escStr(v) + ')';
+            return 'FileType ' + op + ' ' + escStr(v);
+        case 'size':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            u = ctl.querySelector('.wunit').value;
+            if (op === 'BETWEEN') {
+                v2 = ctl.querySelector('.wv2').value.trim();
+                u2 = ctl.querySelector('.wunit2').value;
+                if (!v || !v2) return '';
+                return 'Size BETWEEN ' + escStr(v + u) + ' AND ' + escStr(v2 + u2);
+            }
+            if (!v) return '';
+            return 'Size ' + op + ' ' + escStr(v + u);
+        case 'path':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            if (op === 'LIKE' || op === 'NOT LIKE' || op === 'ILIKE') {
+                sub = ctl.querySelector('.wsub').checked;
+                v = escLike(v.replace(/[\\/]+$/, '')) + (sub ? '\\\\%' : '');
+            }
+            // =/!= 精确匹配: 反斜杠是普通字符不双写
+            return 'Path ' + op + ' ' + escStr(v);
+        case 'ext':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            var list = v.split(/[,\s，]+/).map(function (x) { return escStr(x.replace(/^\./, '')); }).join(', ');
+            if (op === 'IN' || op === 'NOT IN') return 'Ext ' + op + ' (' + list + ')';
+            return 'Ext ' + op + ' ' + escStr(v.replace(/^\./, ''));
+        case 'fname':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            if (op === 'LIKE' || op === 'NOT LIKE' || op === 'ILIKE' || op === 'NOT ILIKE')
+                return 'FName ' + op + ' ' + escStr('%' + escLike(v) + '%');
+            // 正则 (~/~*) 与精确 (=/!=): 反斜杠是正则/普通字符不双写
+            return 'FName ' + op + ' ' + escStr(v);
+        case 'mtime':
+            op = ctl.querySelector('.wop').value;
+            if (op === 'preset') {
+                var i = ctl.querySelector('.wv').value;
+                return TIME_PRESETS[i] ? TIME_PRESETS[i].expr : '';
+            }
+            if (op === 'after' || op === 'before') {
+                var d = ctl.querySelector('.wv2').value;
+                if (!d) return '';
+                return 'ModTime ' + (op === 'after' ? '>=' : '<=') + ' CAST(' + escStr(d) + ' AS int)';
+            }
+            if (op === 'between') {
+                var d1 = ctl.querySelector('.wv2').value, d2 = ctl.querySelector('.wv3').value;
+                if (!d1 || !d2) return '';
+                return 'ModTime BETWEEN CAST(' + escStr(d1) + ' AS int) AND CAST(' + escStr(d2) + ' AS int)';
+            }
+            return '';
+        case 'content':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            if (op === 'LIKE' || op === 'NOT LIKE' || op === 'ILIKE') {
+                // 包含类: 值作为关键词 %包裹 (escLike 转义反斜杠, 单引号由 escStr 处理)
+                return 'FileContent ' + op + ' ' + escStr('%' + escLike(v) + '%');
+            }
+            // 正则类: 原样按正则匹配 (~ 区分大小写 / ~* 忽略大小写), 反斜杠是正则转义不双写, 单引号由 escStr 转义
+            return 'FileContent ' + op + ' ' + escStr(v);
+        case 'attr':
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            return 'FAttr ' + op + ' ' + escStr(v);
+        case 'isdir':
+            v = ctl.querySelector('.wop').value;
+            return 'IsDir = ' + v;
+        case 'parentname':
+        case 'parentpath':
+        case 'anyparent':
+            // 字段映射: 父目录名称/父目录路径/任意父目录
+            var pf = { parentname: 'ParentName', parentpath: 'ParentPath', anyparent: 'AnyParent' }[type];
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            if (op === 'LIKE' || op === 'NOT LIKE' || op === 'ILIKE') return pf + ' ' + op + ' ' + escStr('%' + escLike(v) + '%');
+            // =/!= 精确匹配: 反斜杠是普通字符不双写
+            return pf + ' ' + op + ' ' + escStr(v);
+        case 'score':
+        case 'filenumber':
+            // 数值字段: 评分 (0~100) / 文件编号
+            var nf = { score: 'Score', filenumber: 'FileNumber' }[type];
+            op = ctl.querySelector('.wop').value;
+            v = ctl.querySelector('.wv').value.trim();
+            if (!v) return '';
+            return nf + ' ' + op + ' ' + v;
+        default: // custom
+            v = ctl.querySelector('.wv').value.trim();
+            return v;
+    }
+}
+// ---------- 生成 SQL ----------
+function buildSQL() {
+    var o = [];
+    var mode = $('selMode').value;
+    var sel;
+    if (mode === 'cols') {
+        var cols = [];
+        document.querySelectorAll('#colGrid input:checked').forEach(function (c) { cols.push(c.value); });
+        sel = cols.length ? cols.join(', ') : '*';
+    } else if (mode === 'agg') {
+        var aggs = ['COUNT(*)'];
+        document.querySelectorAll('#aggChips .chip.on').forEach(function (c) { aggs.push(c.dataset.agg); });
+        sel = aggs.join(', ');
+    } else {
+        sel = '*';
+    }
+    o.push('SELECT ' + sel + ' FROM alltable');
+    var w = [];
+    document.querySelectorAll('#wlist .wrow').forEach(function (row) {
+        var expr = wrowExpr(row);
+        if (expr) {
+            if (w.length) w.push(row.querySelector('.wconn').value);
+            w.push(expr);
+        }
+    });
+    if ($('noSH').checked) {
+        if (w.length) w.push('AND');   // 已有条件时必须补连接词, 否则会拼出 "FileType='视频' FAttr !~ '[SH]'" 语法错误
+        w.push("FAttr !~ '[SH]'");
+    }
+    if (w.length) o.push('WHERE ' + w.join(' '));
+    var gb = $('groupBy').value;
+    if (mode === 'agg' && gb) o.push('GROUP BY ' + gb);
+    var having = $('having').value.trim();
+    if (having) o.push('HAVING ' + having);
+    var ob = [];
+    var f1 = $('orderField').value, d1 = $('orderDir').value;
+    if (f1) ob.push(f1 + ' ' + d1);
+    var f2 = $('orderField2').value, d2 = $('orderDir2').value;
+    if (f2) ob.push(f2 + ' ' + d2);
+    if (ob.length) o.push('ORDER BY ' + ob.join(', '));
+    var lm = $('limit').value.trim();
+    if (lm) o.push('LIMIT ' + lm);
+    return o.join('\n');
+}
+function refresh() { $('preview').value = buildSQL(); updateConnSelectors(); }
+// 首行条件前不需要连接词 (AND/OR 只衔接后续条件), 动态隐藏首行的 .wconn;
+// 删除首行后原第二行升为首行, 其连接词也应隐藏, 故每次刷新统一校正
+function updateConnSelectors() {
+    var rows = document.querySelectorAll('#wlist .wrow');
+    for (var i = 0; i < rows.length; i++) {
+        var conn = rows[i].querySelector('.wconn');
+        if (conn) conn.style.display = i === 0 ? 'none' : '';
+    }
+}
+// ---------- 模板 ----------
+var TEMPLATES = [
+    { key: 'TplTop50', name: '前 50 个大文件', sql: "SELECT * FROM alltable WHERE Size > '100M' AND FAttr !~ '[SH]' ORDER BY Size DESC LIMIT 50" },
+    { key: 'TplBigVideo', name: '大视频 (>500M)', sql: "SELECT * FROM alltable WHERE FileType='视频' AND Size > '500M' AND FAttr !~ '[SH]' ORDER BY Size DESC" },
+    { key: 'TplRecent30', name: '最近 30 天修改', sql: "SELECT * FROM alltable WHERE ModTime >= CURRENT_DATE - INTERVAL '30 days' AND FAttr !~ '[SH]' ORDER BY ModTime DESC" },
+    { key: 'TplByType', name: '按类型统计', sql: "SELECT FileType, COUNT(*) AS cnt FROM alltable WHERE FAttr !~ '[SH]' GROUP BY FileType ORDER BY cnt DESC" },
+    { key: 'TplByExtTop', name: '按扩展名统计 TOP10', sql: "SELECT Ext, COUNT(*) AS cnt FROM alltable WHERE FAttr !~ '[SH]' GROUP BY Ext ORDER BY cnt DESC LIMIT 10" },
+    { key: 'TplTopDirs', name: '前 20 大目录', sql: "SELECT * FROM alltable WHERE IsDir=1 AND FAttr !~ '[SH]' ORDER BY Size DESC LIMIT 20" },
+    { key: 'TplDupName', name: '重名+同大小查重', sql: "SELECT FName, Size, COUNT(*) FROM alltable WHERE FAttr !~ '[SH]' GROUP BY FName, Size HAVING COUNT(*) > 1" },
+    { key: 'TplDupMd5', name: 'MD5 内容查重', sql: "SELECT MD5(FileContent), COUNT(*) FROM alltable WHERE FAttr !~ '[SH]' GROUP BY MD5(FileContent) HAVING COUNT(*) > 1" },
+    { key: 'TplEmptyDir', name: '空目录', sql: "SELECT * FROM alltable WHERE IsDir=1 AND Size=0 AND FAttr !~ '[SH]'" },
+    { key: 'TplTempFiles', name: '临时/缓存文件', sql: "SELECT * FROM alltable WHERE Ext IN ('tmp','temp','log','bak','cache','db-journal') AND FAttr !~ '[SH]'" },
+    { key: 'TplColdData', name: '冷数据 (>1G 且 180 天未动)', sql: "SELECT * FROM alltable WHERE Size > '1G' AND ModTime < CURRENT_DATE - INTERVAL '180 days' AND FAttr !~ '[SH]' ORDER BY ModTime" },
+    { key: 'TplArchives', name: '压缩包', sql: "SELECT * FROM alltable WHERE Ext IN ('zip','rar','7z','tar','gz','bz2','xz') AND FAttr !~ '[SH]' ORDER BY Size DESC" },
+    { key: 'TplDocsInDir', name: '指定目录下的文档', sql: "SELECT * FROM alltable WHERE Path LIKE 'D:\\\\Work\\\\%' AND FileType IN ('文档','办公') AND FAttr !~ '[SH]'" },
+    { key: 'TplFNameRegex', name: '文件名正则 (测试/备份)', sql: "SELECT * FROM alltable WHERE FName ~ 'test|backup|\\.bak$' AND FAttr !~ '[SH]'" },
+    { key: 'TplDirSize', name: '按目录统计大小', sql: "SELECT ParentPath, COUNT(*) AS cnt, SUM(Size) AS total FROM alltable WHERE FAttr !~ '[SH]' GROUP BY ParentPath ORDER BY total DESC LIMIT 20" }
+];
+var tplSel = $('tplSel');
+tplSel.innerHTML = '<option value="">' + SG('TplPlaceholder', '-- 常用模板 --') + '</option>';
+TEMPLATES.forEach(function (t) { tplSel.add(new Option(SG(t.key, t.name), t.sql)); });
+tplSel.addEventListener('change', function () {
+    if (tplSel.value) { $('preview').value = tplSel.value; setStatus(SG('StatusTpl', '已应用模板: {0}').replace('{0}', tplSel.selectedOptions[0].text)); }
+    tplSel.value = '';
+});
+// ---------- 事件 ----------
+function setStatus(s) { $('status').textContent = s || ''; }
+$('selMode').addEventListener('change', function () {
+    var m = $('selMode').value;
+    $('colGrid').style.display = m === 'cols' ? 'grid' : 'none';
+    $('aggGrid').style.display = m === 'agg' ? 'block' : 'none';
+    if (m === 'agg' && !document.querySelector('#colGrid input:checked')) {
+        document.querySelector('#colGrid input[value=Path]').checked = true;
+    }
+    refresh();
+});
+document.querySelectorAll('#colGrid input').forEach(function (c) { c.addEventListener('change', refresh); });
+$('aggChips').addEventListener('click', function (e) {
+    var chip = e.target.closest('.chip');
+    // toggle: 未选中加 .on, 已选中再点即取消 (COUNT(*) 固定项是 pointer-events:none, 点击不会命中它)
+    if (chip) { chip.classList.toggle('on'); refresh(); }
+});
+$('addCond').addEventListener('click', function () {
+    var div = document.createElement('div');
+    div.innerHTML = wrowHtml('AND', 'filetype');
+    var row = div.firstChild;
+    $('wlist').appendChild(row);
+    bindWrow(row);
+    refresh();
+});
+['groupBy', 'having', 'orderField', 'orderDir', 'orderField2', 'orderDir2', 'limit', 'noSH'].forEach(function (id) {
+    var el = $(id);
+    el.addEventListener('change', refresh);
+    if (el.tagName === 'INPUT' && el.type === 'number') el.addEventListener('input', refresh);
+});
+$('btnRun').addEventListener('click', function () {
+    var sql = $('preview').value.trim();
+    if (!sql) { setStatus(SG('StatusEmpty', 'SQL 为空')); return; }
+    // 填入主窗口搜索框并执行 (宿主 applySql -> 更新搜索框 + SDK 自动识别执行)
+    xjs.searchSql(sql);
+    setStatus(SG('StatusRun', '已填入主窗口搜索框并执行 (蜗牛快搜自动识别 SQL)'));
+});
+$('btnCopy').addEventListener('click', function () {
+    var sql = $('preview').value.trim();
+    if (!sql) { setStatus(SG('StatusEmpty', 'SQL 为空')); return; }
+    var txt = sql;
+    function done() { setStatus(SG('StatusCopied', 'SQL 已复制到剪贴板')); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(function () { fallbackCopy(txt); done(); });
+    } else { fallbackCopy(txt); done(); }
+});
+function fallbackCopy(txt) {
+    var ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+}
+$('btnClose').addEventListener('click', function () { wv2ui.closePlugin(); });
+// 标题栏按钮区域上报
+function reportButtonRects() {
+    var rects = [];
+    var b = document.getElementById('btnClose');
+    if (b) {
+        var r = b.getBoundingClientRect();
+        rects.push({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) });
+    }
+    wv2ui.buttonRects(rects);
+}
+reportButtonRects();
+window.addEventListener('resize', function () { setTimeout(reportButtonRects, 50); });
+// 初始一行条件 (文件类型 = 视频)
+(function () {
+    var div = document.createElement('div');
+    div.innerHTML = wrowHtml('AND', 'filetype');
+    $('wlist').appendChild(div.firstChild);
+    bindWrow($('wlist').firstChild);
+    refresh();
+})();
+setStatus(SG('StatusInit', '配置条件或选择模板生成 SQL, 点"填入搜索框执行"'));
+// 应用当前语言 (data-i18n 静态文本)
+applyI18n();
+// 页面就绪, 请求插件上下文 (皮肤/语言等)
+xjs.ready();
+
+// 接收主窗口"自定义搜索模式"通知 (用户选中本插件的搜索模式并输入关键词, 宿主转发 searchModeEvent):
+// 把模板里的 {keyword} 占位符替换为输入词 (不区分大小写, 兼容旧写法 {kw}), SQL 字符串单引号转义后填入预览框并执行
+if (window.wv2ui && typeof window.wv2ui.onSearchMode === 'function') {
+    wv2ui.onSearchMode(function (evt) {
+        if (!evt || !evt.keyword) return;
+        var kw = String(evt.keyword).replace(/'/g, "''");   // SQL 字符串转义: 单引号翻倍
+        var tpl = String(evt.template || '');
+        // 函数式替换: 关键词含 $&/$` 等序列时不会被 String.replace 当替换模式展开
+        var sql = tpl.replace(/\{(keyword|kw)\}/gi, function () { return kw; });
+        if (!sql) return;
+        $('preview').value = sql;
+        if (typeof xjs.searchSql === 'function') {
+            xjs.searchSql(sql);
+            setStatus(SG('StatusRun', '已填入主窗口搜索框并执行 (蜗牛快搜自动识别 SQL)'));
+        }
+    });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "标识": "sql-generator",
+  "名称": "SQL 生成器",
+  "版本": "1.0.0",
+  "图标": "icon.png",
+  "类型": "app",
+  "动态库": "sql-generator.dll",
+  "接口版本": 4,
+  "作者": "蜗牛快搜",
+  "简介": "蜗牛快搜 SQL 文件搜索生成器: 搜索框右键\"SQL 生成器\"打开, 可视化配置 SELECT/WHERE/GROUP BY/ORDER BY/LIMIT 等条件生成 SQL, 一键填入搜索框执行 (蜗牛快搜自动识别 SQL, 匹配文件直接显示在文件列表)。需系统已安装 WebView2 运行时。",
+  "权限": ["ui"],
+  "能力": ["searchBoxMenu", "searchModes"],
+  "搜索模式": [
+    { "标识": "kw-sql", "名称": "关键词 SQL 搜索", "简介": "把输入的关键词替换进模板后执行 SQL 搜索", "类型": "sql" }
+  ]
+}

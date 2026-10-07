@@ -1,0 +1,6 @@
+/* sqlgen_ui.rc - SQL generator language packs (RCDATA, embedded in the DLL) */
+301 RCDATA "lang\\zh-CN.json"
+302 RCDATA "lang\\zh-TW.json"
+303 RCDATA "lang\\en.json"
+304 RCDATA "lang\\ko.json"
+305 RCDATA "lang\\th.json"
