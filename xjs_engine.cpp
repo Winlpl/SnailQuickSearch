@@ -299,8 +299,9 @@ void XjsSearchNow(bool commitHistory) {
     if (!g_searching.load()) XjsDebounceSnapshot();
     int fingerprint = -1;
     /* g_modeToKeyword 直接映射: Lua 过滤档=-3 谓词 / Lua 执行档=-4 执行 (引擎已移除专用入口,
-       两种 Lua 均经 Query 以类型提交) */
-    fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], FALSE);
+       两种 Lua 均经 Query 以类型提交);
+       SearchFilterConfig=NULL: 宿主搜索框暂无路径白名单入口, 不下推过滤 (需要时由调用方传 JSON) */
+    fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], NULL, FALSE);
     if (fingerprint != -1) {
         g_searching.store(true);   /* 重绘转用快照画, 完成/失败回调解除 */
         g_searchFingerprint = fingerprint;
@@ -625,6 +626,8 @@ static const char* const K_PLUGINS = "插件";                 /* 顶层: 插件
                                                                  条目里的旧「已确认版本」键随风险确认框移除已废弃, 不读不写) */
 static const char* const K_P_ID = "标识";
 static const char* const K_P_ENABLED = "启用";
+static const char* const K_SBORDER = "状态栏顺序";             /* 顶层: 插件状态栏项用户拖动顺序 (逗号分隔项键,
+                                                                空 = 全默认插件 id 字母序; 键含 \x1f 故不入 JSON 数组) */
 /* 搜索模式条目内键 (共享/私有同一结构) */
 static const char* const K_M_ID = "标识";                    /* 曾为 "id", 2026-09-19 全配置中文主键 */
 static const char* const K_M_NAME = "名称";
@@ -1615,7 +1618,7 @@ int XjsHostedPrune() {
    (源样式 state.lastKeyword = 尾阶段词 || 首标签词) */
 static void XjsHostedCommit(const std::string& kw, int kwType, const std::wstring& titleWord) {
     if (!g_searching.load()) XjsDebounceSnapshot();
-    int fingerprint = xjs_result_Query(g_result, kw.c_str(), kwType, FALSE);
+    int fingerprint = xjs_result_Query(g_result, kw.c_str(), kwType, NULL, FALSE);   /* SearchFilterConfig=NULL, 同 XjsSearchNow */
     if (fingerprint == -1) return;
     g_searching.store(true);
     g_searchFingerprint = fingerprint;
@@ -1933,6 +1936,9 @@ void XjsLoadConfig() {
                 XjsPluginUserStateSet(id.c_str(), XjsConfig::Bool(po, K_P_ENABLED, false));
         }
     }
+
+    /* 插件状态栏项用户拖动顺序 (顶层 "状态栏顺序"): 扫描前先落表, XjsPluginStartup 后即可用 */
+    XjsPluginStatusBarOrderSet(XjsConfig::Str(g_cfg.Root(), K_SBORDER, L""));
 
     /* 语言每窗化迁移种子 (2026-09-19): 曾为顶层键, 读出后 erase 废弃 — 各窗口条目缺 "语言" 键时
        以它兜底 (老配置升级 = 全部窗口沿用迁移前的语言, 不集体跳回 auto) */
@@ -2317,6 +2323,13 @@ void XjsSaveConfig() {
             parr.push_back(picojson::value(po));
         }
         g_cfg.Set(K_PLUGINS, picojson::value(parr));
+    }
+
+    /* 插件状态栏项用户拖动顺序 (顶层 "状态栏顺序"): 全默认序时写空串 (不留历史残迹) */
+    {
+        std::wstring ord = XjsPluginStatusBarOrderGet();
+        if (ord.empty()) g_cfg.Root().erase(K_SBORDER);
+        else g_cfg.Set(K_SBORDER, Utf16ToUtf8(ord.c_str()));
     }
 
     /* 窗口矩形不再写顶层共享键: 每窗矩形已在上方档案循环刷进各自条目

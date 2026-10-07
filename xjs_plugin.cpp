@@ -1408,6 +1408,9 @@ static void PluginAppendMenuItems(std::vector<XjsPopupItem>& items,
         XjsPopupItem it;
         it.id = IDM_PLUGIN_BASE + (int)s_tickets.size() - 1;
         it.title = k.text;
+        /* 插件项一律带拼图图标: 无 icon 时行缩进退到 26, 与带图标的内置项差 10px,
+           文字整行左移不成列 (2026-10-07 用户截图: 搜索框右键"SQL 生成器"比上面几行左移一截) */
+        it.icon = XMI_PLUGIN;
         items.push_back(it);
     }
 }
@@ -1508,31 +1511,128 @@ bool XjsPluginInputIntercept(const std::wstring& text) {
     return false;
 }
 
-int XjsPluginStatusBarCount() {
-    int n = 0;
-    for (auto& e : s_plugins)
-        if (PluginActive(e) && (e.mf.caps & XPC_STATUSBAR)) n += (int)e.mf.statusBar.size();
-    return n;
+/* ---- 状态栏项顺序 (用户拖动, 2026-10-07 用户口径"插件的可以由用户自己拖动调整位置") ----
+   事实源 = s_sbOrder (项键序列, 进程共享的用户偏好 — 插件是进程级资源, 顺序同属进程级, 不进窗口类)。
+   项键 = "<插件id>\x1f<命令id>": 跨插件唯一 (同一插件可声明多项), 且与清单字段解耦 — 插件改名/改
+   命令 id 后旧键自动落空 (回默认位), 不会误指到别的项上。
+
+   三条纪律:
+     1. 落定时把整份可见顺序**全量写回** s_sbOrder, 不做增量插入。增量表在此处是错的: 目标项若
+        还没入表 (新装插件), "插到它前面"无从表达, 拖动会静默失效。新插件因此永远钉在末尾。
+     2. 读表时容忍两类缺口: 表里有、当前不可见的项 (插件被禁用/卸载) 跳过不渲染; 当前可见、表里
+        没有的项 (新装的) 按默认序接到末尾 —— 用户重排过不会让新插件丢失或被顶掉。
+     3. 默认序 = 插件 id 字母序 (s_plugins 的天然顺序, 即拖动功能上线前的行为), 基准不变。
+     拖动只在"当前可见项序列"里换位, 不发明新项。 */
+
+static std::vector<std::wstring> s_sbOrder;   /* 用户顺序表 (项键; 空 = 全默认) */
+
+static const wchar_t* const S_SB_KEY_SEP = L"\x1f";
+
+static std::wstring XjsSbKeyOf(const XjsPluginEntry& e, const XjsPluginStatusBarDef& d) {
+    return e.mf.id + S_SB_KEY_SEP + d.cmd;
 }
-bool XjsPluginStatusBarAt(int i, XjsPluginStatusBarDef* out) {
+
+/* 当前可见项的默认序键表 (插件 id 字母序 = 拖动功能上线前的行为) */
+static void XjsSbDefaultKeys(std::vector<std::wstring>* out) {
+    out->clear();
+    for (auto& e : s_plugins) {
+        if (!PluginActive(e) || !(e.mf.caps & XPC_STATUSBAR)) continue;
+        for (auto& d : e.mf.statusBar) out->push_back(XjsSbKeyOf(e, d));
+    }
+}
+
+/* 可见项按用户顺序排好的键表 = s_sbOrder ∩ 可见项 (保持表内相对序), 接上不在表里的可见项 (默认序)。
+   每次现算 (项数是个位数, 拖动/渲染高频也无压力; 不缓存 = 无失效时机可写错)。 */
+static void XjsSbOrderedKeys(std::vector<std::wstring>* out) {
+    std::vector<std::wstring> all;
+    XjsSbDefaultKeys(&all);
+    out->clear();
+    for (auto& k : s_sbOrder) {
+        if (std::find(all.begin(), all.end(), k) != all.end()) out->push_back(k);
+    }
+    for (auto& k : all) {
+        if (std::find(s_sbOrder.begin(), s_sbOrder.end(), k) == s_sbOrder.end()) out->push_back(k);
+    }
+}
+
+/* 项键 → 归属插件槽 + 其 statusBar 下标 (取插件/命令的唯一入口: 渲染/命令两处共用) */
+static bool XjsSbLocate(const std::wstring& key, int* pluginIdx, int* cmdIdx) {
     for (int pi = 0; pi < (int)s_plugins.size(); pi++) {
         const XjsPluginEntry& e = s_plugins[pi];
         if (!PluginActive(e) || !(e.mf.caps & XPC_STATUSBAR)) continue;
-        if (i < (int)e.mf.statusBar.size()) { *out = e.mf.statusBar[i]; return true; }
-        i -= (int)e.mf.statusBar.size();
+        for (int ci = 0; ci < (int)e.mf.statusBar.size(); ci++) {
+            if (XjsSbKeyOf(e, e.mf.statusBar[ci]) == key) {
+                if (pluginIdx) *pluginIdx = pi;
+                if (cmdIdx) *cmdIdx = ci;
+                return true;
+            }
+        }
     }
     return false;
 }
+
+int XjsPluginStatusBarCount() {
+    std::vector<std::wstring> keys;
+    XjsSbOrderedKeys(&keys);
+    return (int)keys.size();
+}
+bool XjsPluginStatusBarAt(int i, XjsPluginStatusBarDef* out) {
+    std::vector<std::wstring> keys;
+    XjsSbOrderedKeys(&keys);
+    if (i < 0 || i >= (int)keys.size() || !out) return false;
+    int pi = -1, ci = -1;
+    if (!XjsSbLocate(keys[i], &pi, &ci)) return false;
+    *out = s_plugins[pi].mf.statusBar[ci];
+    out->pluginId = s_plugins[pi].mf.id;   /* 出口补归属插件 id (清单解析不产, 供顺序表定位) */
+    return true;
+}
 void XjsPluginStatusBarCommand(int i, unsigned long long window) {
-    for (int pi = 0; pi < (int)s_plugins.size(); pi++) {
-        XjsPluginEntry& e = s_plugins[pi];
-        if (!PluginActive(e) || !(e.mf.caps & XPC_STATUSBAR)) continue;
-        if (i >= (int)e.mf.statusBar.size()) { i -= (int)e.mf.statusBar.size(); continue; }
-        if (!e.fnOnCommand) continue;   /* 声明了 statusBar 但无 OnCommand 导出: 跳过该插件继续找 (return 会吞掉后续插件的项) */
-        std::string cmd = Utf16ToUtf8(e.mf.statusBar[i].cmd.c_str());
-        e.fnOnCommand(e.ctx, cmd.c_str(), window, NULL, 0, XJS_PLUGIN_CTX_NONE);
-        return;
+    std::vector<std::wstring> keys;
+    XjsSbOrderedKeys(&keys);
+    if (i < 0 || i >= (int)keys.size()) return;
+    int pi = -1, ci = -1;
+    if (!XjsSbLocate(keys[i], &pi, &ci)) return;
+    XjsPluginEntry& e = s_plugins[pi];
+    if (!e.fnOnCommand) return;   /* 声明了 statusBar 但无 OnCommand 导出: 干净无动作 (定位已定, 无后续项可误吞) */
+    std::string cmd = Utf16ToUtf8(e.mf.statusBar[ci].cmd.c_str());
+    e.fnOnCommand(e.ctx, cmd.c_str(), window, NULL, 0, XJS_PLUGIN_CTX_NONE);
+}
+
+/* 顺序表宿主接口 (配置层经此读写; 键含 \x1f 故落盘用逗号分隔而非 JSON 数组) */
+void XjsPluginStatusBarOrderSet(const std::wstring& csvKeys) {
+    s_sbOrder.clear();
+    size_t i = 0;
+    while (i < csvKeys.size()) {
+        size_t j = csvKeys.find(L',', i);
+        if (j == std::wstring::npos) j = csvKeys.size();
+        std::wstring k = csvKeys.substr(i, j - i);
+        if (!k.empty()) s_sbOrder.push_back(k);
+        i = j + 1;
     }
+}
+std::wstring XjsPluginStatusBarOrderGet() {
+    std::wstring s;
+    for (auto& k : s_sbOrder) {
+        if (!s.empty()) s += L",";
+        s += k;
+    }
+    return s;
+}
+void XjsPluginStatusBarOrderMove(int from, int to) {
+    std::vector<std::wstring> keys;
+    XjsSbOrderedKeys(&keys);
+    if (from < 0 || from >= (int)keys.size()) return;
+    if (to < 0) to = 0;
+    if (to >= (int)keys.size()) to = (int)keys.size() - 1;
+    if (from == to) return;
+    /* 全量写回 (见纪律 1): 在"已排好的可见序列"上换位后整表覆盖 s_sbOrder ——
+       表外项 (新装插件) 已在 keys 里, 跟着一起挪, 不会出现"拖不动新插件"。
+       表内不可见项 (禁用/卸载的插件) 不在 keys 里, 本次覆盖会丢弃 → 重新启用时按默认序
+       接到末尾, 属可接受 (禁用态本就不该占着用户排好的位)。 */
+    std::wstring moved = keys[from];
+    keys.erase(keys.begin() + from);
+    keys.insert(keys.begin() + to, moved);
+    s_sbOrder.swap(keys);
 }
 
 /* 订阅事件派发 — 纯信号口径 (v2): 只传 (事件类型, 窗口令牌, 结果对象), 不打包任何数据。

@@ -124,9 +124,11 @@ xjs_result* AgentWindowResultOf(XjsWindowToken tok);
                                           /* 窗口令牌 → 该窗结果对象 (仅 UI 线程; 旧宿主/无窗 = NULL)。
                                              结果同步的捕获口: 发送/勾选/手动执行三处在 UI 线程调它 */
 std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query,
-                             const std::wstring& filter);
+                             const std::wstring& filter, const std::string& scope = std::string());
                                           /* 卡片右键"执行语句": 私有对象上异步重放该语句, 布防
                                              结果同步 — 完成事件回调把 ID 全集推进目标窗列表。
+                                             scope = 该步的「搜索范围」引擎 JSON 原文 (UTF-8 窄串,
+                                             透传, 丢了会重放出全盘结果); 空 = 不过滤。
                                              仅 UI 线程; 只占串行锁完成提交 (agent 忙 = 拒绝);
                                              返回错误描述 (空 = 已提交, 结果经完成事件落窗) */
 
@@ -320,6 +322,13 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
                                          卡片「执行语句」重放用 — 不带会重放出不同结果) */
     std::wstring req;                /* run_search 的要求返回字段显示形 (如 "子树信息=整棵子树、
                                          文件大小"; 卡片右键查看; 随历史落库) */
+    std::string scope;              /* run_search 的「搜索范围」参数 (路径白名单; 下推引擎
+                                         SearchFilterConfig 的「搜索范围」 — 不在名单内的路径
+                                         根本不参与搜索, 比 SQL 的 Path LIKE 前置条件更早收敛,
+                                         内容搜索/全盘统计时省时显著)。存**引擎 JSON 原文**
+                                         (UTF-8, 与 res8/arg 同口径) 随历史落库, 卡片徽标显示形
+                                         由前端解析渲染, 卡片「执行语句」重放直接透传 —
+                                         丢了会重放出全盘结果) */
     bool open = false;          /* 样本列表展开态 (纯前端 UI 态, JS 自持; C++ 不再同步) */
     AiAdjust adj;               /* 待应用的调整 (非空 = 卡上带逐项 应用/忽略 按钮; 随历史落库) */
     /* 步骤同步比对唯一事实源 (泵 changed 检测 + 新增字段默认参与):
@@ -332,7 +341,7 @@ struct AiToolStep {             /* 一次工具调用 (role==2 组内; 随历史
                arg == o.arg && cid == o.cid && res8 == o.res8 &&
                count == o.count && elapsedMs == o.elapsedMs && err == o.err &&
                top == o.top && wrote == o.wrote && chg == o.chg &&
-               filter == o.filter && req == o.req;
+               filter == o.filter && req == o.req && scope == o.scope;
     }
 };
 /* 用户消息附带的多模态输入 (随历史落库; 图片经前端压缩, 视频/音频直接 data URL)。

@@ -514,6 +514,7 @@ static void HistConvToJson(const AiConv& c, picojson::object& oc) {
                 if (!t.mode.empty()) os["mode"] = JS(t.mode);
                 if (!t.query.empty()) os["query"] = JS(t.query);
                 if (!t.filter.empty()) os["筛选器"] = JS(t.filter);
+                if (!t.scope.empty()) os["搜索范围"] = picojson::value(t.scope);   /* 引擎 JSON 原文 (UTF-8) */
                 if (!t.req.empty()) os["要求返回"] = JS(t.req);
                 if (!t.res8.empty()) {
                     /* 结果载荷随历史落库 (2026-09-27 用户口径"给 AI 提交过的必须完整记录"):
@@ -630,6 +631,7 @@ static bool HistConvFromJson(const Jv& jc, AiConv& c) {
                         t.mode = jst.S(L"mode");
                         t.query = jst.S(L"query");
                         t.filter = jst.S(L"筛选器");
+                        t.scope = U8(jst.S(L"搜索范围"));   /* 引擎 JSON 原文 (宽串 → UTF-8 存取, 同 res8) */
                         t.req = jst.S(L"要求返回");
                         t.res8 = U8(jst.S(L"结果"));   /* 结果载荷 (UTF-8 存取) */
                         t.arg = U8(jst.S(L"参数"));    /* 原始参数 JSON (旧会话无此键 = 空,

@@ -531,9 +531,11 @@ struct XjsLayout {
     XjsRect vtrack{};       // 滚动条轨道
     XjsRect statusbar{};    // 状态栏 36px
     XjsRect preview{};      // 预览面板 (含 3px resizer 左缘)
-    XjsRect sbToolbox{};    // 工具箱
-    XjsRect sbPlugin[8]{};  // 插件状态栏项 (statusBar 能力; 内置组左侧向左排, 未用槽=零矩形)
-    int sbPluginN = 0;      // 本帧插件项数 (布局/渲染/悬停/点击四处同源; 渲染帧写回, 惯用 1 帧内几何)
+    XjsRect sbToolbox{};    // 工具箱 (右端固定, 不参与拖动排序)
+    XjsRect sbPlugin[8]{};  // 插件状态栏项 (statusBar 能力; 用户可拖动排序: 右段自工具箱向左排 + 左段接在状态文字之后; 未用槽=零矩形)
+    int sbPluginN = 0;      // 本帧插件项数 (布局/渲染/悬停/点击/拖动五处同源; 渲染帧写回, 惯用 1 帧内几何)
+    int sbPluginLeftN = 0;  // 本帧左段项数: 槽位 [0,sbPluginLeftN) = 右段 (紧邻工具箱向左排), 其后 = 左段 (接在状态文字之后);
+                             // 拖动落点换段判定与顺序写回都读它 (布局帧写回)
     XjsRect btnRects[5]{};  // 标题栏窗口按钮 [WBTN_PIN..WBTN_CLOSE] (被隐藏的按钮 = 零矩形)
 };
 
@@ -612,6 +614,8 @@ enum XjsMenuIcon {
     XMI_COPYPATH, XMI_GEAR,
     XMI_RESTORE, XMI_EXIT,   /* 托盘菜单: 恢复窗口 / 退出程序 (照源样式 Tray.Restore/Tray.Exit SVG) */
     XMI_HEART,               /* 托盘菜单: 捐赠 (心形; 源样式无此项, 按同族线段风格自绘) */
+    XMI_PLUGIN,              /* 插件贡献的菜单项 (拼图块; 无此项时缩进按"无图标"退到 26,
+                                 与带图标的内置项差 10px → 插件项文字整行左移不成列, 2026-10-07 用户截图实锤) */
 };
 
 struct XjsPopupItem {
@@ -1169,6 +1173,15 @@ public:
     XjsRect marqueeRect = {};
     bool mouseTracking = false;
 
+    /* 状态栏插件项拖动排序 (每窗瞬态, 2026-10-07 用户口径"插件的可以由用户自己拖动调整位置"):
+       按下插件项先记待定 (与松开触发命令并存), 移动超阈值即转真拖动 —— 此时命令让位给排序;
+       松开落在新槽位 → 写回用户顺序表并落盘, 落回原槽 (<=5px 未越阈) → 照旧触发插件命令。 */
+    int sbDragIdx = -1;                  /* 按下待定/拖动中的插件项槽位 (-1=无) */
+    int sbDragTo = -1;                   /* 拖动悬停的插入槽位 (0..sbPluginN, 松开落此) */
+    bool sbDragging = false;             /* 已越阈 = 真拖动 (绘制跟手幽灵 + 插入指示, 不再是点击) */
+    POINT sbDragFromPt = {};             /* 按下点 (客户区; 抬起位移判阈) */
+    POINT sbDragPt = {};                 /* 拖动当前点 (客户区; 幽灵与插入指示定位) */
+
     /* Toast 通知: 已组件化到 xjs_toast.cpp (按宿主 HWND 挂载, 栈/悬停/画刷随组件走) */
 
     /* 预览面板 */
@@ -1413,6 +1426,11 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_marqueeStartY   (XjsSearchWindow::Cur()->marqueeStartY)
 #define g_marqueeRect     (XjsSearchWindow::Cur()->marqueeRect)
 #define g_mouseTracking   (XjsSearchWindow::Cur()->mouseTracking)
+#define g_sbDragIdx       (XjsSearchWindow::Cur()->sbDragIdx)
+#define g_sbDragTo        (XjsSearchWindow::Cur()->sbDragTo)
+#define g_sbDragging      (XjsSearchWindow::Cur()->sbDragging)
+#define g_sbDragFromPt    (XjsSearchWindow::Cur()->sbDragFromPt)
+#define g_sbDragPt        (XjsSearchWindow::Cur()->sbDragPt)
 #define g_previewVisible  (XjsSearchWindow::Cur()->previewVisible)
 #define g_openElevated    (XjsSearchWindow::Cur()->openElevated)     /* 打开文件: 继承管理员权限 (每窗) */
 #define g_openAsync       (XjsSearchWindow::Cur()->openAsync)        /* 打开文件: 异步线程执行 (每窗) */
@@ -1781,6 +1799,13 @@ void XjsUpdateHoverState(POINT pt);
 bool XjsChromeMouseDown(POINT pt);                // 命中返回 true 已处理
 bool XjsAnyEditBoxHit(POINT pt);                  // 任一输入框命中 (搜索框/行内重命名): I-beam 光标判定
 bool XjsChromeMouseUp(POINT pt);
+/* 状态栏插件项拖动排序 (2026-10-07 用户口径; 三段同几何 = g_layout.sbPlugin[]/sbPluginLeftN):
+   按下命中插件项 (记待定) → 移动越阈转拖动 → 松开落位写顺序表并落盘; 未越阈照旧触发插件命令。
+   Down/Move/Up 均返回 true = 已处理 (调用方不再往下走)。 */
+bool XjsStatusbarPluginDragDown(POINT pt);
+bool XjsStatusbarPluginDragMove(POINT pt);
+bool XjsStatusbarPluginDragUp(POINT pt);
+bool XjsStatusbarPluginDragActive();             // 拖动中 (光标改手型/暂停悬停刷新用)
 void XjsShowAppMenu();                            // ☰ 菜单
 void XjsShowHistoryPanel();
 void XjsShowFilterMenu(POINT screenPt);
@@ -1926,7 +1951,9 @@ enum { XPP_READ = 1 << 0, XPP_WRITE = 1 << 1, XPP_EXEC = 1 << 2, XPP_UI = 1 << 3
 
 /* 清单解析产物 (宿主内部用, 不跨界; 插件菜单 when: 0=any 1=file 2=dir 3=drive) */
 struct XjsPluginMenuDef { std::wstring cmd, text; int order = 0; int when = 0; std::vector<std::wstring> exts; };
-struct XjsPluginStatusBarDef { std::wstring cmd, label, title; int order = 0; };
+struct XjsPluginStatusBarDef { std::wstring cmd, label, title; int order = 0;
+    std::wstring pluginId;   /* 宿主侧填: 归属插件 id (XjsPluginStatusBarAt 出口, 清单解析不产) */
+};
 struct XjsPluginModeDef { std::wstring id, name, desc, type; std::string tplUtf8; };   /* tpl 空 = OnSearchMode 接管 */
 struct XjsPluginHostedDef { std::wstring id; std::vector<std::wstring> words; std::wstring mode; std::string queryUtf8; };
 struct XjsPluginManifest {
@@ -2014,8 +2041,15 @@ void XjsPluginFireSearchMode(const XjsPluginModeRef& r, unsigned long long windo
                              const std::wstring& input);   /* 接管型: 通知插件 OnSearchMode */
 bool XjsPluginInputIntercept(const std::wstring& text);   /* true = 被某插件拦截本次搜索 (同步, UI 线程) */
 int  XjsPluginStatusBarCount();
+/* 第 i 项 (用户拖动顺序; 键 = "<插件id>\x1f<命令id>", 前缀匹配定位归属插件与命令)。
+   拖动落定后调用方需重排的只是顺序表, 项内容与下标语义不变 → 命中/命令两处无需改动。 */
 bool XjsPluginStatusBarAt(int i, XjsPluginStatusBarDef* out);
 void XjsPluginStatusBarCommand(int i, unsigned long long window);   /* 状态栏项松开触发 → OnCommand */
+/* 用户拖动顺序表 (进程共享的用户偏好, 不进窗口类): 宿主配置经这三组读写。
+   缺项 = 该插件没被拖过, 走默认 (插件 id 字母序) — 见 xjs_plugin.cpp 实现。 */
+void XjsPluginStatusBarOrderSet(const std::wstring& csvKeys);
+std::wstring XjsPluginStatusBarOrderGet();   /* 逗号分隔键串; 空 = 全默认 */
+void XjsPluginStatusBarOrderMove(int from, int to);   /* 拖动落定: 把 from 项挪到 to 槽 (0..count-1) */
 void XjsPluginOnSearchComplete();                  /* WM_SEARCH_COMPLETE 尾部分发 */
 void XjsPluginOnSelectionChanged();                /* 选中变化汇点分发 (预览刷新统一入口) */
 void XjsPluginOnSyncAfter();                       /* 文件同步节流刷新点分发 (聚合语义, 无单文件载荷) */

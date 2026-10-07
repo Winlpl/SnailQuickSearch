@@ -618,9 +618,9 @@ static POINT s_openPendPt = {};
 static unsigned long long s_lastClickOpenTick = 0;
 static int s_lastClickOpenIdx = -1;
 
-/* 状态栏按钮按下待定 (松开触发口径): 工具箱菜单 */
+/* 状态栏按钮按下待定 (松开触发口径): 工具箱菜单。
+   插件状态栏项的待定/拖动态已迁入窗口类字段 sbDrag* (每窗; xjs_chrome.cpp 拖动排序节消费)。 */
 static bool s_sbToolboxPress = false;
-static int s_sbPressPlug = -1;   /* 插件状态栏项待定下标 (松开仍命中同一项才触发, 同 s_sbToolboxPress 口径) */
 
 /* ==================== 主窗口过程 ==================== */
 
@@ -1000,13 +1000,18 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (XjsToastMouseMove(hwnd, XSF(1), g_layout.w, g_layout.h, pt)) { SetCursor(LoadCursorW(NULL, IDC_ARROW)); return 0; }   /* Toast 卡片浮于一切之上 */
             XjsHostedMouseMove(pt);   /* 托管标签悬停计时 (多来源标签 180ms 弹来源切换菜单) */
             XjsPreviewHoverUpdate(pt);   /* 面板按钮悬停高亮 (面板接管中内部自清, 先于列表) */
+            if (XjsStatusbarPluginDragMove(pt)) { SetCursor(LoadCursorW(NULL, IDC_SIZEWE)); return 0; }   /* 插件项拖动排序 (先于列表; 捕获中) */
             if (XjsPreviewPanelMouseMove(pt)) return 0;   /* 面板接管: 捕获中/悬停内容区 → 转发 (先于列表) */
             if (XjsListMouseMove(pt) || XjsPreviewMouseMove(pt)) return 0;
             XjsUpdateHoverState(pt);
             bool colHover = (pt.y >= g_layout.listHead.top && pt.y < g_layout.listHead.bottom && XjsHitTestColHandle(pt) >= 0);
             bool resizerHover = XjsPreviewResizerHit(pt);
             bool editHit = XjsAnyEditBoxHit(pt);
-            SetCursor(LoadCursorW(NULL, editHit ? IDC_IBEAM : (colHover || resizerHover) ? IDC_SIZEWE : IDC_ARROW));
+            /* 插件状态栏项悬停 = SIZEWE (提示"可拖动排序"; 工具箱不可拖, 仍是箭头) */
+            bool sbPlugHover = false;
+            for (int i = 0; i < g_layout.sbPluginN; i++)
+                if (XjsPtIn(g_layout.sbPlugin[i], pt)) { sbPlugHover = true; break; }
+            SetCursor(LoadCursorW(NULL, editHit ? IDC_IBEAM : (colHover || resizerHover || sbPlugHover) ? IDC_SIZEWE : IDC_ARROW));
             return 0;
         }
         /* 输入框(搜索框/行内重命名)统一文本光标: WM_SETCURSOR 在鼠标移动时都会到达,
@@ -1031,6 +1036,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         case WM_MOUSELEAVE: {
             g_mouseTracking = false;
+            /* 插件项拖动中指针离窗 = 拖出取消 (不留悬空幽灵; 捕获仍在, 松开走 DragUp 收尾) */
+            g_sbDragging = false;
             XjsPreviewHoverReset();   /* 面板按钮悬停高亮随指针离窗熄灭 (本分支末尾已整帧重绘) */
             XjsPreviewPanelMouseLeave();   /* 面板接管: 指针离窗 = 离开面板 (悬停态复位, SDK x=y=-1 约定) */
             XjsListHoverChanged(g_hoverRow, g_listHover);   /* 移出列表: 末次悬停行也走渐隐拖尾 */
@@ -1068,10 +1075,10 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                    SetCapture 保证"拖出窗外松开"也收到 mouseup (待定只在此处清零) */
                 s_sbToolboxPress = XjsPtIn(g_layout.sbToolbox, pt);
                 if (!s_sbToolboxPress) {
-                    for (int i = 0; i < g_layout.sbPluginN; i++)
-                        if (XjsPtIn(g_layout.sbPlugin[i], pt)) { s_sbPressPlug = i; break; }
+                    /* 插件状态栏项: 拖动排序优先 (按下即记待定+捕获, 越阈转拖动, 见 xjs_chrome) */
+                    if (XjsStatusbarPluginDragDown(pt)) return 0;
                 }
-                if (s_sbToolboxPress || s_sbPressPlug >= 0) SetCapture(hwnd);
+                if (s_sbToolboxPress) SetCapture(hwnd);
                 return 0;
             }
             /* 单击打开待定记录 (仅"鼠标打开=单击"的窗口): 须在 预览/列表 消费前判定,
@@ -1254,10 +1261,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (s_sbToolboxPress && pt.y >= g_layout.statusbar.top) {
                 if (XjsPtIn(g_layout.sbToolbox, pt)) XjsShowToolboxMenu();
             }
-            if (s_sbPressPlug >= 0 && pt.y >= g_layout.statusbar.top &&
-                s_sbPressPlug < g_layout.sbPluginN && XjsPtIn(g_layout.sbPlugin[s_sbPressPlug], pt))
-                XjsPluginStatusBarCommand(s_sbPressPlug, XjsPluginCurWindowToken());   /* 松开仍命中 → 插件 OnCommand */
-            s_sbPressPlug = -1;
+            /* 插件状态栏项: 拖动排序落位 (未越阈则照旧触发插件命令, 口径在 chrome 拖动节) */
+            if (XjsStatusbarPluginDragUp(pt)) { s_sbToolboxPress = false; ReleaseCapture(); return 0; }
             s_sbToolboxPress = false;
             ReleaseCapture();
             /* 单击打开落地: 待定项目 + 抬起未拖出 (≤5px) + 无修饰键 → 打开 (在捕获释放后,

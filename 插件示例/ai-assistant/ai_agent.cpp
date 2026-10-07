@@ -1112,6 +1112,86 @@ static void AgentFilterNames(const std::wstring& filter, std::vector<std::wstrin
             if ((*names)[k] == (*names)[i]) names->erase(names->begin() + k);
 }
 
+/* run_search 的「搜索范围」参数 → 引擎 SearchFilterConfig 的「搜索范围」白名单 JSON(UTF-8)。
+ *
+ * 引擎口径 (xunjieso.h):
+ *   {"搜索范围":[{"路径":"C:\\","递归子目录":true}, …]}
+ *   - 路径**区分大小写、不支持通配符** → 只接受字面目录, 归一化交给引擎前的 TrimW;
+ *   - 命中白名单外的路径**根本不参与搜索** (比 SQL 里 WHERE Path LIKE 'D:\\x\\%' 的
+ *     前置条件更早收敛: 内容搜索 FileContent 必须带路径前置, 走本参数是给内容搜索
+ *     兜底的正确姿势, 也让全盘统计/lua_exec 少扫大量无关子树)。
+ *   - 引擎只有白名单 (我在 dll 里核过: 只有"搜索范围"/"路径"/"递归子目录"三个键, 无排除项),
+ *     所以"排除某目录"要靠白名单列其余目录, 或退回 SQL 的 NOT LIKE。
+ *
+ * 入参形态 (三种都收, 与"搜索分类"同款宽容口径):
+ *   字符串      "D:\\工作"  或  "D:\\工作、E:\\素材" (顿号/逗号分隔)
+ *   字符串数组  ["D:\\工作","E:\\素材"]
+ *   对象数组    [{"路径":"D:\\工作","递归子目录":false}, …]  ← 唯一能关掉递归的形态
+ * 递归默认 true (绝大多数场景"限定到某目录"= 含其全部子目录)。
+ * 返回: 空串 = 不限定 (传 nullptr); 非空 = JSON 原文 (UTF-8)。
+ */
+static std::string AgentScopeFilterJson(const Jv* arg, std::wstring* err) {
+    if (!arg || (arg->t != 3 && arg->t != 4)) return std::string();
+    struct Item { std::wstring path; bool recurse = true; };
+    std::vector<Item> items;
+    if (arg->t == 3) {
+        /* 单串: 顿号/逗号/分号分隔 (与 AgentFilterNames 同款容忍) */
+        const std::wstring& s = arg->str;
+        size_t b = 0;
+        for (;;) {
+            size_t n = s.find_first_of(L"、,，;；", b);
+            std::wstring part = TrimW(s.substr(b, (n == std::wstring::npos ? s.size() : n) - b));
+            if (!part.empty()) items.push_back({ part, true });
+            if (n == std::wstring::npos) break;
+            b = n + 1;
+        }
+    } else {
+        for (auto& e : arg->arr) {
+            if (e.t == 3) {
+                std::wstring p = TrimW(e.str);
+                if (!p.empty()) items.push_back({ p, true });
+            } else if (e.t == 5) {
+                std::wstring p = TrimW(e.S(L"路径"));
+                if (p.empty()) p = TrimW(e.S(L"path"));
+                if (p.empty()) continue;
+                const Jv* r = e.Get(L"递归子目录");
+                if (!r) r = e.Get(L"recurse");
+                items.push_back({ p, !(r && ((r->t == 1 && !r->b) || (r->t == 2 && r->num == 0))) });
+            }
+        }
+    }
+    if (items.empty())
+        return std::string();
+    /* 去重保序 (同目录重复写两遍只会让引擎白扫一遍) */
+    for (size_t i = 0; i < items.size(); i++)
+        for (size_t k = items.size(); k-- > i + 1;)
+            if (items[k].path == items[i].path) items.erase(items.begin() + k);
+    /* 形态校验: 白名单按字面匹配, 写成通配符/相对路径会静默匹配 0 条 — 与其让模型
+     * 拿到"count=0"再猜, 不如当场报错让它改对 */
+    for (auto& it : items) {
+        const std::wstring& p = it.path;
+        if (p.find_first_of(L"*?") != std::wstring::npos) {
+            if (err) *err = L"搜索范围不支持通配符 (引擎按字面路径匹配): " + p +
+                            L" — 要搜某目录下的名字请把该目录填进来, 由搜索词处理文件名";
+            return std::string();
+        }
+        if (p.find(L':') == std::wstring::npos && p.find(L'\\') == std::wstring::npos) {
+            if (err) *err = L"搜索范围要填绝对路径 (如 D:\\工作), 收到: " + p;
+            return std::string();
+        }
+    }
+    picojson::array arr;
+    for (auto& it : items) {
+        picojson::object o;
+        o["路径"] = JS(it.path);
+        o["递归子目录"] = picojson::value(it.recurse);
+        arr.push_back(picojson::value(o));
+    }
+    picojson::object root;
+    root["搜索范围"] = picojson::value(arr);
+    return picojson::value(root).serialize();
+}
+
 /* run_search/手动重放共用的筛选器应用 (查询前调, 调用方持 g_agentCs): 把私有结果对象的
  * 选中分类设到目标档 — 引擎在查询时应用分类 (与宿主 XjsApplyFilter 同机制: SetSelectedFilter
  * + 重搜, 随后的 Query 就是那次重搜)。**支持多选** (引擎 2026-09-27 改 JSON 口径:
@@ -1199,7 +1279,7 @@ static bool AiDirStatBuild(xjs_engine* eng, int fileId, BOOL recursive, picojson
 }
 
 std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const std::wstring& query,
-                             const std::wstring& filter) {
+                             const std::wstring& filter, const std::string& scope) {
     if (mode.empty() || query.empty()) return L"语句为空";
     if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
         return L"lua_exec 脚本缺少顶层 return (执行模式必须以顶层 return ID 数组结尾), 未提交引擎";
@@ -1240,7 +1320,9 @@ std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const
             err = AgentApplyFilter(g_agentRes, filter);
         }
         std::string q8 = U8(query);
-        if (err.empty() && xjs_result_Query(g_agentRes, q8.c_str(), type, FALSE) < 0) {
+        /* 搜索范围白名单原样透传 (空 = nullptr = 不过滤); JSON 原文由 AgentScopeFilterJson 生成 */
+        if (err.empty() && xjs_result_Query(g_agentRes, q8.c_str(), type,
+                                            scope.empty() ? NULL : scope.c_str(), FALSE) < 0) {
             InterlockedExchange(&g_syncArm, 0);   /* 撤防 (发起失败无完成事件) */
             std::wstring e = W8(xjs_GetLastErrorMsg(xjs_GetDefaultEngine()));
             err = L"搜索发起失败: " + (e.empty() ? std::wstring(L"引擎拒绝") : e);
@@ -1258,7 +1340,7 @@ std::wstring AgentManualExec(XjsWindowToken tok, const std::wstring& mode, const
 static std::string ExecuteLuaWrites(AiJob* j, AiToolStep* st);   /* lua 导出登记的写盘执行段 (定义在本函数后) */
 static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const std::wstring& query,
                                        const std::wstring& filter, const Jv* req, const Jv* dedupArg,
-                                       AiToolStep* st) {
+                                       const std::string& scope, AiToolStep* st) {
     if (mode == L"lua_exec" && !LuaHasTopLevelReturn(U8(query).c_str()))
         return L"lua_exec 脚本缺少顶层 return, 已拒绝执行 (未提交引擎) — 执行模式必须以顶层 return ID 数组结尾, "
                L"return 的数组 = 最终结果集, 结果卡/外部靠它得知脚本选中了哪些文件; 缺了引擎只会静默给 0 条, 与真没搜到无法区分。"
@@ -1383,11 +1465,14 @@ static std::wstring AgentToolRunSearch(AiJob* j, const std::wstring& mode, const
         }
     }
     int fp = -1;
-    if (mode == L"wildcard")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 0, FALSE);
-    else if (mode == L"regex")    fp = xjs_result_Query(g_agentRes, q8.c_str(), 1, FALSE);
-    else if (mode == L"sql")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 2, FALSE);
-    else if (mode == L"lua_filter") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA, FALSE);
-    else if (mode == L"lua_exec") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA_EXEC, FALSE);
+    const char* cfg = scope.empty() ? NULL : scope.c_str();
+    /* SearchFilterConfig = scope (「搜索范围」路径白名单 JSON 原文, 空 = NULL 不过滤):
+       白名单外的路径根本不参与搜索, 比在搜索词里写 Path LIKE 前置条件更早收敛 */
+    if (mode == L"wildcard")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 0, cfg, FALSE);
+    else if (mode == L"regex")    fp = xjs_result_Query(g_agentRes, q8.c_str(), 1, cfg, FALSE);
+    else if (mode == L"sql")      fp = xjs_result_Query(g_agentRes, q8.c_str(), 2, cfg, FALSE);
+    else if (mode == L"lua_filter") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA, cfg, FALSE);
+    else if (mode == L"lua_exec") fp = xjs_result_Query(g_agentRes, q8.c_str(), XJS_KEYWORD_LUA_EXEC, cfg, FALSE);
     if (fp < 0) {
         InterlockedExchange(&g_syncArm, 0);   /* 发起失败无完成事件, 撤防 (残留会推错下一次结果) */
         std::wstring e = W8(xjs_GetLastErrorMsg(eng));
@@ -2183,10 +2268,17 @@ static std::wstring AgentToolExec(AiJob* j, const std::string& name8, const std:
                     st->req += kv.first;
             }
         }
+        /* 搜索范围: 路径白名单 (字符串/数组/对象数组三形态, 收进 st->scope = 引擎 JSON 原文)。
+         * 校验不过当场报错 (通配符/相对路径 → 引擎会静默匹配 0 条, 让模型拿到 count=0 再猜) */
+        const Jv* sv = v.Get(L"搜索范围");
+        std::wstring serr;
+        std::string scope8 = AgentScopeFilterJson(sv, &serr);
+        if (!serr.empty()) return serr;
+        st->scope = scope8;
         if (st->query.empty()) return L"query 不能为空";
         if (!AgentCsEnter(j)) return L"已停止";
         std::wstring err = AgentToolRunSearch(j, st->mode, st->query, st->filter, v.Get(L"要求返回"),
-                                              v.Get(L"样本去重"), st);
+                                              v.Get(L"样本去重"), scope8, st);
         LeaveCriticalSection(&g_agentCs);
         return err;
     }
@@ -2597,7 +2689,7 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"需要给用户看文件用 open_file，给路径清单用 copy_paths。\n"
     L"- 答案不是文件名的模糊需求（\"帮我找黄圣依参演过的电影\"——整句当搜索词必然搜不到）：①从问题提取实体"
     L"（人物/作品/系列/歌手/作者/公司等）；②用你的知识联想**具体候选清单**（人物→参演作品、系列→各部名称，把握大的排前）；"
-    L"③逐个实搜（一轮可连发多个不同候选，实体名本身也搜一遍兜底；结果太宽泛就加 FileType/Ext/目录/年份收窄）；"
+    L"③逐个实搜（一轮可连发多个不同候选，实体名本身也搜一遍兜底；结果太宽泛就加 FileType/Ext/搜索范围/年份收窄（目录用「搜索范围」参数，见《搜索范围》））；"
     L"④只列磁盘真实命中的文件（FileId 链接），某候选命中多时报总数，知识里有但没搜到的明确写\"索引中未找到\"——"
     L"绝不把联想当搜索结果；结果足够成答就收尾，别耗在弱把握候选上。\n"
     L"- 统计类必须**自己跑到出数**再回答（用户要的是数字与结论，不是脚本）；只有确实多次失败，"
@@ -2714,6 +2806,17 @@ static const wchar_t* AI_INSTRUCTIONS =
     L"**计数/分组/排名/占比等一切统计类问题直接用 lua_exec**（统计数字经 ai.print 拿回来）——SQL 聚合的结果行拿不回来"
     L"（run_search 只回命中总数与样本清单，聚合查询 count 恒为 1；给用户手动执行的搜索不受此限）。\n"
     L"\n"
+    L"## 搜索范围（限定搜索位置的正确做法）\n"
+    L"- 用户提到**某个目录/盘/位置**（「在 D 盘里找」「只看这个文件夹」「项目目录下」）时，用 run_search 的**「搜索范围」参数**把它变成搜索范围，"
+    L"**不要把它写进搜索词**。它是引擎级白名单：名单外的路径**根本不参与搜索**，比在搜索词里拼 `Path LIKE 'D:\\x\\%'` 前置条件更早收敛、更省时。\n"
+    L"- 取值 = 目录绝对路径数组：`[{\"路径\":\"D:\\\\工作\"},{\"路径\":\"E:\\\\素材\",\"递归子目录\":false}]`。"
+    L"「递归子目录」缺省 true（含任意层级子目录）；设 false 只看该目录的直接子项。**路径区分大小写、不支持通配符**，不要写 `D:\\*` 或相对路径。\n"
+    L"- **五种模式全部生效**（含 lua_exec 统计脚本与内容搜索），与「搜索分类」是独立的两个收窄维度，可同时用（分类管\"什么类型\"，搜索范围管\"在哪里\"）。\n"
+    L"- **引擎只有白名单，没有排除项**：用户说「除了 X 目录不要」时，要么把要搜的其余目录逐个列进白名单，要么改用 SQL 的 `NOT LIKE`；别硬传一个不存在的\"排除\"参数。\n"
+    L"- **目录没在索引里就等于搜 0 条**：用户说的路径可能根本不存在或未被索引。拿不准时先不带该参数搜一次确认目录存在、看看里面有什么，再限定——"
+    L"直接拿一个不存在的目录当过滤条件会得到 count=0，别据此断言\"没有这类文件\"。\n"
+    L"- 内容搜索（FileContent）必须带路径前置才有可接受的耗时，此时**优先用「搜索范围」**而不是在 SQL 里写 Path LIKE：前者引擎在进入内容读取前就排掉了范围外的路径。\n"
+    L"\n"
     L"\n"
     L"## 文件与目录必须区分\n"
     L"索引同时收录**文件和目录（文件夹/盘符）**，count 与样本清单都是混合口径；类型只能靠字段判断"
@@ -2751,7 +2854,7 @@ static const wchar_t* AI_INSTRUCTIONS =
 
 /* 工具定义 (Responses API tools 数组; 与 AgentToolExec 的名字/参数一一对应) */
 static const char* AI_TOOLS_JSON = R"json([
-  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与样本 (样本条数上限以系统提示词为准; 样本默认去重已提交过的条目, 相当于自动翻页 — 「样本去重」参数选去重范围: 本次搜索过滤(缺省)/会话过滤/禁止过滤)。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[ID,\"完整路径\",是否文件夹,附加?]…] — ID=引擎文件 ID (回答里的文件动作链接 xjs://open|reveal?id= 填它); 路径恒返回 (路径末段即文件名, 不再单独给名称); 第三槽恒为布尔 true=文件夹 false=文件; 附加 = 「要求返回」里要求的字段聚合对象 (没要求任何附加字段时该槽整个省略): 子={sz:子树内文件总大小[字节],cat:{分类:数量,…,全部=条目总数}} (仅文件夹条目有, 文件夹名不含关键词时据此顺藤摸瓜)、sz=自身大小[字节]、ct/mt/at=创建/修改/访问时间[epoch 秒]、attr=属性字母串 (R 只读 H 隐藏 S 系统 D 目录)、score=评分、alias=别名; 子树信息档位: 1=直接子项 (只看文件夹第一层有什么 — 层级浅、内容一眼可判时用, 省 token); 2=整棵子树 (判断整个文件夹的总量与构成 — 文件都在深层子文件夹里、要回答「这个文件夹是什么/多大/有没有目标类型」、或顺藤摸瓜决定是否深入时用)。 要求了索引未开启的字段会自动省略并在结果「字段未开启」里注明; 没要求返回的就不返回。要求返回.结果统计 = 附带整个结果集的类型拆分「统计」{文件: n, 文件夹: n, 分类: {…}} — 要按类型拆分数量的统计用它, 一次搜索直接拿到, 不必再发第二次搜索或 lua。output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先经 get_lua_spec 取规范全文; lua_filter 脚本必须顶层 return function(f) (裸脚本/没有顶层 return 会被拒绝执行), lua_exec 脚本必须有顶层 return ID 数组, 两者缺顶层 return 都不会提交引擎。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。搜索分类 = 按文件分类预过滤, **支持多选** (字符串用「、」连接如「图片、视频」, 或直接传字符串数组), 每次搜索前都会先设置 (卡片徽标显示实际分类): 缺省跟随当前对话窗口的筛选分类 (环境快照「当前对话窗口筛选」); 也可显式指定一个或多个分类 (分类名取环境快照「可用筛选分类」) 或传「全部」查全库。尽量按用户意图多带分类组合以剔除干扰、提高命中率: 找电影/剧集传「文件夹、视频」, 找歌曲传「文件夹、音频」, 找安装包传「压缩包」。按文件夹归类的内容 (影视/专辑/软件) 常用两段式顺藤摸瓜: 文件夹名含关键词而内部文件名未必含 (如文件夹「电影功夫」内的文件名不含「功夫」) — 先用关键词搜出文件夹, 再用 ParentPath/Path 条件或 SQL 搜它内部的文件, 不要只匹配文件名就断言\"没有\"。尽量减少工具调用: 多个关键词合并成一次搜索 — 纯文件名多词用 wildcard 的「|」或语法 (词1|词2|词3, 空格=且), 需要附加字段条件 (大小/时间/属性/目录) 时才用 SQL, 复杂逻辑用 lua; 不要逐词各调一次; 命中过多 (count 远超回传样本条数, 样本有遗漏) 且已有线索不足以回答时, 再细分收窄 (更具体的关键词/筛选器组合/限定目录) 分段搜索, 线索够就直接作答。在输入搜索词之前先按分类把范围收窄, wildcard/regex/sql/lua_filter 四种模式均生效, lua_exec 忽略此参数 (脚本即程序, 不设筛选器)。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"},"搜索分类":{"type":"string","description":"按此文件分类(可多个, 用「、」连接)预过滤; 分类名见环境快照「可用筛选分类」; 不传=跟随当前窗口筛选"},"样本去重":{"type":"string","enum":["本次搜索过滤","会话过滤","禁止过滤"],"description":"已提交过样本的 ID 不再占样本名额, 样本优先给没提交过的条目 — 多次搜索的可见面互相补全 (仅命中数超过样本上限时生效; 没提交过的不足时回填已见过的, 未溢出保持原顺序)。「本次搜索过滤」= 缺省; 同一次回答里的多次搜索共享去重缓存, 回答完成清空 — 需要多页浏览时连续多次调用即自动翻页; 「会话过滤」= 跨提问记住已提交过的 ID, 适合分多次提问翻遍同一批结果 (切换/删除会话或关闭 AI 助手时清空, 重开会话自动从聊天记录恢复); 「禁止过滤」= 不去重, 按结果顺序取前 N 条; 结果「样本回填」= 因未提交过的不足而回填的已见过条数 (出现即该范围已翻到头)"},"要求返回":{"type":"object","properties":{"子树信息":{"type":"integer","enum":[1,2],"description":"1=统计直接子项 (只看第一层构成, 层级浅/内容一眼可判时用); 2=统计整棵子树 (判断整个文件夹是什么/总量多大/深层有没有目标类型 — 影视合集等文件在深层子文件夹、或顺藤摸瓜决定是否深入时优先 2) (文件夹条目的 附加.子 才会有内容; 只附加信息不改变命中)"},"文件大小":{"type":"boolean","description":"附加自身大小 (字节, 键 sz)"},"创建时间":{"type":"boolean","description":"附加创建时间 (epoch 秒, 键 ct)"},"修改时间":{"type":"boolean","description":"附加修改时间 (epoch 秒, 键 mt)"},"访问时间":{"type":"boolean","description":"附加访问时间 (epoch 秒, 键 at)"},"文件属性":{"type":"boolean","description":"附加属性字母串 R/H/S/D (键 attr)"},"评分":{"type":"boolean","description":"附加文件评分 (键 score)"},"别名":{"type":"boolean","description":"附加别名 (键 alias; 无别名的条目省略)"},"结果统计":{"type":"boolean","description":"附带整个结果集的类型拆分「统计」{文件,文件夹,分类:{...}} — 按类型数数量的统计一次搜索直接拿到, 无需再发第二次搜索/lua (五种模式都生效: lua_exec 是对脚本 return 的 ID 数组统计; 结果为空 count=0 时不给)"}},"description":"按需附加字段, AI 自由选择 (字段开/关以本次搜索时实际状态为准 — 重建索引会随时开/关字段, 未开启的自动省略并在「字段未开启」注明); 没要求的不返回 (ID/路径/是否文件夹恒返回); 要求了未开启字段会自动省略并在结果「字段未开启」注明"}},"required":["mode","query"]}},
+  {"type":"function","name":"run_search","description":"在蜗牛快搜索引中执行一次搜索, 返回命中总数与样本 (样本条数上限以系统提示词为准; 样本默认去重已提交过的条目, 相当于自动翻页 — 「样本去重」参数选去重范围: 本次搜索过滤(缺省)/会话过滤/禁止过滤)。结果 JSON: count=命中总数, elapsedMs=耗时毫秒, files=[[ID,\"完整路径\",是否文件夹,附加?]…] — ID=引擎文件 ID (回答里的文件动作链接 xjs://open|reveal?id= 填它); 路径恒返回 (路径末段即文件名, 不再单独给名称); 第三槽恒为布尔 true=文件夹 false=文件; 附加 = 「要求返回」里要求的字段聚合对象 (没要求任何附加字段时该槽整个省略): 子={sz:子树内文件总大小[字节],cat:{分类:数量,…,全部=条目总数}} (仅文件夹条目有, 文件夹名不含关键词时据此顺藤摸瓜)、sz=自身大小[字节]、ct/mt/at=创建/修改/访问时间[epoch 秒]、attr=属性字母串 (R 只读 H 隐藏 S 系统 D 目录)、score=评分、alias=别名; 子树信息档位: 1=直接子项 (只看文件夹第一层有什么 — 层级浅、内容一眼可判时用, 省 token); 2=整棵子树 (判断整个文件夹的总量与构成 — 文件都在深层子文件夹里、要回答「这个文件夹是什么/多大/有没有目标类型」、或顺藤摸瓜决定是否深入时用)。 要求了索引未开启的字段会自动省略并在结果「字段未开启」里注明; 没要求返回的就不返回。要求返回.结果统计 = 附带整个结果集的类型拆分「统计」{文件: n, 文件夹: n, 分类: {…}} — 要按类型拆分数量的统计用它, 一次搜索直接拿到, 不必再发第二次搜索或 lua。output=ai.print 输出 (仅 Lua 模式有)。结果同时含文件与目录(文件夹), count/files 均为混合口径: 涉及\"文件\"口径的分析必须先按 IsDir=0 / f.isdir() 过滤, 不得拿混合 count 当文件数。可多次调用逐步逼近目标 (先粗筛再精筛)。5 种 mode 的搜索词语法以系统提示词中的说明为准; lua 两种模式写脚本前先经 get_lua_spec 取规范全文; lua_filter 脚本必须顶层 return function(f) (裸脚本/没有顶层 return 会被拒绝执行), lua_exec 脚本必须有顶层 return ID 数组, 两者缺顶层 return 都不会提交引擎。Lua 模式脚本内用 ai.print(...) 输出的统计/过程信息附在结果 JSON 的 output 字段; 数据行用 ai.row(id,\"字段名\",...) 逐条压入 (字段=名称/路径/大小/修改时间/创建时间/访问时间/扩展名/目录/类型/属性/别名/评分, 不带字段实参=id+名称), 结果 JSON 的 rows 字段是行对象数组 (只含请求字段, 时间=epoch 秒, 索引未开启的字段省略并在首元素提示)。lua_exec 脚本内还可用 ai.read/ai.write/ai.saveas 读文件/导出结果 (二维表自动转 CSV, 覆盖需用户确认, 详见系统提示词); 写出经过以结果 JSON 的 writtenFiles/writesNote 字段回传, 未确认写出成功的文件不要向用户宣称已保存。用户开启「结果同步」时, 本次命中的全部 FileId 会自动重置进其窗口的搜索结果列表 (用户界面立即可见; 结果为 0 = 同步清空该列表)。搜索分类 = 按文件分类预过滤, **支持多选** (字符串用「、」连接如「图片、视频」, 或直接传字符串数组), 每次搜索前都会先设置 (卡片徽标显示实际分类): 缺省跟随当前对话窗口的筛选分类 (环境快照「当前对话窗口筛选」); 也可显式指定一个或多个分类 (分类名取环境快照「可用筛选分类」) 或传「全部」查全库。尽量按用户意图多带分类组合以剔除干扰、提高命中率: 找电影/剧集传「文件夹、视频」, 找歌曲传「文件夹、音频」, 找安装包传「压缩包」。按文件夹归类的内容 (影视/专辑/软件) 常用两段式顺藤摸瓜: 文件夹名含关键词而内部文件名未必含 (如文件夹「电影功夫」内的文件名不含「功夫」) — 先用关键词搜出文件夹, 再用 ParentPath/Path 条件或 SQL 搜它内部的文件, 不要只匹配文件名就断言\"没有\"。尽量减少工具调用: 多个关键词合并成一次搜索 — 纯文件名多词用 wildcard 的「|」或语法 (词1|词2|词3, 空格=且), 需要附加字段条件 (大小/时间/属性/目录) 时才用 SQL, 复杂逻辑用 lua; 不要逐词各调一次; 命中过多 (count 远超回传样本条数, 样本有遗漏) 且已有线索不足以回答时, 再细分收窄 (更具体的关键词/筛选器组合/搜索范围) 分段搜索, 线索够就直接作答。在输入搜索词之前先按分类把范围收窄, wildcard/regex/sql/lua_filter 四种模式均生效, lua_exec 忽略此参数 (脚本即程序, 不设筛选器)。**用户提到某个目录/盘/位置时 (如「在 D 盘里找」「只看这个文件夹」), 用「搜索范围」参数把它变成搜索范围, 而不是写进搜索词** — 白名单外的路径根本不参与搜索, 是引擎级过滤, 比在搜索词里拼 Path LIKE 前置条件更早也更省; 全部五种模式都生效。用户说的目录若不在索引里, 别把它当过滤条件 (会搜出 0 条) — 先用不带该参数的搜索确认这个目录存在、看看里面有什么。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["wildcard","regex","sql","lua_filter","lua_exec"],"description":"wildcard=通配符 regex=PCRE2正则 sql=SELECT语句 lua_filter=过滤模式(Lua 逐文件判断) lua_exec=执行模式(Lua 程序接管搜索)"},"query":{"type":"string","description":"搜索词/脚本全文 (lua 两种模式传完整脚本文本)"},"搜索分类":{"type":"string","description":"按此文件分类(可多个, 用「、」连接)预过滤; 分类名见环境快照「可用筛选分类」; 不传=跟随当前窗口筛选"},"搜索范围":{"type":"array","items":{"type":"object","properties":{"路径":{"type":"string","description":"绝对路径目录 (如 D:\\工作; 区分大小写, 不支持通配符)"},"递归子目录":{"type":"boolean","description":"true=含任意层级子目录 (缺省true); false=仅该目录的直接子项"}},"required":["路径"]},"description":"把搜索**限制在这些目录内**(路径白名单; 同引擎 SearchFilterConfig 的「搜索范围」): 白名单外的路径根本不参与搜索, 比在搜索词里写 Path LIKE 前置条件更早收敛 — 内容搜索(FileContent)必须带路径前置时用它兜底, 全盘统计/lua_exec 也能少扫大量无关子树。可传多个; 不传=全盘。引擎只支持白名单(无排除项), 想「排除某目录」要列其余目录或改用 SQL 的 NOT LIKE。卡片会显示绿色徽标, 命中数只统计范围内的条目"},"样本去重":{"type":"string","enum":["本次搜索过滤","会话过滤","禁止过滤"],"description":"已提交过样本的 ID 不再占样本名额, 样本优先给没提交过的条目 — 多次搜索的可见面互相补全 (仅命中数超过样本上限时生效; 没提交过的不足时回填已见过的, 未溢出保持原顺序)。「本次搜索过滤」= 缺省; 同一次回答里的多次搜索共享去重缓存, 回答完成清空 — 需要多页浏览时连续多次调用即自动翻页; 「会话过滤」= 跨提问记住已提交过的 ID, 适合分多次提问翻遍同一批结果 (切换/删除会话或关闭 AI 助手时清空, 重开会话自动从聊天记录恢复); 「禁止过滤」= 不去重, 按结果顺序取前 N 条; 结果「样本回填」= 因未提交过的不足而回填的已见过条数 (出现即该范围已翻到头)"},"要求返回":{"type":"object","properties":{"子树信息":{"type":"integer","enum":[1,2],"description":"1=统计直接子项 (只看第一层构成, 层级浅/内容一眼可判时用); 2=统计整棵子树 (判断整个文件夹是什么/总量多大/深层有没有目标类型 — 影视合集等文件在深层子文件夹、或顺藤摸瓜决定是否深入时优先 2) (文件夹条目的 附加.子 才会有内容; 只附加信息不改变命中)"},"文件大小":{"type":"boolean","description":"附加自身大小 (字节, 键 sz)"},"创建时间":{"type":"boolean","description":"附加创建时间 (epoch 秒, 键 ct)"},"修改时间":{"type":"boolean","description":"附加修改时间 (epoch 秒, 键 mt)"},"访问时间":{"type":"boolean","description":"附加访问时间 (epoch 秒, 键 at)"},"文件属性":{"type":"boolean","description":"附加属性字母串 R/H/S/D (键 attr)"},"评分":{"type":"boolean","description":"附加文件评分 (键 score)"},"别名":{"type":"boolean","description":"附加别名 (键 alias; 无别名的条目省略)"},"结果统计":{"type":"boolean","description":"附带整个结果集的类型拆分「统计」{文件,文件夹,分类:{...}} — 按类型数数量的统计一次搜索直接拿到, 无需再发第二次搜索/lua (五种模式都生效: lua_exec 是对脚本 return 的 ID 数组统计; 结果为空 count=0 时不给)"}},"description":"按需附加字段, AI 自由选择 (字段开/关以本次搜索时实际状态为准 — 重建索引会随时开/关字段, 未开启的自动省略并在「字段未开启」注明); 没要求的不返回 (ID/路径/是否文件夹恒返回); 要求了未开启字段会自动省略并在结果「字段未开启」注明"}},"required":["mode","query"]}},
   {"type":"function","name":"run_command","description":"执行一条 Windows 命令 (cmd 或 powershell, 静默后台运行不弹窗) 并返回真实输出。用于诊断 (ipconfig/ping/systeminfo)、系统信息查询、以及搜索工具覆盖不到的批量/外部操作。受用户命令执行权限档约束: 「禁用」一律拒绝; 「询问」时本次调用会**暂停**, 命令展示给用户出确认卡 — 用户点「允许一次」后自动继续执行并返回输出 (等待期间不要重复调用), 点「拒绝」则本次调用以失败返回; 会一直等待用户处理, 不会自动超时; 失败后不要换写法重试同类命令, 直接说明并放弃。高危命令 (格式化/递归删除/改注册表/下载执行等) 会在确认卡上标记提醒用户。返回文本: stdout 原文; 有 stderr 时附 [stderr] 分节; 末行 [exit code: N] 仅在非零退出时出现; [timed out ...] = 超时已被强杀; 输出过长只保留尾部并注明丢弃量, 完整输出会存为「外溢文件」并给出路径 (用 read_file 分页读取)。相对路径操作发生在 workdir (默认临时目录)。","parameters":{"type":"object","properties":{"command":{"type":"string","description":"要执行的命令 (cmd 语法; shell=powershell 时传 PowerShell 语句)。多语句用 cmd 的 & 或 PowerShell 的 ; 连接"},"shell":{"type":"string","enum":["cmd","powershell"],"description":"cmd=cmd.exe (默认); powershell=Windows PowerShell"},"description":{"type":"string","description":"一句话说明这条命令做什么 (≤50 字; 会展示给用户帮助其判断是否放行)"},"workdir":{"type":"string","description":"工作目录 (绝对路径; 默认临时目录)。相对路径操作前先设好它"},"timeoutMs":{"type":"integer","description":"超时毫秒 (3000~600000, 默认 120000), 超时进程树被终止"}},"required":["command","description"]}},
   {"type":"function","name":"get_lua_spec","description":"获取 Lua 脚本规范全文 (纯文本, 含 agent 用法适配说明)。规范全文不在系统提示词里 — **写 lua_filter/lua_exec 脚本前先调用一次**取得规范 (系统提示词《Lua 脚本速查》只是要点); 脚本报错需要重读规范、或怀疑取回内容被截断时重新调用。默认返回合集 (两种模式合并去重版); 引擎没有合集时才需要用 mode 单取一份。","parameters":{"type":"object","properties":{"mode":{"type":"string","enum":["lua_filter","lua_exec"],"description":"仅引擎无合集时才需要: 单取哪一份规范"}},"required":[]}},
   {"type":"function","name":"get_author_and_donate","description":"关于作者/软件背景的问题 (作者是谁/这是什么软件/授权与特性), 或用户想捐赠/赞赏/请作者喝咖啡时调用。返回软件与授权的权威介绍 (据此回答, 不编造) 与捐赠二维码的引用方式: 在回答正文里用图片语法 ![微信捐赠码](xjs://donate?kind=wechat) / ![支付宝捐赠码](xjs://donate?kind=alipay), 二维码竖排显示在对话页 (微信优先放最前)。只引用返回中列出的可用项; 图片本体不经过对话文本, 不要把 base64/文件路径写进回答。","parameters":{"type":"object","properties":{},"required":[]}},
@@ -2928,6 +3031,18 @@ static std::wstring BuildEnvSnapshot(const std::wstring& filterCur) {
         s += L"- 当前对话窗口筛选: " + (filterCur.empty() ? std::wstring(L"全部") : filterCur) +
              L" (用户此刻的查看口径, 多选时以「、」并列)\n";
     }
+    /* 搜索范围可用的盘符 (2026-10-08): 白名单按字面路径匹配, 模型得先知道有哪些盘可写,
+       否则只能靠猜。规则在工具描述, 这里只给可用根 — 目录多半是用户上下文里已出现的。 */
+    {
+        std::wstring roots;
+        wchar_t buf[8];
+        for (int i = 0; i < 26; i++) {
+            swprintf(buf, 8, L"%c:\\", L'A' + i);
+            if (GetDriveTypeW(buf) == DRIVE_FIXED) { if (!roots.empty()) roots += L"、"; roots += buf; }
+        }
+        if (roots.empty()) roots = L"(未检测到固定磁盘)";
+        s += L"- 可用于「搜索范围」的盘符 (固定盘): " + roots + L"\n";
+    }
     return s;
 }
 
@@ -3002,6 +3117,8 @@ static std::string HistStepArgsOf(const AiToolStep& t) {
         if (!t.mode.empty()) o["mode"] = JS(t.mode);
         if (!t.query.empty()) o["query"] = JS(t.query);
         if (!t.filter.empty()) o["搜索分类"] = JS(t.filter);
+        /* 搜索范围 = 引擎 JSON 原文 (UTF-8); 插件侧参数名与引擎侧 JSON 键同名 */
+        if (!t.scope.empty()) o["搜索范围"] = picojson::value(t.scope);
     } else if (t.kind == 11) {              /* run_command */
         o["shell"] = JS(t.mode.empty() ? std::wstring(L"cmd") : t.mode);
         o["command"] = JS(t.query);

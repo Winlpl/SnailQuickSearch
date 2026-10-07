@@ -41,7 +41,10 @@ void XjsChromeLayout() {
     L.listHead = XjsRectF(0, XSF(40), listRight, XSF(40) + XSF(headH));
     L.statusbar = XjsRectF(0, L.h - sbH, L.w, L.h);
     L.list = XjsRectF(0, L.listHead.bottom, listRight, L.statusbar.top);
-    L.vtrack = XjsRectF(listRight - XSF(17), L.list.top + XSF(2), listRight - XSF(3), L.list.bottom - XSF(6));
+    /* 纵向滚动条带: 左缘 -14 (带宽 11), thumb 恒贴带右缘(右缩 3) 宽 8 → 带内 thumb 左侧余量 3px。
+       原左缘 -17(带宽 14) 时内容裁剪边(带左缘)到 thumb 左缘有 6px 空带, 视觉偏宽 → 收紧 3px
+       (2026-10-07)。带右缘维持 -3: thumb 右缘距窗口边仍 3px, 与横条右端同一对齐口径 */
+    L.vtrack = XjsRectF(listRight - XSF(14), L.list.top + XSF(2), listRight - XSF(3), L.list.bottom - XSF(6));
 
     /* 标题栏: 图标 + ☰菜单 + 搜索框 + 筛选下拉 + 窗口按钮 */
     float iconSize = XSF(22);
@@ -831,6 +834,8 @@ void XjsChromeRenderTitlebar() {
 
 /* ==================== 状态栏 ==================== */
 
+static void XjsRenderSbDragGhost();   /* 拖动幽灵+插入指示 (本文件下方实现; 渲染帧先于项文本调用) */
+
 /* 右侧功能按钮: 工具箱 + 插件状态栏项 (空间地图等入口由插件 statusBar 能力提供) */
 static void XjsStatusButton(const XjsRect& r, int hoverFlag, const wchar_t* text, int iconKind) {
     bool hov = (g_hoverStatus == hoverFlag);
@@ -850,6 +855,53 @@ static void XjsStatusButton(const XjsRect& r, int hoverFlag, const wchar_t* text
         XjsRectF(tx, r.top, r.right, r.bottom), bc);
 }
 
+/* 插件状态栏项 (statusBar 能力, 2026-09-19): 分两段排布 —— 右段紧邻工具箱向左排, 左段接在右段
+   左侧继续向左排 (直到状态文字锚点); 用户可拖动换位与换段 (2026-10-07 用户口径)。
+   【槽位序 = x 单调递减】是本布局的硬约束: 槽 0 最靠工具箱, 下标越大越靠左。两条推论:
+     - 拖动落点判定可直接扫槽中点 (XjsSbDropIndex), 不必管项在左段还是右段;
+     - 两段必须同向排 —— 左段若自左锚点向右排, 槽序与 x 就反了, 落点判定随之错位。
+   宽 = 文字实测 + 内边距; 右段受"状态栏宽 40%"预算与左锚点双重约束, 左段受左锚点约束, 超出按序截断。
+   几何写回 g_layout.sbPlugin[]/sbPluginLeftN — 悬停/命中/落地/拖动四处同读 (列几何同源纪律)。
+   拖动中 (g_sbDragging): 被拖项从原位挖空, 幽灵跟手另绘于 XjsRenderSbDragGhost。 */
+static void XjsLayoutStatusbarPlugins(float leftAnchor, float bx, float by, float bh) {
+    XjsLayout& L = g_layout;
+    L.sbPluginN = 0;
+    L.sbPluginLeftN = 0;
+    if (!XjsPluginActiveCap(XPC_STATUSBAR)) return;
+    float budget = (L.w - XSF(32)) * 0.40f;
+    int n = XjsPluginStatusBarCount();
+    /* 先量全部项宽 (两段都靠它), 再定左右段分界 */
+    float w[8];
+    int cnt = 0;
+    for (int i = 0; i < n && cnt < 8; i++) {
+        XjsPluginStatusBarDef d;
+        if (!XjsPluginStatusBarAt(i, &d) || d.label.empty()) continue;
+        w[cnt++] = XjsMeasureText(d.label.c_str(), g_tfMenu) + XSF(18);
+    }
+    /* 右段: 自工具箱左侧向左排, 直到撞上左锚点或预算耗尽。
+       边排边落槽 (不可排完再拿最终 rx 回填 —— 那样每项都会用同一个左缘, 视觉上全部重叠) */
+    float rx = bx;
+    int rightN = 0;
+    for (int k = 0; k < cnt; k++) {
+        if (w[k] > budget) break;
+        if (rightN && rx - w[k] - XSF(8) < leftAnchor) break;
+        if (rightN) rx -= XSF(8);
+        rx -= w[k];
+        L.sbPlugin[k] = XjsRectF(rx, by, rx + w[k], by + bh);   /* 槽 k = 第 k 个排的项 */
+        budget -= w[k];
+        rightN++;
+    }
+    /* 左段: 接在右段左缘继续向左排, 不越过状态文字锚点 (越界即截断, 同预算截断口径) */
+    float lx = (rightN ? L.sbPlugin[rightN - 1].left : bx) - XSF(8);
+    for (int k = rightN; k < cnt; k++) {
+        if (lx - w[k] < leftAnchor) break;
+        L.sbPlugin[k] = XjsRectF(lx - w[k], by, lx, by + bh);
+        lx -= XSF(8);
+        L.sbPluginLeftN++;
+    }
+    L.sbPluginN = rightN + L.sbPluginLeftN;
+}
+
 void XjsRenderStatusbar() {
     XjsLayout& L = g_layout;
     g_rt->FillRectangle(XjsRectF(0, L.statusbar.top, L.w, L.statusbar.top + 1), g_br[XTH_BORDER]);
@@ -862,48 +914,39 @@ void XjsRenderStatusbar() {
         XjsDrawSpinner(XjsPoint2F(x + XSF(7), mid), XSF(6), phase);
         x += XSF(24);
     }
+    /* 状态文字右缘 = 左段锚点 (实测推进 x, 不再用估算常数; 拖到左段的项排在此之后) */
     if (!g_errText.empty()) {
         g_rt->DrawText(g_errText.c_str(), (UINT32)g_errText.length(), g_tfStatus,
             XjsRectF(x, L.statusbar.top, L.w - XSF(320), L.statusbar.bottom), g_br[XTH_HL]);
+        x += XjsMeasureText(g_errText.c_str(), g_tfStatus);
     } else {
         g_rt->DrawText(g_statusText.c_str(), (UINT32)g_statusText.length(), g_tfStatus,
             XjsRectF(x, L.statusbar.top, L.w - XSF(320), L.statusbar.bottom), g_br[XTH_TEXT_FAINT]);
+        x += XjsMeasureText(g_statusText.c_str(), g_tfStatus);
     }
     /* · 已选中 N 项 (accent; 源样式 Search.SelectedCount, 仅多选时显示; 计数回读引擎选中_取数量) */
     int selCount = XjsSelCount();
     if (selCount > 1) {
         std::wstring sel = XjsFmt(XjsT(L"状态栏.已选中N项"), XjsNumText((long long)selCount));
         float sw = XjsMeasureText(sel.c_str(), g_tfStatus);
-        float baseX = x;
-        if (g_errText.empty()) baseX += XjsMeasureText(g_statusText.c_str(), g_tfStatus);
         g_rt->DrawText(sel.c_str(), (UINT32)sel.length(), g_tfStatus,
-            XjsRectF(baseX + XSF(16), L.statusbar.top, baseX + XSF(16) + sw + XSF(4), L.statusbar.bottom), g_br[XTH_ACCENT]);
+            XjsRectF(x + XSF(16), L.statusbar.top, x + XSF(16) + sw + XSF(4), L.statusbar.bottom), g_br[XTH_ACCENT]);
+        x += XSF(16) + sw + XSF(4);
     }
     /* 右侧按钮 */
     float by = L.statusbar.top + XSF(5), bh = XSF(26);
     float bx = L.w - XSF(16);
     L.sbToolbox = XjsRectF(bx - XSF(78), by, bx, by + bh); bx -= XSF(84);
+    XjsLayoutStatusbarPlugins(x + XSF(20), bx, by, bh);
     XjsStatusButton(L.sbToolbox, 3, XjsT(L"状态栏.工具箱"), 2);
-    /* 插件状态栏项 (statusBar 能力, 2026-09-19): 内置组左侧向左排, 右对齐依次向左;
-       宽 = 文字实测 + 内边距, 总宽上限 = 状态栏宽 40% 超出按序截断。
-       几何写回 g_layout.sbPlugin[] — 悬停/命中/落地三处同读 (列几何同源纪律) */
-    L.sbPluginN = 0;
-    if (XjsPluginActiveCap(XPC_STATUSBAR)) {
-        float budget = (L.w - XSF(32)) * 0.40f;
-        int n = XjsPluginStatusBarCount();
-        for (int i = 0; i < n && L.sbPluginN < 8; i++) {
-            XjsPluginStatusBarDef d;
-            if (!XjsPluginStatusBarAt(i, &d) || d.label.empty()) continue;
-            float tw = XjsMeasureText(d.label.c_str(), g_tfMenu) + XSF(18);
-            if (tw > budget) break;
-            budget -= tw;
-            bx -= XSF(8);   /* 与左侧邻项间距 */
-            L.sbPlugin[L.sbPluginN] = XjsRectF(bx - tw, by, bx, by + bh);
-            bx -= tw;
-            XjsStatusButton(L.sbPlugin[L.sbPluginN], 100 + L.sbPluginN, d.label.c_str(), -1);
-            L.sbPluginN++;
-        }
+    /* 插件项文本 (悬停高亮同源; 拖动中的原位留空, 由幽灵与指示线接管) */
+    for (int i = 0; i < L.sbPluginN; i++) {
+        if (g_sbDragging && i == g_sbDragIdx) continue;
+        XjsPluginStatusBarDef d;
+        if (!XjsPluginStatusBarAt(i, &d) || d.label.empty()) continue;
+        XjsStatusButton(L.sbPlugin[i], 100 + i, d.label.c_str(), -1);
     }
+    XjsRenderSbDragGhost();
 }
 
 /* ==================== 悬停状态 ==================== */
@@ -949,6 +992,125 @@ void XjsUpdateHoverState(POINT pt) {
         g_listHover = inList;
         XjsSearchWindow::Cur()->Invalidate();
     }
+}
+
+/* ==================== 状态栏插件项拖动排序 ====================
+ * 2026-10-07 用户口径: 插件状态栏项可由用户自己拖动调整位置 (可换序, 也可拖到状态文字之后的左段)。
+ * 手势: 按下命中项 = 记待定 + SetCapture (与松开触发命令并存); 移动越阈 (>5px 曼哈顿, 同列表
+ * 打开待定口径) = 转真拖动, 此后命令让位给排序; 松开落新槽 → 写顺序表 + 落盘, 落回原槽 = 触发命令。
+ * 几何三处同源 = g_layout.sbPlugin[] (渲染帧现算) + sbPluginLeftN (左右段分界), 不另存一份矩形。
+ * 拖动中不做实时换位 (那样每帧要重排全表), 只画"跟手幽灵 + 插入指示线", 松开才落定。 */
+
+/* 拖动越阈判定 (曼哈顿距离, 同 XjsList 单击打开待定口径) */
+static bool XjsSbDragPassed(POINT a, POINT b) {
+    return abs(b.x - a.x) + abs(b.y - a.y) > 5;
+}
+
+/* 拖动落点 → 目标槽下标 (0..N-1, 即该项落定后的槽位)。
+   依赖布局的"槽位序 = x 单调递减"硬约束 (见 XjsLayoutStatusbarPlugins): 落在某槽中点左侧
+   = 想排到它前面。故"指针右侧还剩几项"就是目标下标 —— 拖到最左 (工具箱左侧) = 0,
+   拖到最右 (状态文字之后) = N-1。跳过被拖项自身, 否则它会把自己算成一个"挡在前面"的项。 */
+static int XjsSbDropIndex(POINT pt) {
+    XjsLayout& L = g_layout;
+    int n = L.sbPluginN;
+    int idx = 0;
+    for (int i = 0; i < n; i++) {
+        if (i == g_sbDragIdx) continue;                    /* 自身不参与 */
+        if (pt.x >= (L.sbPlugin[i].left + L.sbPlugin[i].right) / 2) idx++;
+        else break;                                        /* 槽序单调, 到此为止 */
+    }
+    return ximin(n - 1, idx);
+}
+
+bool XjsStatusbarPluginDragActive() {
+    return g_sbDragging;
+}
+
+bool XjsStatusbarPluginDragDown(POINT pt) {
+    XjsLayout& L = g_layout;
+    if (pt.y < L.statusbar.top || pt.y > L.statusbar.bottom) return false;
+    for (int i = 0; i < L.sbPluginN; i++) {
+        if (!XjsPtIn(L.sbPlugin[i], pt)) continue;
+        g_sbDragIdx = i;
+        g_sbDragTo = i;
+        g_sbDragging = false;
+        g_sbDragFromPt = pt;
+        g_sbDragPt = pt;
+        SetCapture(g_hWnd);
+        return true;
+    }
+    return false;
+}
+
+bool XjsStatusbarPluginDragMove(POINT pt) {
+    if (g_sbDragIdx < 0) return false;
+    g_sbDragPt = pt;
+    if (!g_sbDragging) {
+        if (!XjsSbDragPassed(g_sbDragFromPt, pt)) return true;   /* 未越阈: 仍是待定点击, 不重绘 */
+        g_sbDragging = true;
+    }
+    g_sbDragTo = XjsSbDropIndex(pt);
+    XjsSearchWindow::Cur()->Invalidate();
+    return true;
+}
+
+bool XjsStatusbarPluginDragUp(POINT pt) {
+    int from = g_sbDragIdx;
+    if (from < 0) return false;
+    bool wasDrag = g_sbDragging;
+    int target = wasDrag ? XjsSbDropIndex(pt) : from;
+    g_sbDragIdx = -1;
+    g_sbDragTo = -1;
+    g_sbDragging = false;
+    XjsLayout& L = g_layout;
+    if (!wasDrag) {
+        /* 未越阈 = 普通点击: 落回原槽才触发插件命令 (拖离取消, 同其余松开触发口径) */
+        if (from < L.sbPluginN && XjsPtIn(L.sbPlugin[from], pt)) {
+            XjsPluginStatusBarCommand(from, XjsPluginCurWindowToken());
+            XjsSearchWindow::Cur()->Invalidate();
+        }
+        return true;
+    }
+    /* 拖动落定: target 已是最终槽位, 直接交给顺序表换位 (落回原位 = 无操作, 不落盘) */
+    if (target >= 0 && target != from && target < L.sbPluginN) {
+        XjsPluginStatusBarOrderMove(from, target);
+        XjsSaveConfig();   /* 用户排序 = 用户偏好, 即时落盘 (同置顶口径) */
+    }
+    XjsSearchWindow::Cur()->Invalidate();
+    return true;
+}
+
+/* 拖动视觉: 插入指示竖线 (accent, 2px, 状态栏按钮带内高) + 跟手幽灵 (半透明底 + 描边 + 文字) */
+void XjsRenderSbDragGhost() {
+    if (!g_sbDragging || g_sbDragIdx < 0) return;
+    XjsLayout& L = g_layout;
+    if (g_sbDragIdx >= L.sbPluginN) return;
+    /* 插入指示线: 画在"目标槽左缘" —— 槽序 x 单调递减, 故目标槽的右邻 (下标 to-1) 的左缘
+       就是它将要落入的缝; to=0 (排最靠工具箱) 时贴工具箱左缘。 */
+    int to = ximax(0, ximin(L.sbPluginN - 1, g_sbDragTo));
+    float ix;
+    if (to <= 0) ix = (L.sbPluginN ? L.sbPlugin[0].right : L.sbToolbox.left) + XSF(4);
+    else ix = L.sbPlugin[to - 1].left;
+    float iy = L.statusbar.top + XSF(5), ih = XSF(26);
+    XjsColor line = g_skin.accent;
+    g_rt->FillRectangle(XjsRectF(ix - XSF(1), iy, ix + XSF(1), iy + ih),
+        XjsTempBrush(XjsColor(line.r, line.g, line.b, 0.85f)));
+    /* 幽灵: 半透明底 + accent 描边圆角 + 文字, 贴指针上方居中 */
+    XjsPluginStatusBarDef d;
+    if (!XjsPluginStatusBarAt(g_sbDragIdx, &d) || d.label.empty()) return;
+    float gw = L.sbPlugin[g_sbDragIdx].right - L.sbPlugin[g_sbDragIdx].left;
+    float gh = XSF(26);
+    float gx = (float)g_sbDragPt.x - gw / 2;
+    float gy = L.statusbar.top + XSF(5);
+    XjsRect gr = XjsRectF(gx, gy, gx + gw, gy + gh);
+    XjsColor base = g_skin.panel;
+    g_rt->FillRoundedRectangle(XjsRoundedRectF(gr, XSF(6), XSF(6)),
+        XjsTempBrush(XjsColor(base.r, base.g, base.b, 0.92f)));
+    XjsColor ac = g_skin.accent;
+    g_rt->DrawRoundedRectangle(XjsRoundedRectF(gr, XSF(6), XSF(6)),
+        XjsTempBrush(XjsColor(ac.r, ac.g, ac.b, 0.9f)), 1.2f);
+    g_rt->DrawText(d.label.c_str(), (UINT32)d.label.length(), g_tfMenu,
+        XjsRectF(gr.left + XSF(10), gr.top, gr.right, gr.bottom), g_br[XTH_TEXT]);
 }
 
 /* ==================== 鼠标 ==================== */

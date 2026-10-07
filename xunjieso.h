@@ -329,6 +329,8 @@ XJS_API BOOL XJS_CALL xjs_ResultIsExist(xjs_engine* engine, xjs_result* result);
 
 // 获取引擎内部当前正被搜索线程处理的结果对象(不一定是"最近发起搜索的"那个)
 // 没有搜索在运行时返回 nullptr
+// 并发契约: 返回的是裸指针, 引用计次由搜索线程持有——返回后该对象的搜索随时可能结束并被并发销毁,
+//          指针不可解引用; 只可与 xjs_Lock 作用域/xjs_ResultIsExist 配对使用(同值校验)或仅作身份比较
 XJS_API xjs_result* XJS_CALL xjs_GetCurrentSearchObject(xjs_engine* engine);
 
 // 判断引擎是否正在枚举磁盘(加载数据库或扫描分区).返回 TRUE=正在枚举/加载
@@ -1007,6 +1009,16 @@ XJS_API int XJS_CALL xjs_result_Query(
                          // keywordType=-4 时 searchWord 为 Lua 脚本(UTF-8): 脚本自主遍历数据库(db表)/读取当前结果(res表)/自主排序, return 的 ID 数组(及其顺序)就是最终搜索结果;
                          // 搜索线程单线程驱动, 全程引擎读锁, 看门狗总预算10秒; 结果顺序=脚本自定义序(乱序), 删除同步走乱序位图, 新建/修改/重命名不同步(重新执行刷新);
                          // 失败触发 SearchFailed 事件(错误JSON 错误类型="Lua执行错误"); 脚本环境见 Lua脚本示例 目录
+    const char* SearchFilterConfig, // 可空(NULL=不过滤); 一旦给了范围条件, 不在条件内的路径都不参与本次搜索
+                                    //   `搜索范围`(路径白名单), 路径区分大小写, 不支持通配符; JSON 文本(UTF-8)如下:
+                                    //   {
+                                    //      "搜索范围":[
+                                    //         {
+                                    //            "路径": "C:\\",     // 起始目录
+                                    //            "递归子目录":true  // true: 匹配任意层级子目录内的数据; false: 仅匹配当前目录
+                                    //         }
+                                    //      ]
+                                    //   }
     BOOL waitComplete    // 真=阻塞等待搜索完成; 主线程禁止使用(会被拦截返回-1, 错误码=71)
 );
 
@@ -1189,6 +1201,7 @@ XJS_API int XJS_CALL xjs_result_AddBoostExt(xjs_result* result, const char* Ext,
 // 移除搜索结果 从搜索结果中，移除指定ID, 返回实际移除数量.
 // idArray: 文件ID数组
 // count: 数组长度
+// 注意: idArray==NULL 时忽略 count, 语义为"清空整个结果集"(SDK 层对此有防护注释); 传 NULL,0 不会是"移除0个"
 XJS_API int XJS_CALL xjs_result_RemoveFileId(xjs_result* result, const int* idArray, int count);
 
 // 重置搜索结果ID, 不可在搜索过程中调用.通常用于`搜索完成事件`

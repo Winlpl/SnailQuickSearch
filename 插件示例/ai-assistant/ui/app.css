@@ -433,6 +433,8 @@ textarea,input{user-select:text;-webkit-user-select:text}
         color:color-mix(in srgb,var(--accent-violet) 80%,var(--text-primary));font-size:10px;line-height:1.6}
 .sflt{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-cyan) 16%,transparent);
       color:color-mix(in srgb,var(--accent-cyan) 80%,var(--text-primary));font-size:10px;line-height:1.6}
+.sscope{flex:0 0 auto;padding:0 5px;border-radius:3px;background:color-mix(in srgb,var(--accent-emerald) 16%,transparent);
+      color:color-mix(in srgb,var(--accent-emerald) 80%,var(--text-primary));font-size:10px;line-height:1.6}
 .scmd{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
       color:var(--text-secondary);font-family:Consolas,'Cascadia Mono',monospace;font-size:11px}
 .sst{flex:0 0 auto;color:var(--text-tertiary);font-size:10px;font-variant-numeric:tabular-nums}

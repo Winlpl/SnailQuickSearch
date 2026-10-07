@@ -81,9 +81,19 @@ static void XjsPopupFreeResources(XjsPopupState* p) {
  * 同一弹窗窗口内右邻面板 (不另开窗口): LL 点外钩子/前台管理/WM_POPUP_RESULT 回传全部复用。
  * 面板几何: 根面板 [0, width), 子面板 [width, width+subW); 行高/间距与根面板同款 */
 
-/* 行文字区左缩进 (渲染/宽度测量同源): 带图标 = 图标槽+间距 (同源样式 padding 10 + gap 10); 无图标 = 勾选槽位 */
-static float XjsPopupRowIndent(const XjsPopupItem& it) {
-    return it.icon ? XSF(36) : XSF(26);
+/* 面板是否含图标项 (缩进统一的前置): 面板内任一行带图标 = 整面板按图标槽缩进,
+   避免同面板内无图标行文字左移 10px 不成列 (2026-10-07 用户截图: 插件项"SQL 生成器"
+   比内置剪切/复制/粘贴整行左移)。勾选项按内容行参与判定, 分隔线/分组标签不算 */
+static bool XjsPopupPanelHasIcon(const std::vector<XjsPopupItem>& v) {
+    for (const auto& it : v)
+        if (!it.sep && !it.header && it.icon) return true;
+    return false;
+}
+
+/* 行文字区左缩进 (渲染/宽度测量同源): 带图标 = 图标槽+间距 (同源样式 padding 10 + gap 10);
+   无图标 = 勾选槽位。panelHasIcon = 整面板统一口径 (见上), 混排时也走 36 保证文字列对齐 */
+static float XjsPopupRowIndent(const XjsPopupItem& it, bool panelHasIcon) {
+    return (it.icon || panelHasIcon) ? XSF(36) : XSF(26);
 }
 
 /* 行文字区右缘让位 (渲染/宽度测量同源): ✎✕ 双按钮 62 / 仅 ✕ 34 / 子菜单父项 ▸ 22 / 无尾部 = 右缘留白 10 */
@@ -121,13 +131,14 @@ static void XjsPopupLayoutSub(XjsPopupState* p) {
         p->ySub.push_back(p->ySub.back() + (it.sep ? XSF(9) : XSF(28)));
     p->subH = p->ySub.back() + pad;
     float tw = XSF(140);
+    bool hasIcon = XjsPopupPanelHasIcon(ch);
     if (p->tfTitle) {
         for (auto& it : ch) {
             if (it.title.empty()) continue;
             /* 行内容宽 = 左缩进 + 标题 + 快捷键段 + 右让位 (与 drawRow 几何同源);
                漏算快捷键 = 标题省略号右缘正好压在快捷键上 (窗口启动器子菜单"新建空白窗口 Ctrl+N"实锤);
                sub 让位与绘制侧同钳 XJS_POPUP_SUB_MAX, 超宽描述不把子面板白白撑到上限 */
-            float need = pad * 2 + XjsPopupRowIndent(it)
+            float need = pad * 2 + XjsPopupRowIndent(it, hasIcon)
                        + XjsMeasureText(it.title.c_str(), p->tfTitle) + XjsPopupRowTail(it);
             if (!it.sub.empty() && it.children.empty() && p->tfKb)
                 need += xf_min(XjsMeasureText(it.sub.c_str(), p->tfKb), XSF(XJS_POPUP_SUB_MAX)) + XSF(12);
@@ -397,6 +408,19 @@ static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
             poly(XjsMenuDonateHandPts, (int)(sizeof(XjsMenuDonateHandPts) / sizeof(float) / 2));
             break;
         }
+        case XMI_PLUGIN: {   /* 插件贡献项: 拼图块 (顶边+右边各一个凸榫, 凸榫按 r=1.5 半圆取 3 段弦线近似,
+                               圆头描边; 源样式 ctx-ic 无此图标, 按同族线段风格自绘)。
+                               带此项 = 行缩进落到 36 (XjsPopupRowIndent), 插件项文字才与内置项同列 */
+            const float pp[] = {
+                2.5f, 3.5f, 6.5f, 3.5f, 6.94f, 2.44f, 8.0f, 2.0f, 9.06f, 2.44f, 9.5f, 3.5f,
+                13.5f, 3.5f, 13.5f, 7.25f, 14.56f, 7.69f, 15.0f, 8.75f, 14.56f, 9.81f,
+                13.5f, 10.25f, 13.5f, 12.5f, 2.5f, 12.5f, 2.5f, 3.5f
+            };
+            const int np = (int)(sizeof(pp) / sizeof(float) / 2);
+            for (int i = 0; i < np; i++)
+                seg(pp[i * 2], pp[i * 2 + 1], pp[(i + 1) % np * 2], pp[(i + 1) % np * 2 + 1], wSB);
+            break;
+        }
     }
 }
 
@@ -469,9 +493,10 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             }
             float pad = XSF(5);
             float rootW = p->width;   /* 根面板右缘: 子面板展开时窗口总宽 > rootW, 不能用像素宽 w */
-            /* 单行绘制 (根面板/子面板共用): x0..x1=面板行区, pw=面板几何宽 (尾部按钮用), hovered=悬停高亮 */
+            /* 单行绘制 (根面板/子面板共用): x0..x1=面板行区, pw=面板几何宽 (尾部按钮用), hovered=悬停高亮
+               panelHasIcon = 该面板是否含图标项 (缩进整面板统一, 见 XjsPopupRowIndent 注) */
             auto drawRow = [&](const XjsPopupItem& it, float x0, float x1, float pw, float y0, float y1,
-                               bool hovered, bool confirming) {
+                               bool hovered, bool confirming, bool panelHasIcon) {
                 if (it.sep) {
                     p->rt->FillRectangle(XjsRectF(x0 + XSF(6), (y0 + y1) / 2, x1 - XSF(6), (y0 + y1) / 2 + 1), p->brBorder);
                     return;
@@ -484,8 +509,9 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 }
                 if (hovered && !it.disabled)
                     p->rt->FillRoundedRectangle(XjsRoundedRectF(XjsRectF(x0, y0 + XSF(2), x1, y1 - XSF(2)), XSF(6), XSF(6)), p->brHover);
-                /* 文字缩进: 带图标 = 图标槽+间距 (同源样式 padding 10 + gap 10); 无图标 = 勾选槽位 */
-                float tx = x0 + XjsPopupRowIndent(it);
+                /* 文字缩进: 带图标 = 图标槽+间距 (同源样式 padding 10 + gap 10); 无图标 = 勾选槽位;
+               混排面板整列统一走 36 (panelHasIcon), 无图标的行不另起一列 */
+                float tx = x0 + XjsPopupRowIndent(it, panelHasIcon);
                 if (it.checked) {
                     XjsPoint2 c = { x0 + XSF(14), (y0 + y1) / 2 };
                     float r = XSF(3.4f);
@@ -563,18 +589,20 @@ static LRESULT CALLBACK Xjs_PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     }
                 }
             };
+            bool rootHasIcon = XjsPopupPanelHasIcon(p->items);
             for (int i = 0; i < (int)p->items.size(); i++) {
                 bool confirming = (p->delConfirm == i);
-                drawRow(p->items[i], pad, rootW - pad, rootW, p->y[i], p->y[i + 1], i == p->hover, confirming);
+                drawRow(p->items[i], pad, rootW - pad, rootW, p->y[i], p->y[i + 1], i == p->hover, confirming, rootHasIcon);
             }
             if (p->openSub >= 0 && p->subItems) {
                 /* 子面板: 左缘分隔线 + 行绘制 (子面板行无删除确认态) */
                 XjsSizeU wsz = p->rt->GetPixelSize();
                 p->rt->FillRectangle(XjsRectF(rootW, pad, rootW + 1, (float)wsz.height - pad), p->brBorder);
                 const std::vector<XjsPopupItem>& ch = *p->subItems;
+                bool subHasIcon = XjsPopupPanelHasIcon(ch);
                 for (int j = 0; j < (int)ch.size(); j++)
                     drawRow(ch[j], rootW + pad, rootW + p->subW - pad, rootW + p->subW,
-                            p->ySub[j], p->ySub[j + 1], j == p->hoverSub, false);
+                            p->ySub[j], p->ySub[j + 1], j == p->hoverSub, false, subHasIcon);
             }
             HRESULT hr = p->rt->EndDraw();
             if (hr == (HRESULT)D2DERR_RECREATE_TARGET) {

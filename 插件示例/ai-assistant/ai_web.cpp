@@ -768,6 +768,33 @@ static void StepsHtml(const AiMsg& m, int mi, std::wstring* out) {
             HtmlEscape(out, f);
             *out += L"</span>";
         }
+        /* 搜索范围徽标 (绿, 与筛选分类区分): st.scope 存的是引擎 JSON 原文, 这里取出
+         * 路径拼成显示形 ("D:\工作、E:\素材"), 长的截显; data-scope 存全文供 title */
+        if (st.kind == 0 && !st.scope.empty()) {
+            std::wstring disp;
+            {
+                Jv sv = JsonParseW(W8(st.scope.c_str()));
+                const Jv* ip = sv.Get(L"搜索范围");   /* 引擎键名 */
+                if (ip && ip->t == 4) {
+                    for (auto& e : ip->arr) {
+                        if (e.t != 5) continue;
+                        std::wstring p = TrimW(e.S(L"路径"));
+                        if (p.empty()) continue;
+                        if (!disp.empty()) disp += L"、";
+                        const Jv* r = e.Get(L"递归子目录");
+                        bool rec = !(r && ((r->t == 1 && !r->b) || (r->t == 2 && r->num == 0)));
+                        disp += rec ? p : (p + L"\\*");
+                    }
+                }
+            }
+            if (!disp.empty()) {
+                *out += L"<span class=\"sscope\" title=\"搜索范围\">";
+                std::wstring d = disp;
+                if (d.size() > 48) { d.resize(48); d += L"…"; }
+                HtmlEscape(out, d);
+                *out += L"</span>";
+            }
+        }
         *out += L"<span class=\"scmd\">";
         if (cmd.size() > 200) { cmd.resize(200); cmd += L"…"; }
         HtmlEscape(out, cmd);
@@ -2583,7 +2610,7 @@ void WebCommand(AiSess* s, const Jv& msg) {
                 si >= 0 && si < (int)s->msgs[mi].steps.size() &&
                 s->msgs[mi].steps[si].kind == 0) {
                 const AiToolStep& st = s->msgs[mi].steps[si];
-                std::wstring err = AgentManualExec(s->tok, st.mode, st.query, st.filter);
+                std::wstring err = AgentManualExec(s->tok, st.mode, st.query, st.filter, st.scope);
                 if (!err.empty())
                     WebToast(s, U8(err).c_str(), XJS_PLUGIN_TOAST_WARN);
                 else

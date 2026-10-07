@@ -225,9 +225,11 @@ void XjsGetColumnRects(float listWidth, bool listView, float* xs, float* ws) {
     XjsClampHScroll(listView);
     double pad = XSF(12);
     /* 垂直滚动条显示时右侧让位 (源样式 has-vscroll: 右 padding 20→34)。
-       不让位则末列右缘伸进 vtrack 命中区 ~5px, 有纵向溢出时点行尾会误触发翻页 */
+       不让位则末列右缘伸进 vtrack 命中区 ~2px, 有纵向溢出时点行尾会误触发翻页。
+       让位量随 vtrack 带宽(11)同步收紧 (2026-10-07, 原 14): 末列右缘距命中区左缘留 8px,
+       视觉空带不再偏宽 */
     double rightPad = pad;
-    if (XjsVScrollVisible()) rightPad += XSF(14);
+    if (XjsVScrollVisible()) rightPad += XSF(10);
     double avail = (double)listWidth - pad - rightPad;
     double fixedSum = 0, frSum = 0, flexNeed = 0;
     for (int i = 0; i < V.n; i++) {
