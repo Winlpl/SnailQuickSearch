@@ -23,6 +23,13 @@ if not exist "..\..\xjs_plugin_sdk.h" (
     pause
     exit /b 1
 )
+:: Engine straight-link (same policy as ai-assistant): include xunjieso.h, link the
+:: import lib at the repo root - the loader binds to the instance the host loaded.
+if not exist "..\..\xunjieso.lib" (
+    echo ERROR: xunjieso.lib not found at ..\..\  - the engine SDK files live in the repo root.
+    pause
+    exit /b 1
+)
 
 :: Language packs (Sg section of the original language files) = RCDATA 301..305.
 if not exist "lang\zh-CN.json" (
@@ -40,7 +47,8 @@ if errorlevel 1 (
 cl /nologo /EHsc /std:c++20 /O2 /MP /Zi /Fd:sql-generator.pdb /utf-8 /MT /DUNICODE /D_UNICODE /LD ^
    sql_generator.cpp ^
    sqlgen_ui.res ^
-   /link /OUT:sql-generator.dll user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib gdiplus.lib dwmapi.lib imm32.lib shlwapi.lib
+   /link /OUT:sql-generator.dll user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib gdiplus.lib dwmapi.lib imm32.lib shlwapi.lib ^
+   ..\..\xunjieso.lib
 if errorlevel 1 (
     echo Build failed!
     pause

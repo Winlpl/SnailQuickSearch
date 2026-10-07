@@ -15,7 +15,10 @@
  *   - 接管型搜索模式 kw-sql: 窗口开着 = 填预览框并执行 (原版宿主转发语义); 没开 = 直接执行;
  *   - 皮肤 = GetSkinJsonOf(owner) 七色 + 派生 (panel-2/border-strong/text-faint 混合系数按默认皮肤
  *     实测值标定), EVT_SKIN 重取重绘;
- *   - SQL 预览 = 自绘多行编辑器 (等宽字体/光标/选区/剪贴板/IME/滚动), 文本可改后执行。
+ *   - SQL 预览 = 自绘多行编辑器 (等宽字体/光标/选区/剪贴板/IME/滚动), 文本可改后执行;
+ *   - 文件类型分类 = 引擎筛选器配置现取 (xjs_filter_GetFilterJSON, 用户可自定义, 禁写死):
+ *     窗口打开/展开下拉/套用模板/触发接管模式时刷新; 视频类缺失时"大视频"模板与 kw-sql
+ *     模式自动去掉类型条件, 保证生成的 SQL 在该分类表下仍可执行;
  * 线程: 宿主回调全部 UI 线程, 无自建线程。
  */
 #define NOMINMAX
@@ -31,8 +34,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwctype>
 
 #include "../../xjs_plugin_sdk.h"
+#include "../../picojson.h"       /* JSON 唯一入口 (根目录 picojson; 与 ai-assistant 同口径) */
+#include "../../xunjieso.h"       /* 引擎直连: 文件类型分类现取 (宿主进程已加载同一实例) */
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -418,10 +424,85 @@ static const struct { const wchar_t* d; const char* k; } WT_DEFS[WT_N] = {
 };
 static std::wstring WTypeName(int t) { return SG(WT_DEFS[t].k, WT_DEFS[t].d); }
 
-/* 文件类型 9 类 (FILE_TYPES / FILE_TYPE_KEYS) */
-static const wchar_t* const FILE_TYPES[9] = { L"视频", L"音频", L"图片", L"文档", L"办公", L"程序", L"压缩", L"系统", L"其他" };
-static const char* const FILE_TYPE_KEYS[9] = { "FTVideo", "FTAudio", "FTImage", "FTDoc", "FTOffice", "FTProgram", "FTArchive", "FTSystem", "FTOther" };
-static std::wstring FileTypeLabel(int i) { return SG(FILE_TYPE_KEYS[i], FILE_TYPES[i]); }
+/* ==================== 文件类型分类 (引擎筛选器配置, 禁写死) ====================
+   分类 = 用户数据 (设置-分类与别名 可增删改), 名称与界面语言无关, 不走 SG 译文。
+   取值一律现取引擎 (插件直连: 宿主进程已加载同一 xunjieso.dll, xjs_GetDefaultEngine
+   取到同一实例); 引擎读不到 (空文本/引擎未建) = 保留上一次结果, 首次为空表
+   (下拉无项; 条件行取不到默认值 = 该行不产出 SQL, 仍可改用"自定义"条件写表达式)。 */
+struct FileCat {
+    std::wstring name;
+    int type = 0;   /* 引擎类型号: 0=全部文件 255=目录 (系统保留; 仅用于默认取值挑选) */
+};
+static std::vector<FileCat> g_ftCats;
+
+static void RefreshFileTypeCats() {
+    xjs_engine* eng = xjs_GetDefaultEngine();
+    if (!eng) return;
+    const char* fj = xjs_filter_GetFilterJSON(eng);   /* 内部管理指针, 第一时间拷贝 */
+    if (!fj || !*fj) return;
+    std::string copy = fj;
+    picojson::value v;
+    if (!picojson::parse(v, copy).empty() || !v.is<picojson::array>()) return;
+    const std::string kN = U8(L"名称"), kT = U8(L"类型");
+    std::vector<FileCat> cats;
+    for (auto& e : v.get<picojson::array>()) {
+        if (!e.is<picojson::object>()) continue;
+        auto& o = e.get<picojson::object>();
+        auto n = o.find(kN);
+        if (n == o.end() || !n->second.is<std::string>()) continue;
+        FileCat c;
+        c.name = W8(n->second.get<std::string>().c_str());
+        auto t = o.find(kT);
+        if (t != o.end() && t->second.is<double>()) c.type = (int)t->second.get<double>();
+        if (!c.name.empty()) cats.push_back(c);
+    }
+    if (!cats.empty()) g_ftCats.swap(cats);
+}
+/* 按语义关键字找分类 (模板/接管模式模板用): 名称小写化后子串匹配 —
+   ASCII 词 (Video/Office) 大小写不敏感, 中日韩泰字符小写化无副作用。
+   得分 = 关键字表位次×2 (+1=子串命中, 精确全名优先); 表位次 = 语义优先级,
+   同分取引擎表序 (引擎表按类型号升序返回, 与用户可见序一致) */
+static int CatMatchScore(const std::wstring& name, const wchar_t* const* subs, int n) {
+    std::wstring ln;
+    for (wchar_t ch : name) ln += (wchar_t)towlower(ch);
+    for (int i = 0; i < n; i++) {
+        std::wstring s;
+        for (const wchar_t* p = subs[i]; *p; p++) s += (wchar_t)towlower(*p);
+        if (ln == s) return i * 2;
+        if (ln.find(s) != std::wstring::npos) return i * 2 + 1;
+    }
+    return -1;
+}
+static std::wstring CatVideoName() {
+    static const wchar_t* const SUBS[] = { L"视频", L"影片", L"동영상", L"วิดีโอ", L"video" };
+    int best = -1, bestScore = 0;
+    for (int i = 0; i < (int)g_ftCats.size(); i++) {
+        int sc = CatMatchScore(g_ftCats[(size_t)i].name, SUBS, 5);
+        if (sc >= 0 && (best < 0 || sc < bestScore)) { best = i; bestScore = sc; }
+    }
+    return best >= 0 ? g_ftCats[(size_t)best].name : L"";
+}
+static std::vector<std::wstring> CatDocNames() {
+    static const wchar_t* const SUBS[] = { L"文档", L"办公", L"document", L"office", L"문서", L"오피스", L"เอกสาร", L"ออฟฟิศ" };
+    std::vector<std::pair<int, int>> hits;   /* (得分, 表序) */
+    for (int i = 0; i < (int)g_ftCats.size(); i++) {
+        int sc = CatMatchScore(g_ftCats[(size_t)i].name, SUBS, 8);
+        if (sc >= 0) hits.push_back({ sc, i });
+    }
+    std::stable_sort(hits.begin(), hits.end());
+    std::vector<std::wstring> out;
+    for (auto& h : hits) out.push_back(g_ftCats[(size_t)h.second].name);
+    return out;
+}
+/* 条件行默认取值 (原页面默认"视频"的对应物): 视频类分类优先, 否则首个非系统保留分类
+   (0=全部/255=目录), 再否则首项, 空表 = 空值 */
+static std::wstring DefaultFileType() {
+    std::wstring v = CatVideoName();
+    if (!v.empty()) return v;
+    for (auto& c : g_ftCats)
+        if (c.type != 0 && c.type != 255) return c.name;
+    return g_ftCats.empty() ? std::wstring() : g_ftCats[0].name;
+}
 
 /* 时间预设 6 项 (TIME_PRESETS; 第 3 项默认选中) */
 struct TimePreset { const char* k; const wchar_t* d; const wchar_t* expr; };
@@ -458,11 +539,12 @@ static bool g_noSH = true;        /* 排除系统/隐藏文件 (默认勾选) */
 static std::wstring g_status;     /* 状态栏 (status div) */
 static std::wstring g_sqlText;    /* SQL 预览编辑器内容 (可编辑) */
 
-/* 常用模板 15 项 (TEMPLATES 原序原文) */
+/* 常用模板 15 项 (TEMPLATES 原序原文)。
+   1/12 两项含用户分类名, sql 字段留空 = 由 TplSql 运行时装配 (禁在此写死分类名)。 */
 struct Tpl { const char* k; const wchar_t* d; const wchar_t* sql; };
 static const Tpl TEMPLATES[15] = {
     { "TplTop50", L"前 50 个大文件", L"SELECT * FROM alltable WHERE Size > '100M' AND FAttr !~ '[SH]' ORDER BY Size DESC LIMIT 50" },
-    { "TplBigVideo", L"大视频 (>500M)", L"SELECT * FROM alltable WHERE FileType='视频' AND Size > '500M' AND FAttr !~ '[SH]' ORDER BY Size DESC" },
+    { "TplBigVideo", L"大视频 (>500M)", L"" },   /* TplSql: FileType = 视频类分类 (现取引擎分类表) */
     { "TplRecent30", L"最近 30 天修改", L"SELECT * FROM alltable WHERE ModTime >= CURRENT_DATE - INTERVAL '30 days' AND FAttr !~ '[SH]' ORDER BY ModTime DESC" },
     { "TplByType", L"按类型统计", L"SELECT FileType, COUNT(*) AS cnt FROM alltable WHERE FAttr !~ '[SH]' GROUP BY FileType ORDER BY cnt DESC" },
     { "TplByExtTop", L"按扩展名统计 TOP10", L"SELECT Ext, COUNT(*) AS cnt FROM alltable WHERE FAttr !~ '[SH]' GROUP BY Ext ORDER BY cnt DESC LIMIT 10" },
@@ -473,7 +555,7 @@ static const Tpl TEMPLATES[15] = {
     { "TplTempFiles", L"临时/缓存文件", L"SELECT * FROM alltable WHERE Ext IN ('tmp','temp','log','bak','cache','db-journal') AND FAttr !~ '[SH]'" },
     { "TplColdData", L"冷数据 (>1G 且 180 天未动)", L"SELECT * FROM alltable WHERE Size > '1G' AND ModTime < CURRENT_DATE - INTERVAL '180 days' AND FAttr !~ '[SH]' ORDER BY ModTime" },
     { "TplArchives", L"压缩包", L"SELECT * FROM alltable WHERE Ext IN ('zip','rar','7z','tar','gz','bz2','xz') AND FAttr !~ '[SH]' ORDER BY Size DESC" },
-    { "TplDocsInDir", L"指定目录下的文档", L"SELECT * FROM alltable WHERE Path LIKE 'D:\\\\Work\\\\%' AND FileType IN ('文档','办公') AND FAttr !~ '[SH]'" },
+    { "TplDocsInDir", L"指定目录下的文档", L"" },   /* TplSql: FileType IN (文档类分类, 现取引擎分类表) */
     { "TplFNameRegex", L"文件名正则 (测试/备份)", L"SELECT * FROM alltable WHERE FName ~ 'test|backup|\\.bak$' AND FAttr !~ '[SH]'" },
     { "TplDirSize", L"按目录统计大小", L"SELECT ParentPath, COUNT(*) AS cnt, SUM(Size) AS total FROM alltable WHERE FAttr !~ '[SH]' GROUP BY ParentPath ORDER BY total DESC LIMIT 20" },
 };
@@ -491,6 +573,30 @@ static std::wstring EscLike(const std::wstring& s) {
     std::wstring o;
     for (wchar_t c : s) { if (c == L'\\') o += L"\\\\"; else o += c; }
     return o;
+}
+/* 模板 SQL (TEMPLATES[i].sql 为静态原文): 分类相关的两处现装配 — 分类名是用户数据
+   (引擎筛选器配置), 找不到对应分类时去掉类型条件, 模板在该分类表下保持可执行 */
+static std::wstring TplSql(int i) {
+    if (i == 1) {   /* 大视频 */
+        std::wstring v = CatVideoName();
+        if (v.empty()) return L"SELECT * FROM alltable WHERE Size > '500M' AND FAttr !~ '[SH]' ORDER BY Size DESC";
+        return L"SELECT * FROM alltable WHERE FileType=" + EscStr(v) +
+               L" AND Size > '500M' AND FAttr !~ '[SH]' ORDER BY Size DESC";
+    }
+    if (i == 12) {  /* 指定目录下的文档 */
+        std::vector<std::wstring> d = CatDocNames();
+        std::wstring cond;
+        if (!d.empty()) {
+            cond = L" AND FileType IN (";
+            for (size_t k = 0; k < d.size(); k++) {
+                if (k) cond += L", ";
+                cond += EscStr(d[k]);
+            }
+            cond += L")";
+        }
+        return L"SELECT * FROM alltable WHERE Path LIKE 'D:\\\\Work\\\\%'" + cond + L" AND FAttr !~ '[SH]'";
+    }
+    return TEMPLATES[i].sql;
 }
 static std::wstring TrimW(const std::wstring& s) {
     size_t a = s.find_first_not_of(L" \t\r\n");
@@ -792,6 +898,8 @@ struct Layout {
     /* cfg 卡片 (sec) 与标题/hint 矩形 (绘制用; 内容流由 ComputeLayout 现算) */
     RectF sec1, sec2, sec3, hintRc;
     std::wstring hintText;
+    /* 行标签 (页面 .lbl: 12px text-dim, 与行内控件垂直居中; 内容坐标, 绘制专用无命中) */
+    std::vector<std::pair<RectF, std::wstring>> labels;
     float contentW;
     float cfgMaxY;   /* cfg 视口底 */
 };
@@ -839,7 +947,7 @@ static float DropW(Gdiplus::Graphics& g, const std::vector<std::wstring>& items,
 }
 static std::vector<std::wstring> FTItems() {
     std::vector<std::wstring> v;
-    for (int i = 0; i < 9; i++) v.push_back(FileTypeLabel(i));
+    for (auto& c : g_ftCats) v.push_back(c.name);
     return v;
 }
 static std::vector<std::wstring> OpItems(const Opt* ops, int n) {
@@ -870,6 +978,7 @@ static void ComputeLayout() {
     float W = (float)(crc.right - crc.left), H = (float)(crc.bottom - crc.top);
     Graphics gi(g_hwnd);
     g_ctls.clear();
+    g_lo.labels.clear();
     g_lo.titlebar = RectF(0, 0, W, S(40));
     float barH = S(48);
     float cfgW = W * 0.54f;
@@ -890,8 +999,10 @@ static void ComputeLayout() {
     float cw = cfgW - S(28);
     g_lo.contentW = cw;
     float y = S(12);
-    float x0 = S(14);
+    float x0 = S(14);           /* .cfg padding 12px 14px: 卡片/hint 起点 */
     float xEnd = cfgW - S(14);
+    /* .sec padding 10px 12px: 卡内控件再内缩 12px (hint 直挂 .cfg, 用 x0/cw 不内缩) */
+    float cx0 = x0 + S(12), cxEnd = xEnd - S(12);
     auto ctl = [&](int id, const RectF& rc, int row = -1, int idx = -1) {
         g_ctls.push_back({ id, rc, row, idx, true });
     };
@@ -910,42 +1021,51 @@ static void ComputeLayout() {
     /* ---- 卡片 1: SELECT 输出 (sec) ---- */
     newCard("SecSelect", L"SELECT 输出", &g_lo.sec1);
     {   /* 模式 row: lbl + 下拉 (gap 8) */
-        float lw = lblW(SG("Mode", L"模式"));
+        std::wstring lbl = SG("Mode", L"模式");
+        float lw = lblW(lbl);
+        g_lo.labels.push_back({ RectF(cx0, y, lw, S(28)), lbl });
         std::vector<std::wstring> modes = { SG("ModeStar", L"SELECT * (全部字段)"), SG("ModeCols", L"指定字段"), SG("ModeAgg", L"聚合统计") };
         float mw = DropW(gi, modes, S(60));
-        ctl(CI_SELMODE, RectF(x0 + lw + S(8), y, mw, S(28)));
+        ctl(CI_SELMODE, RectF(cx0 + lw + S(8), y, mw, S(28)));
         y += S(28) + S(7);
     }
     if (g_selMode == 1) {   /* cols-grid: 3 列 (页面 grid repeat(3,1fr) gap 4px 10px) */
-        float colW = cw / 3.0f;
+        float colW = (cw - S(24)) / 3.0f;
         for (int i = 0; i < 12; i++) {
             int r = i / 3, c = i % 3;
-            ctl(CI_COLCHK, RectF(x0 + c * colW, y + r * S(24), colW, S(20)), -1, i);
+            ctl(CI_COLCHK, RectF(cx0 + c * colW, y + r * S(24), colW, S(20)), -1, i);
         }
         y += 4 * S(24) + S(7);
     }
     if (g_selMode == 2) {   /* agg: chips (可折行) + 分组 + HAVING (页面 #aggGrid) */
         {   /* chips: lbl 后流式排, 超右缘折行 */
-            float cx = x0 + lblW(SG("Agg", L"聚合")) + S(8);
+            std::wstring lbl = SG("Agg", L"聚合");
+            float lw = lblW(lbl);
+            float cx = cx0 + lw + S(8);
             float cy = y;
             for (int i = 0; i < 6; i++) {
                 float w = MeasureStr(gi, AGG_EXPR[i], F(S(11), false)) + S(20);
-                if (cx + w > xEnd && cx > x0) { cx = x0 + lblW(SG("Agg", L"聚合")) + S(8); cy += S(26); }
-                if (i > 0) ctl(CI_AGGCHIP, RectF(cx, cy, w, S(22)), -1, i);   /* COUNT(*) 固定项不可点 */
+                if (cx + w > cxEnd && cx > cx0) { cx = cx0 + lw + S(8); cy += S(26); }
+                ctl(CI_AGGCHIP, RectF(cx, cy, w, S(22)), -1, i);   /* COUNT(*) 一并进表: 恒 on 只画不响应 (页面 pointer-events:none) */
                 cx += w + S(6);
             }
+            /* 标签对整块 chips 垂直居中 (页面 .row align-items:center, chips 可折行成多行) */
+            g_lo.labels.push_back({ RectF(cx0, y, lw, (cy - y) + S(22)), lbl });
             y = cy + S(22) + S(7);
         }
         {   /* 分组 row */
-            float lw = lblW(SG("GroupBy", L"分组"));
+            std::wstring lbl = SG("GroupBy", L"分组");
+            float lw = lblW(lbl);
+            g_lo.labels.push_back({ RectF(cx0, y, lw, S(28)), lbl });
             std::vector<std::wstring> gitems = GroupItems();
             float gw = DropW(gi, gitems, S(70));
-            ctl(CI_GROUPBY, RectF(x0 + lw + S(8), y, gw, S(28)));
+            ctl(CI_GROUPBY, RectF(cx0 + lw + S(8), y, gw, S(28)));
             y += S(28) + S(7);
         }
         {   /* HAVING row: lbl + 输入 (flex 1) */
             float lw = lblW(L"HAVING");
-            ctl(CI_HAVING, RectF(x0 + lw + S(8), y, xEnd - (x0 + lw + S(8)), S(28)));
+            g_lo.labels.push_back({ RectF(cx0, y, lw, S(28)), L"HAVING" });
+            ctl(CI_HAVING, RectF(cx0 + lw + S(8), y, cxEnd - (cx0 + lw + S(8)), S(28)));
             y += S(28);
         }
     }
@@ -955,7 +1075,7 @@ static void ComputeLayout() {
     newCard("SecWhere", L"WHERE 条件", &g_lo.sec2);
     for (size_t r = 0; r < g_wrows.size(); r++) {
         WRow& w = g_wrows[r];
-        float rx = x0;
+        float rx = cx0;
         if (r != 0) {   /* 首行连接词隐藏 (页面 updateConnSelectors), 布局随之收紧 */
             ctl(CI_WCONN, RectF(rx, y, S(62), S(28)), (int)r);
             rx += S(62) + S(6);
@@ -967,11 +1087,11 @@ static void ComputeLayout() {
         ops = OpListOf(w.type, &nop);
         std::vector<std::wstring> opItems = OpItems(ops, nop);
         float ow = nop ? DropW(gi, opItems, S(40)) : 0;
-        float flexEnd = xEnd - S(24) - S(6);   /* 预留删除钮 */
+        float flexEnd = cxEnd - S(24) - S(6);   /* 预留删除钮 */
         switch (w.type) {
             case WT_FILETYPE: {
                 ctl(CI_WOP, RectF(rx, y, ow, S(28)), (int)r); rx += ow + S(6);
-                ctl(CI_WV, RectF(rx, y, std::min(std::max(S(60), xEnd - rx), S(120)), S(28)), (int)r);
+                ctl(CI_WV, RectF(rx, y, std::min(std::max(S(60), cxEnd - rx), S(120)), S(28)), (int)r);
                 break;
             }
             case WT_SIZE: {
@@ -1025,11 +1145,11 @@ static void ComputeLayout() {
                 break;
             }
         }
-        ctl(CI_WDEL, RectF(xEnd - S(24), y + S(2), S(24), S(24)), (int)r);
+        ctl(CI_WDEL, RectF(cxEnd - S(24), y + S(2), S(24), S(24)), (int)r);
         y += S(28) + S(6);
     }
     {   /* + 添加条件 (dashed, mt 2) */
-        ctl(CI_ADDCOND, RectF(x0, y + S(2), S(88), S(26)));
+        ctl(CI_ADDCOND, RectF(cx0, y + S(2), S(88), S(26)));
         y += S(26) + S(2);
     }
     endCard(&g_lo.sec2);
@@ -1037,31 +1157,34 @@ static void ComputeLayout() {
     /* ---- 卡片 3: 排序与限制 (sec) ---- */
     newCard("SecOrder", L"排序与限制", &g_lo.sec3);
     {   /* 排序 row (6 控件, 超宽折行 — 页面 flex-wrap) */
-        float cx = x0;
-        auto put = [&](float w, int id) {
-            if (cx + w > xEnd && cx > x0) { cx = x0; y += S(28) + S(7); }
+        float cx = cx0;
+        auto put = [&](float w, int id, const std::wstring* lbl = nullptr) {
+            if (cx + w > cxEnd && cx > cx0) { cx = cx0; y += S(28) + S(7); }
             if (id != CI_NONE) ctl(id, RectF(cx, y, w, S(28)));
+            else if (lbl) g_lo.labels.push_back({ RectF(cx, y, w, S(28)), *lbl });
             cx += w + S(8);
         };
-        put(lblW(SG("Order", L"排序")), CI_NONE);
+        std::wstring orderLbl = SG("Order", L"排序"), secLbl = SG("Secondary", L"次级");
+        put(lblW(orderLbl), CI_NONE, &orderLbl);
         std::vector<std::wstring> oi = OrderItems();
         float fw = DropW(gi, oi, S(60)), dw = S(64);
         put(fw, CI_ORDERF);
         put(dw, CI_ORDERD);
-        put(lblW(SG("Secondary", L"次级")), CI_NONE);
+        put(lblW(secLbl), CI_NONE, &secLbl);
         put(fw, CI_ORDERF2);
         put(dw, CI_ORDERD2);
         y += S(28) + S(7);
     }
     {   /* LIMIT + noSH row */
-        float cx = x0;
+        float cx = cx0;
+        g_lo.labels.push_back({ RectF(cx0, y, lblW(L"LIMIT"), S(28)), L"LIMIT" });
         cx += lblW(L"LIMIT") + S(8);
         ctl(CI_LIMIT, RectF(cx, y, S(120), S(28)));
         cx += S(120) + S(12);
         g_lo.hintText = SG("NoSH", L"排除系统/隐藏文件 (FAttr !~ '[SH]')");
         float tw = S(18) + lblW(g_lo.hintText);
-        if (cx + tw > xEnd && cx > x0) { cx = x0; y += S(28) + S(7); }
-        ctl(CI_NOSH, RectF(cx, y, tw, S(20)));
+        if (cx + tw > cxEnd && cx > cx0) { cx = cx0; y += S(28) + S(7); }
+        ctl(CI_NOSH, RectF(cx, y + S(4), tw, S(20)));   /* 20px 复选框对 28px 输入行垂直居中 (页面 .row align-items:center) */
         y += S(28);
     }
     endCard(&g_lo.sec3);
@@ -1166,8 +1289,10 @@ static void FeedDropdown(int idx) {
                 g_wrows[(size_t)row].preset = 2;
                 g_wrows[(size_t)row].unit = 2; g_wrows[(size_t)row].unit2 = 2;
                 g_wrows[(size_t)row].sub = true;
-                /* 页面 value 属性 = 真实初始值 (DOM input 初始就有, 生成 SQL 直接读) */
+                /* 页面重建 wctl 后控件自带初始值: input = value 属性, select = 默认选中项 (生成 SQL 直接读) */
+                if (idx == WT_FILETYPE) RefreshFileTypeCats();   /* 取值现取 (用户可能刚改过分类表) */
                 switch (idx) {
+                    case WT_FILETYPE: g_wrows[(size_t)row].v = DefaultFileType(); break;
                     case WT_SIZE: g_wrows[(size_t)row].v = L"100"; break;
                     case WT_ATTR: g_wrows[(size_t)row].v = L"[SH]"; break;
                     case WT_SCORE: g_wrows[(size_t)row].v = L"80"; break;
@@ -1178,8 +1303,11 @@ static void FeedDropdown(int idx) {
             break;
         case CI_WOP:      if (g_wrows[(size_t)row].op != idx) { g_wrows[(size_t)row].op = idx; RefreshSql(); } break;
         case CI_WV:
-            if (g_wrows[(size_t)row].type == WT_FILETYPE) {   /* 文件类型下拉 */
-                if (g_wrows[(size_t)row].v != FileTypeLabel(idx)) { g_wrows[(size_t)row].v = FileTypeLabel(idx); RefreshSql(); }
+            if (g_wrows[(size_t)row].type == WT_FILETYPE) {   /* 文件类型下拉 (选项 = 引擎分类) */
+                if (idx >= 0 && idx < (int)g_ftCats.size() && g_wrows[(size_t)row].v != g_ftCats[(size_t)idx].name) {
+                    g_wrows[(size_t)row].v = g_ftCats[(size_t)idx].name;
+                    RefreshSql();
+                }
             } else if (g_wrows[(size_t)row].type == WT_MTIME) {
                 if (g_wrows[(size_t)row].preset != idx) { g_wrows[(size_t)row].preset = idx; RefreshSql(); }
             }
@@ -1192,7 +1320,8 @@ static void FeedDropdown(int idx) {
         case CI_ORDERD2:  if (g_orderDir2 != idx) { g_orderDir2 = idx; RefreshSql(); } break;
         case CI_TPL: {
             /* 模板 = 直接覆盖预览文本 (页面 tplSel change: preview.value = sql; 下拉回显复位) */
-            g_sqlText = TEMPLATES[idx].sql;
+            RefreshFileTypeCats();   /* 分类相关模板现装配 (视频/文档分类名) */
+            g_sqlText = TplSql(idx);
             SqlSplit();
             g_caretLine = g_caretCol = 0; g_selLine = g_selCol = -1;
             std::wstring st = SG("StatusTpl", L"已应用模板: {0}");
@@ -1223,9 +1352,8 @@ static std::wstring SelectTextOf(int srcId, int row) {
         case CI_WV:
             if (row < 0) return L"";
             if (g_wrows[(size_t)row].type == WT_FILETYPE) {
-                int sel = 0;
-                for (int i = 0; i < 9; i++) if (FileTypeLabel(i) == g_wrows[(size_t)row].v) { sel = i; break; }
-                return FileTypeLabel(sel);
+                /* 原样显示实际值 (分类被改名/删除后 = 所见即所拼, 不再兜底成首项掩盖) */
+                return g_wrows[(size_t)row].v;
             }
             if (g_wrows[(size_t)row].type == WT_MTIME) return TimePresetName(g_wrows[(size_t)row].preset);
             return g_wrows[(size_t)row].v;
@@ -1241,45 +1369,50 @@ static std::wstring SelectTextOf(int srcId, int row) {
 }
 /* 展开某下拉 (按命中控件路由选项表) */
 static void ExpandDropdown(const CtlRect& c) {
+    /* 弹层按视口坐标画: cfg 内容坐标控件必须经 CtlViewRc 变换 (视口控件 rel=false 原样),
+       否则锚点少了 cfg.Y-cfgScroll 偏移, 弹层上移盖住锚点控件本身 (实锤) */
+    RectF anchor = CtlViewRc(c);
     switch (c.id) {
         case CI_SELMODE:
-            OpenDropdown(c.id, c.row, c.rc, { SG("ModeStar", L"SELECT * (全部字段)"), SG("ModeCols", L"指定字段"), SG("ModeAgg", L"聚合统计") }, g_selMode);
+            OpenDropdown(c.id, c.row, anchor, { SG("ModeStar", L"SELECT * (全部字段)"), SG("ModeCols", L"指定字段"), SG("ModeAgg", L"聚合统计") }, g_selMode);
             break;
         case CI_GROUPBY:
-            OpenDropdown(c.id, c.row, c.rc, GroupItems(), g_groupBy);
+            OpenDropdown(c.id, c.row, anchor, GroupItems(), g_groupBy);
             break;
         case CI_WCONN:
-            OpenDropdown(c.id, c.row, c.rc, { L"AND", L"OR" }, g_wrows[(size_t)c.row].conn);
+            OpenDropdown(c.id, c.row, anchor, { L"AND", L"OR" }, g_wrows[(size_t)c.row].conn);
             break;
         case CI_WTYPE: {
             std::vector<std::wstring> tn;
             for (int t = 0; t < WT_N; t++) tn.push_back(WTypeName(t));
-            OpenDropdown(c.id, c.row, c.rc, tn, g_wrows[(size_t)c.row].type);
+            OpenDropdown(c.id, c.row, anchor, tn, g_wrows[(size_t)c.row].type);
             break;
         }
         case CI_WOP: {
             const Opt* ops; int n = 0;
             ops = OpListOf(g_wrows[(size_t)c.row].type, &n);
-            OpenDropdown(c.id, c.row, c.rc, OpItems(ops, n), g_wrows[(size_t)c.row].op);
+            OpenDropdown(c.id, c.row, anchor, OpItems(ops, n), g_wrows[(size_t)c.row].op);
             break;
         }
         case CI_WV:
             if (g_wrows[(size_t)c.row].type == WT_FILETYPE) {
+                RefreshFileTypeCats();   /* 展开时现取 (设置里改过分类表立刻可见) */
                 std::vector<std::wstring> ft = FTItems();
-                int sel = 0;
-                for (int i = 0; i < 9; i++) if (FileTypeLabel(i) == g_wrows[(size_t)c.row].v) { sel = i; break; }
-                OpenDropdown(c.id, c.row, c.rc, ft, sel);
+                int sel = -1;
+                for (int i = 0; i < (int)g_ftCats.size(); i++)
+                    if (g_ftCats[(size_t)i].name == g_wrows[(size_t)c.row].v) { sel = i; break; }
+                OpenDropdown(c.id, c.row, anchor, ft, sel);
             } else if (g_wrows[(size_t)c.row].type == WT_MTIME) {
-                OpenDropdown(c.id, c.row, c.rc, PresetItems(), g_wrows[(size_t)c.row].preset);
+                OpenDropdown(c.id, c.row, anchor, PresetItems(), g_wrows[(size_t)c.row].preset);
             }
             break;
-        case CI_WUNIT:  OpenDropdown(c.id, c.row, c.rc, UnitItems(), g_wrows[(size_t)c.row].unit); break;
-        case CI_WUNIT2: OpenDropdown(c.id, c.row, c.rc, UnitItems(), g_wrows[(size_t)c.row].unit2); break;
-        case CI_ORDERF:  OpenDropdown(c.id, c.row, c.rc, OrderItems(), g_orderField); break;
-        case CI_ORDERD:  OpenDropdown(c.id, c.row, c.rc, { SG("Desc", L"降序"), SG("Asc", L"升序") }, g_orderDir); break;
-        case CI_ORDERF2: OpenDropdown(c.id, c.row, c.rc, OrderItems(), g_orderField2); break;
-        case CI_ORDERD2: OpenDropdown(c.id, c.row, c.rc, { SG("Desc", L"降序"), SG("Asc", L"升序") }, g_orderDir2); break;
-        case CI_TPL:     OpenDropdown(c.id, c.row, c.rc, TplItems(), -1); break;
+        case CI_WUNIT:  OpenDropdown(c.id, c.row, anchor, UnitItems(), g_wrows[(size_t)c.row].unit); break;
+        case CI_WUNIT2: OpenDropdown(c.id, c.row, anchor, UnitItems(), g_wrows[(size_t)c.row].unit2); break;
+        case CI_ORDERF:  OpenDropdown(c.id, c.row, anchor, OrderItems(), g_orderField); break;
+        case CI_ORDERD:  OpenDropdown(c.id, c.row, anchor, { SG("Desc", L"降序"), SG("Asc", L"升序") }, g_orderDir); break;
+        case CI_ORDERF2: OpenDropdown(c.id, c.row, anchor, OrderItems(), g_orderField2); break;
+        case CI_ORDERD2: OpenDropdown(c.id, c.row, anchor, { SG("Desc", L"降序"), SG("Asc", L"升序") }, g_orderDir2); break;
+        case CI_TPL:     OpenDropdown(c.id, c.row, anchor, TplItems(), -1); break;
     }
 }
 
@@ -1294,6 +1427,8 @@ static void RefreshSql() {
 }
 static void AddRow() {
     WRow w;   /* 默认 = 文件类型 AND (= 页面 wrowHtml('AND','filetype')) */
+    RefreshFileTypeCats();   /* 新增行取默认值前现取分类表 */
+    w.v = DefaultFileType();   /* 页面 .wv 是 DOM select: 值恒非空 = 默认首选项; 空值行会被 WrowExpr 丢弃且显示层兜底掩盖 (实锤) */
     g_wrows.push_back(w);
     ComputeLayout();
     RefreshSql();
@@ -1447,7 +1582,9 @@ static void DrawInput(Gdiplus::Graphics& g, const RectF& rc, const std::wstring&
         g.FillRectangle(Br(g_sk.text), RectF(tr.X + caretX - *scroll, tr.Y + S(5), std::max(1.0f, S(1)), tr.Height - S(10)));
     g.Restore(st);
 }
-static void DrawCheckbox(Gdiplus::Graphics& g, const RectF& rc, bool checked, const std::wstring& label, bool hot) {
+/* 复选框 (页面: cols-grid 标签 12px text / .lbl 行标签 12px text-dim / wsub 标签 11px text-dim; 盒 13px) */
+static void DrawCheckbox(Gdiplus::Graphics& g, const RectF& rc, bool checked, const std::wstring& label,
+                         bool dim = false, float px = 12) {
     float bx = rc.X, by = rc.Y + (rc.Height - S(13)) / 2;
     RectF box(bx, by, S(13), S(13));
     FillRc(g, box, Br(checked ? g_sk.accent : g_sk.panel2), S(3));
@@ -1459,7 +1596,8 @@ static void DrawCheckbox(Gdiplus::Graphics& g, const RectF& rc, bool checked, co
         PointF pts[3] = { PointF(box.X + 3 * u, box.Y + 7 * u), PointF(box.X + 5.5f * u, box.Y + 9.5f * u), PointF(box.X + 10 * u, box.Y + 3.5f * u) };
         g.DrawLines(&cp, pts, 3);
     }
-    DrawStr(g, label, F(S(12), false), RectF(bx + S(18), rc.Y, rc.Width - S(18), rc.Height), Br(hot ? g_sk.text : g_sk.text), 0, 1);
+    DrawStr(g, label, F(S(px), false), RectF(bx + S(18), rc.Y, rc.Width - S(18), rc.Height),
+            Br(dim ? g_sk.dim : g_sk.text), 0, 1);
 }
 static void DrawTitlebar(Gdiplus::Graphics& g) {
     g.FillRectangle(Br(g_sk.panel), g_lo.titlebar);
@@ -1510,6 +1648,12 @@ static void DrawCfg(Gdiplus::Graphics& g) {
     DrawSecTitle(g, g_lo.sec1, g_lo.sec1.Y + oy + S(10), SG("SecSelect", L"SELECT 输出"));
     DrawSecTitle(g, g_lo.sec2, g_lo.sec2.Y + oy + S(10), SG("SecWhere", L"WHERE 条件"));
     DrawSecTitle(g, g_lo.sec3, g_lo.sec3.Y + oy + S(10), SG("SecOrder", L"排序与限制"));
+    /* 行标签 (页面 label.lbl: 12px text-dim; 命中表里没有, 纯绘制) */
+    for (auto& lb : g_lo.labels) {
+        RectF rc(lb.first.X, lb.first.Y + oy, lb.first.Width, lb.first.Height);
+        if (rc.Y + rc.Height < g_lo.cfg.Y - S(4) || rc.Y > g_lo.cfg.Y + g_lo.cfg.Height + S(4)) continue;   /* 视口外 */
+        DrawStr(g, lb.second, F(S(12), false), rc, Br(g_sk.dim), 0, 1);
+    }
     /* 控件 (统一按 g_ctls + oy 绘制; select/input/chip/checkbox 各自识别) */
     Graphics gi(g_hwnd);
     for (auto& c : g_ctls) {
@@ -1551,17 +1695,18 @@ static void DrawCfg(Gdiplus::Graphics& g) {
                           focus ? g_lineCaret : 0, focus ? g_lineSelA : -1, &g_lineScroll);
                 break;
             case CI_COLCHK:
-                DrawCheckbox(g, rc, g_colChk[c.idx], COL_NAMES[c.idx], hot);
+                DrawCheckbox(g, rc, g_colChk[c.idx], COL_NAMES[c.idx]);
                 break;
             case CI_NOSH:
-                DrawCheckbox(g, rc, g_noSH, g_lo.hintText, hot);
+                DrawCheckbox(g, rc, g_noSH, g_lo.hintText, true);
                 break;
             case CI_WSUB:
-                DrawCheckbox(g, RectF(rc.X, rc.Y, rc.Width, S(20)), g_wrows[(size_t)c.row].sub,
-                             SG("IncSub", L"含子目录"), hot);
+                /* 20px 复选框对 28px 条件行垂直居中 (页面 .wrow align-items:center); 标签 11px dim */
+                DrawCheckbox(g, RectF(rc.X, rc.Y + S(4), rc.Width, S(20)), g_wrows[(size_t)c.row].sub,
+                             SG("IncSub", L"含子目录"), true, 11);
                 break;
             case CI_AGGCHIP: {
-                bool on = g_aggChip[c.idx];
+                bool on = (c.idx == 0) || g_aggChip[c.idx];   /* COUNT(*) 恒 on (页面 chip.on + pointer-events:none) */
                 FillRc(g, rc, Br(on ? g_sk.accent : g_sk.panel2, on ? 46 : 255), S(14));
                 StrokeRc(g, rc, PenP(on ? g_sk.accent : g_sk.border, 255, 1.0f), S(14));
                 DrawStr(g, AGG_EXPR[c.idx], F(S(11), false), rc, Br(on ? g_sk.accent : g_sk.dim), 1, 1);
@@ -2119,6 +2264,21 @@ static void EditorPointToCaret(POINT pt) {
     g_caretCol = EdColAt(gi, g_sqlLines[(size_t)ln], lx);
 }
 
+/* 下拉型控件 (含文件类型/时间预设的条件值框): 按下只捕获, 松开仍在控件内才弹层
+   (页面 select 的 click 语义 — 与三个按钮的 press/release 同一套 g_pressId 机制) */
+static bool IsDropdownCtl(int id, int row) {
+    switch (id) {
+        case CI_SELMODE: case CI_GROUPBY: case CI_WCONN: case CI_WTYPE: case CI_WOP:
+        case CI_WUNIT: case CI_WUNIT2: case CI_ORDERF: case CI_ORDERD: case CI_ORDERF2: case CI_ORDERD2:
+        case CI_TPL:
+            return true;
+        case CI_WV:
+            return row >= 0 && row < (int)g_wrows.size() &&
+                   (g_wrows[(size_t)row].type == WT_FILETYPE || g_wrows[(size_t)row].type == WT_MTIME);
+    }
+    return false;
+}
+
 static void OnLButtonDown(POINT pt) {
     SetFocus(g_hwnd);
     g_downPt = pt;
@@ -2141,12 +2301,11 @@ static void OnLButtonDown(POINT pt) {
         case CI_COPY:  g_pressId = CI_COPY;  SetCapture(g_hwnd); return;
         case CI_SELMODE: case CI_GROUPBY: case CI_WCONN: case CI_WTYPE: case CI_WOP:
         case CI_WUNIT: case CI_WUNIT2: case CI_ORDERF: case CI_ORDERD: case CI_ORDERF2: case CI_ORDERD2:
-            ExpandDropdown(*c);
-            return;
+        case CI_TPL:
+            g_pressId = c->id; g_pressRow = c->row; SetCapture(g_hwnd); return;   /* 弹层在松开时开 (OnLButtonUp) */
         case CI_WV:
-            if (c->row >= 0 && (g_wrows[(size_t)c->row].type == WT_FILETYPE || g_wrows[(size_t)c->row].type == WT_MTIME)) {
-                ExpandDropdown(*c);
-                return;
+            if (IsDropdownCtl(c->id, c->row)) {
+                g_pressId = c->id; g_pressRow = c->row; SetCapture(g_hwnd); return;
             }
             /* fallthrough — 文本输入 */
         case CI_WV2: case CI_WV3: case CI_HAVING: case CI_LIMIT: {
@@ -2177,8 +2336,10 @@ static void OnLButtonDown(POINT pt) {
             RefreshSql();
             return;
         case CI_AGGCHIP:
-            g_aggChip[c->idx] = !g_aggChip[c->idx];   /* toggle (COUNT(*) 固定项不在命中表) */
-            RefreshSql();
+            if (c->idx > 0) {   /* COUNT(*) 固定项不可点 (页面 pointer-events:none) */
+                g_aggChip[c->idx] = !g_aggChip[c->idx];
+                RefreshSql();
+            }
             return;
         case CI_WDEL:
             DelRow(c->row);
@@ -2249,17 +2410,25 @@ static void OnMouseMove(POINT pt) {
     }
 }
 static void OnLButtonUp(POINT pt) {
-    (void)pt;
     /* 先取按压动作再释放捕获: ReleaseCapture 会同步发 WM_CAPTURECHANGED,
-       CAPTURECHANGED 分支清 g_pressId — 若先释放后取值, 三个按钮动作全被吞 (实锤) */
-    int pid = g_pressId;
-    g_pressId = 0;
+       CAPTURECHANGED 分支清 g_pressId — 若先释放后取值, 按钮/下拉动作全被吞 (实锤) */
+    int pid = g_pressId, prow = g_pressRow;
+    g_pressId = 0; g_pressRow = -1;
     if (GetCapture() == g_hwnd) ReleaseCapture();
     g_edDrag = false; g_lineDrag = false; g_sbDrag = false;
     switch (pid) {
         case CI_CLOSE: if (g_hwnd) DestroyWindow(g_hwnd); return;
         case CI_RUN:   DoRun(); return;
         case CI_COPY:  DoCopy(); return;
+    }
+    /* 下拉控件 = 点击弹出: 松开点仍在控件矩形内才展开 (拖出 = 取消, 页面 click 语义) */
+    if (pid && IsDropdownCtl(pid, prow)) {
+        const CtlRect* c = CtlOf(pid, prow);
+        if (c) {
+            RectF rc = CtlViewRc(*c);
+            if (pt.x >= rc.X && pt.x < rc.X + rc.Width && pt.y >= rc.Y && pt.y < rc.Y + rc.Height)
+                ExpandDropdown(*c);
+        }
     }
     InvalidateAll();
 }
@@ -2465,19 +2634,22 @@ static LRESULT CALLBACK SqlGenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 /* ==================== 打开窗口 (space-map 无边框口径; 初始 1100×680 / min 780×520) ==================== */
-/* 接管型搜索模式模板 (原版清单声明原文; {keyword} 占位) */
-static const wchar_t* const KW_SQL_TEMPLATE =
-    L"SELECT * FROM alltable WHERE FileType = '视频' AND FName LIKE '%{keyword}%' "
-    L"AND FAttr !~ '[SH]' ORDER BY Size DESC";
+/* 接管型搜索模式模板 (原版清单声明原文; {keyword} 占位): FileType 条件里的分类名是
+   用户数据 — 现装配 (视频类分类缺失则整段去掉, 该模板在此分类表下仍可执行) */
+static std::wstring KwSqlTemplate() {
+    std::wstring head = L"SELECT * FROM alltable WHERE ";
+    std::wstring v = CatVideoName();
+    if (!v.empty()) head += L"FileType = " + EscStr(v) + L" AND ";
+    return head + L"FName LIKE '%{keyword}%' AND FAttr !~ '[SH]' ORDER BY Size DESC";
+}
 /* {keyword} 占位替换 (页面回调同语义: 输入词单引号翻倍, 兼容旧写法 {kw}) */
-static std::wstring ApplyKeywordTemplate(const std::wstring& input) {
+static std::wstring ApplyKeywordTemplate(const std::wstring& input, const std::wstring& tpl) {
     std::wstring kw;
     for (wchar_t c : input) {
         if (c == L'\'') { kw += L"''"; continue; }
         kw += c;
     }
     std::wstring out;
-    const std::wstring tpl = KW_SQL_TEMPLATE;
     for (size_t i = 0; i < tpl.size();) {
         if (tpl[i] == L'{' && _wcsnicmp(tpl.c_str() + i, L"{keyword}", 9) == 0) { out += kw; i += 9; }
         else if (tpl[i] == L'{' && _wcsnicmp(tpl.c_str() + i, L"{kw}", 4) == 0) { out += kw; i += 4; }
@@ -2490,14 +2662,15 @@ static void CloseDropdownSilent() { g_ddOpen = false; g_ddHover = -1; }
 
 static void ResetWindowState() {
     /* 每次打开 = 全新状态 (真关闭型窗口, 重开 = 页面 reload) */
+    RefreshFileTypeCats();   /* 分类现取 (打开时刷新; 用户可自定义分类表) */
     g_selMode = 0;
     for (int i = 0; i < 12; i++) g_colChk[i] = false;
     for (int i = 0; i < 6; i++) g_aggChip[i] = (i == 0);
     g_groupBy = 0;
     g_having.clear();
     g_wrows.clear();
-    WRow def;   /* 初始一行条件: 文件类型 = 视频 (页面 boot IIFE) */
-    def.v = FileTypeLabel(0);
+    WRow def;   /* 初始一行条件: 首个用户分类 (页面 boot IIFE 的"文件类型 = 视频"对应首项) */
+    def.v = DefaultFileType();
     g_wrows.push_back(def);
     g_orderField = g_orderDir = g_orderField2 = g_orderDir2 = 0;
     g_limit.clear();
@@ -2650,9 +2823,11 @@ extern "C" __declspec(dllexport) int XJS_PLUGIN_CALL XjsPlugin_OnSearchMode(XjsP
     if (!modeIdUtf8 || strcmp(modeIdUtf8, "kw-sql") != 0) return 0;
     std::wstring input = W8(inputUtf8 ? inputUtf8 : "");
     if (input.empty()) return 1;   /* 空输入无可替换 (原版页面 evt.keyword 空即不处理) */
+    RefreshFileTypeCats();        /* 类型名现取: 生成 SQL 前刷新 (用户可自定义分类) */
+    std::wstring sql = ApplyKeywordTemplate(input, KwSqlTemplate());
     if (g_hwnd && IsWindow(g_hwnd)) {
         if (window) g_ownerToken = window;   /* 跟随本次执行的发起窗 (填入目标随之) */
-        g_sqlText = ApplyKeywordTemplate(input);
+        g_sqlText = sql;
         SqlSplit();
         g_caretLine = g_caretCol = 0; g_selLine = g_selCol = -1;
         SetStatus(SG("StatusRun", L"已填入主窗口搜索框并执行 (蜗牛快搜自动识别 SQL)"));
@@ -2660,7 +2835,7 @@ extern "C" __declspec(dllexport) int XJS_PLUGIN_CALL XjsPlugin_OnSearchMode(XjsP
         InvalidateAll();
         return 1;
     }
-    std::string sql8 = U8(ApplyKeywordTemplate(input));
+    std::string sql8 = U8(sql);
     if (sql8.empty()) return 1;
     if (g_host) {
         int e = g_host->SearchSetText(g_ctx, window ? window : g_ownerToken, sql8.c_str(), "sql", 1);

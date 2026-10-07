@@ -379,6 +379,8 @@ function rebuildDynamic() {
 var $ = function (id) { return document.getElementById(id); };
 
 // ---------- 常量: 迅捷搜文件类型 / 时间预设 ----------
+// 注意: 本表是原版页面的写死常量 (仅作参照留档); DLL 版已改为打开窗口时现取引擎
+// 筛选器配置 (xjs_filter_GetFilterJSON, 用户可自定义分类), 不读这里的常量。
 var FILE_TYPES = ['视频', '音频', '图片', '文档', '办公', '程序', '压缩', '系统', '其他'];
 var FILE_TYPE_KEYS = ['FTVideo', 'FTAudio', 'FTImage', 'FTDoc', 'FTOffice', 'FTProgram', 'FTArchive', 'FTSystem', 'FTOther'];
 function fileTypeLabel(i) {
