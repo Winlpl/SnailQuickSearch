@@ -82,9 +82,10 @@ void XjsChromeLayout() {
     if (searchAvail(btnLeft, filterW) < minSearch) { L.menuCompact = true; menuW = menuW_icon; }
     if (g_showFilterBox && searchAvail(btnLeft, filterW) < minSearch) { L.filterCompact = true; filterW = filterW_icon; }
     L.menuBtn = XjsRectF(XSF(48), XSF(6), XSF(48) + menuW, XSF(34));
-    /* 文字都省完仍放不下 → 溢出态 (仅当右侧确有可收项: 筛选框可见或控制按钮可见) */
+    /* 极简控制菜单模式开 = 恒用 `...` 收纳; 关 = 文字都省完仍放不下才进溢出态 (仅当右侧确有可收项) */
     L.overflowMode = false; L.overflowBtn = XjsRectF(0, 0, 0, 0);
-    if (searchAvail(btnLeft, filterW) < minSearch && (g_showFilterBox || g_showCtrlBtns)) {
+    if (g_minimalCtrlMenu ||
+        (searchAvail(btnLeft, filterW) < minSearch && (g_showFilterBox || g_showCtrlBtns))) {
         L.overflowMode = true;
         /* 右缘只留 `...` 贴右; 筛选下拉与 置顶/─/□/✕ 全收起进 `...` 菜单, 搜索框右界基准 = `...` 左缘 */
         float ox = L.w - XSF(8) - ovW;

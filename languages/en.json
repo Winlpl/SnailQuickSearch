@@ -191,6 +191,8 @@
  "设置.窗口.显示控制按钮.说明": "The minimize/maximize/close buttons on the right of the title bar; hiding them frees space for the search box",
  "设置.窗口.显示筛选框": "Show filter dropdown",
  "设置.窗口.显示筛选框.说明": "The category filter dropdown in the title bar (filters results by category); hiding it frees space for the search box",
+ "设置.窗口.极简控制菜单": "Minimal control menu",
+ "设置.窗口.极简控制菜单.说明": "Always tuck the pin/minimize/maximize/close buttons and the filter dropdown into the `...` menu; when off, they collapse only when the window is too narrow to fit the search box",
  "设置.窗口.显示状态栏": "Show Status Bar",
  "设置.窗口.显示状态栏.说明": "The status bar at the window bottom (result count/scan progress/selection); hiding it extends the list area to the bottom",
  "设置.窗口.任务栏图标": "Show taskbar icon",

@@ -191,6 +191,8 @@
  "设置.窗口.显示控制按钮.说明": "Butang kecilkan/maksimumkan/tutup di kanan bar tajuk; disembunyikan, ruang yang kosong kembali ke kotak carian secara automatik",
  "设置.窗口.显示筛选框": "Tunjukkan kotak penapis",
  "设置.窗口.显示筛选框.说明": "Dopdaun penapis kategori pada bar tajuk (menapis hasil mengikut kategori); disembunyikan, ruang kosong kembali ke kotak carian",
+ "设置.窗口.极简控制菜单": "Menu kawalan minimum",
+ "设置.窗口.极简控制菜单.说明": "Sentiasa simpan butang pin/minimum/maksimum/tutup dan dopdaun penapis ke dalam menu `...`; jika ditutup, ia hanya runtuh apabila tetingkap terlalu sempit untuk kotak carian",
  "设置.窗口.显示状态栏": "Tunjukkan bar status",
  "设置.窗口.显示状态栏.说明": "Bar status di bawah tetingkap (bilangan hasil/kemajuan imbas/pilihan); disembunyikan, kawasan senarai terembang hingga ke bawah",
  "设置.窗口.任务栏图标": "Tunjukkan ikon bar tugas",

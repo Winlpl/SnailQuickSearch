@@ -261,6 +261,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         blurAction = p->blurAction;
         appearPos = p->appearPos;
         showCtrlBtns = p->showCtrlBtns;
+        minimalCtrlMenu = p->minimalCtrlMenu;
         showFilterBox = p->showFilterBox;
         showStatusbar = p->showStatusbar;
         taskbarIcon = p->taskbarIcon;
@@ -300,6 +301,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         blurAction = m->blurAction;
         appearPos = m->appearPos;
         showCtrlBtns = m->showCtrlBtns;
+        minimalCtrlMenu = m->minimalCtrlMenu;
         showFilterBox = m->showFilterBox;
         showStatusbar = m->showStatusbar;
         taskbarIcon = m->taskbarIcon;

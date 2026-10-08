@@ -997,6 +997,7 @@ struct XjsUiProfile {
     int blurAction = 0;                   /* 窗口失去焦点: 0=无 1=关闭窗口 (统一策略: 主窗藏托盘/子窗销毁) */
     int appearPos = 0;                    /* 窗口激活或创建时位置 (档位序见 XJS_APPEAR_*) */
     bool showCtrlBtns = true;             /* 显示控制按钮 (最小化/最大化/关闭; 隐藏后左侧元素填充) */
+    bool minimalCtrlMenu = false;         /* 极简控制菜单模式: 开=标题栏恒用 `...` 收纳控制按钮; 关=窗口过窄时自适应 */
     bool showFilterBox = true;            /* 显示筛选框 (标题栏筛选下拉; 隐藏后搜索框填充) */
     bool showStatusbar = true;            /* 显示状态栏 */
     bool taskbarIcon = true;              /* 任务栏图标 (关 = WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示) */
@@ -1043,6 +1044,7 @@ public:
     int blurAction = 0;          /* 窗口失去焦点: 0=无 1=关闭窗口 */
     int appearPos = 0;           /* 窗口激活或创建时位置 (档位序见 XJS_APPEAR_*) */
     bool showCtrlBtns = true;    /* 显示控制按钮 (最小化/最大化/关闭) */
+    bool minimalCtrlMenu = false;/* 极简控制菜单模式 (开=恒用 `...` 收纳; 关=自适应) */
     bool showFilterBox = true;   /* 显示筛选框 (标题栏筛选下拉) */
     bool showStatusbar = true;   /* 显示状态栏 */
     bool taskbarIcon = true;     /* 任务栏图标 (关 = WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示) */
@@ -1346,6 +1348,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_blurAction      (XjsSearchWindow::Cur()->blurAction)       /* 窗口失去焦点动作 (每窗) */
 #define g_appearPos       (XjsSearchWindow::Cur()->appearPos)        /* 激活/创建时位置 (每窗) */
 #define g_showCtrlBtns    (XjsSearchWindow::Cur()->showCtrlBtns)     /* 显示控制按钮 (每窗) */
+#define g_minimalCtrlMenu (XjsSearchWindow::Cur()->minimalCtrlMenu)  /* 极简控制菜单模式 (每窗) */
 #define g_showFilterBox   (XjsSearchWindow::Cur()->showFilterBox)    /* 显示筛选框 (每窗) */
 #define g_showStatusbar   (XjsSearchWindow::Cur()->showStatusbar)    /* 显示状态栏 (每窗) */
 #define g_taskbarIcon     (XjsSearchWindow::Cur()->taskbarIcon)      /* 任务栏图标 (每窗) */

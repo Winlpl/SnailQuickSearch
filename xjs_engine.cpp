@@ -596,6 +596,7 @@ static const char* const K_BLUR = "失焦行为";           /* 0=无 1=关闭窗
 static const char* const K_APPEAR = "出现位置";         /* 激活/创建时位置档位 (序 = xjs_app.h XJS_APPEAR_*);
                                                           旧键 "激活位置" (四档语义) 已废弃不读, 按本库"不兼容旧格式"口径直接换名 */
 static const char* const K_CTRLBTN = "显示控制按钮";    /* 最小化/最大化/关闭 (隐藏后左侧填充) */
+static const char* const K_MINMENU = "极简控制菜单";    /* 极简控制菜单模式 (开=恒用 `...` 收纳; 关=自适应) */
 static const char* const K_FILTERBOX = "显示筛选框";    /* 标题栏筛选下拉 (隐藏后搜索框填充) */
 static const char* const K_STATUSBAR = "显示状态栏";
 static const char* const K_TASKBAR = "任务栏图标";
@@ -1404,6 +1405,7 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.blurAction = w->blurAction;
     p.appearPos = w->appearPos;
     p.showCtrlBtns = w->showCtrlBtns;
+    p.minimalCtrlMenu = w->minimalCtrlMenu;
     p.showFilterBox = w->showFilterBox;
     p.showStatusbar = w->showStatusbar;
     p.taskbarIcon = w->taskbarIcon;
@@ -2003,6 +2005,7 @@ void XjsLoadConfig() {
             p.appearPos = XjsConfig::Int(o, K_APPEAR, 0);
             if (p.appearPos < 0 || p.appearPos >= XJS_APPEAR_COUNT) p.appearPos = 0;
             p.showCtrlBtns = XjsConfig::Bool(o, K_CTRLBTN, true);
+            p.minimalCtrlMenu = XjsConfig::Bool(o, K_MINMENU, false);
             p.showFilterBox = XjsConfig::Bool(o, K_FILTERBOX, true);
             p.showStatusbar = XjsConfig::Bool(o, K_STATUSBAR, true);
             p.taskbarIcon = XjsConfig::Bool(o, K_TASKBAR, true);
@@ -2120,6 +2123,7 @@ void XjsLoadConfig() {
         XjsSearchWindow::Cur()->blurAction = p0->blurAction;
         XjsSearchWindow::Cur()->appearPos = p0->appearPos;
         XjsSearchWindow::Cur()->showCtrlBtns = p0->showCtrlBtns;
+        XjsSearchWindow::Cur()->minimalCtrlMenu = p0->minimalCtrlMenu;
         XjsSearchWindow::Cur()->showFilterBox = p0->showFilterBox;
         XjsSearchWindow::Cur()->showStatusbar = p0->showStatusbar;
         XjsSearchWindow::Cur()->taskbarIcon = p0->taskbarIcon;
@@ -2225,6 +2229,7 @@ void XjsSaveConfig() {
         o[K_BLUR] = picojson::value((double)p->blurAction);
         o[K_APPEAR] = picojson::value((double)p->appearPos);
         o[K_CTRLBTN] = picojson::value(p->showCtrlBtns);
+        o[K_MINMENU] = picojson::value(p->minimalCtrlMenu);
         o[K_FILTERBOX] = picojson::value(p->showFilterBox);
         o[K_STATUSBAR] = picojson::value(p->showStatusbar);
         o[K_TASKBAR] = picojson::value(p->taskbarIcon);

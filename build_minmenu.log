@@ -1,0 +1,51 @@
+﻿Finding Visual Studio...
+Found Visual Studio: C:\Program Files\Microsoft Visual Studio\2022\Community
+
+Compiling resources...
+Microsoft (R) Windows (R) Resource Compiler Version 10.0.10011.16384
+
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Compiling all sources /MP parallel...
+.\build.bat : 用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35217 版
+所在位置 行:1 字符: 26
++  cd "d:\蜗牛快搜\蜗牛快搜(D2D)"; .\build.bat 2>&1 | Out-File -FilePath build_ ...
++                          ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (用于 x64 的 Micros...器 19.44.35217 版 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+xjs_app.cpp
+xjs_util.cpp
+xjs_d2d.cpp
+xjs_gdiplus.cpp
+xjs_engine.cpp
+xjs_popup.cpp
+xjs_chrome.cpp
+xjs_toast.cpp
+xjs_list.cpp
+xjs_preview.cpp
+xjs_media.cpp
+xjs_settings.cpp
+xjs_md.cpp
+xjs_plugin.cpp
+xjs_plugin_api.cpp
+xjs_pdf.cpp
+xjs_guide.cpp
+xjs_market.cpp
+md4c.c
+main.cpp
+Linking SnailQuickSearch.exe ...
+Microsoft (R) Incremental Linker Version 14.44.35217.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+正在生成代码
+已完成代码的生成
+
+Build succeeded!
+Output: SnailQuickSearch.exe
+
+Press any key to run...

@@ -52,6 +52,7 @@ enum XjsSetAct {
     ACT_CREATEKW = 362,    /* 创建关键词: 点击弹输入对话框 (每窗) */
     ACT_SORT = 363,        /* +0..6 默认排序预设 (每窗, 菜单回传) */
     ACT_DEFSEL = 370,      /* +0 默认不选 / +1 第一个表项 (每窗, 菜单回传) */
+    ACT_MINMENU = 372,     /* 极简控制菜单模式 (每窗开关: 开=标题栏恒用 `...` 收纳; 关=窗口过窄时自适应) */
     ACT_APPEAR = 380,      /* +档位序 0..11 出现位置 (序见 xjs_app.h XJS_APPEAR_*; 菜单回传)。
                               基址不能挪回 333: 段宽 12 会盖住 341..356 的 ACT_ZOOM 回传值 (下拉结果
                               先按 ACT_APPEAR 判, 缩放选中会变成改位置) */
@@ -811,6 +812,9 @@ static bool XjsSetBuildRows() {
             addRow(ACT_FILTERBOX, CT_SWITCH, XjsT(L"设置.窗口.显示筛选框"),
                    XjsT(L"设置.窗口.显示筛选框.说明"),
                    L"", g_showFilterBox, false);
+            addRow(ACT_MINMENU, CT_SWITCH, XjsT(L"设置.窗口.极简控制菜单"),
+                   XjsT(L"设置.窗口.极简控制菜单.说明"),
+                   L"", g_minimalCtrlMenu, false);
             addRow(ACT_STATUSBAR, CT_SWITCH, XjsT(L"设置.窗口.显示状态栏"),
                    XjsT(L"设置.窗口.显示状态栏.说明"),
                    L"", g_showStatusbar, false);
@@ -2350,6 +2354,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
         }
         case ACT_CTRLBTN:   toggle(g_showCtrlBtns); break;   /* owner 标题栏立即重排 */
         case ACT_FILTERBOX: toggle(g_showFilterBox); break;
+        case ACT_MINMENU:   toggle(g_minimalCtrlMenu); break;   /* owner 标题栏立即重排 (`...` 收纳开关) */
         case ACT_STATUSBAR: toggle(g_showStatusbar); break;
         case ACT_TASKBAR:
             toggle(g_taskbarIcon, false);
