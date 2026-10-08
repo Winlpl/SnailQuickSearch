@@ -1055,8 +1055,8 @@ static int XjsSbDropIndex(POINT pt) {
     int idx = 0;
     for (int i = 0; i < n; i++) {
         if (i == g_sbDragIdx) continue;                    /* 自身不参与 */
-        if (pt.x >= (L.sbPlugin[i].left + L.sbPlugin[i].right) / 2) idx++;
-        else break;                                        /* 槽序单调, 到此为止 */
+        if (pt.x < (L.sbPlugin[i].left + L.sbPlugin[i].right) / 2) idx++;
+        else break;                                        /* 槽序单调 (x 递减), 到此为止 */
     }
     return ximin(n - 1, idx);
 }
@@ -1083,6 +1083,16 @@ bool XjsStatusbarPluginDragDown(POINT pt) {
 
 bool XjsStatusbarPluginDragMove(POINT pt) {
     if (g_sbDragIdx < 0) return false;
+    /* 捕获中途丢失 (Alt+Tab/安全注意序列/他窗抢捕): 系统不再送 WM_LBUTTONUP 给本窗,
+       g_sbDragIdx 若不清, 之后每次 WM_MOUSEMOVE 都会被 DragMove 截走吞掉整窗交互。
+       同口径参照 chrome 搜索框拖动 (XjsSearchMouseMove) 的 VK_LBUTTON 校验。 */
+    if (!(GetKeyState(VK_LBUTTON) & 0x8000)) {
+        g_sbDragIdx = -1;
+        g_sbDragTo = -1;
+        g_sbDragging = false;
+        if (XjsSearchWindow::Cur()) XjsSearchWindow::Cur()->Invalidate();
+        return false;
+    }
     g_sbDragPt = pt;
     if (!g_sbDragging) {
         if (!XjsSbDragPassed(g_sbDragFromPt, pt)) return true;   /* 未越阈: 仍是待定点击, 不重绘 */
@@ -1103,8 +1113,11 @@ bool XjsStatusbarPluginDragUp(POINT pt) {
     g_sbDragging = false;
     XjsLayout& L = g_layout;
     if (!wasDrag) {
-        /* 未越阈 = 普通点击: 落回原槽才触发插件命令 (拖离取消, 同其余松开触发口径) */
+        /* 未越阈 = 普通点击: 落回原槽才触发插件命令 (拖离取消, 同其余松开触发口径)。
+           插件命令可能弹询问框/输入框 (同步泵), 不能带着鼠标捕获进泵 (口径同 main.cpp
+           单击打开落地段), 故先放捕获再派发; 调用方随后 ReleaseCapture 是无害幂等。 */
         if (from < L.sbPluginN && XjsPtIn(L.sbPlugin[from], pt)) {
+            if (GetCapture() == g_hWnd) ReleaseCapture();
             XjsPluginStatusBarCommand(from, XjsPluginCurWindowToken());
             XjsSearchWindow::Cur()->Invalidate();
         }

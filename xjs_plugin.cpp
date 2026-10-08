@@ -330,6 +330,11 @@ void XjsPluginUserStateSet(const wchar_t* id, bool enabled) {
         if (u.id == id) { u.enabled = enabled; return; }
     s_user.push_back({ id, enabled });
 }
+void XjsPluginUserStateErase(const wchar_t* id) {   /* 卸载后按 id 移除记录 (XjsPluginUserStateSet 只增不删, 需专门清) */
+    if (!id || !*id) return;
+    for (size_t k = 0; k < s_user.size(); k++)
+        if (s_user[k].id == id) { s_user.erase(s_user.begin() + k); return; }
+}
 int  XjsPluginUserStateCount() { return (int)s_user.size(); }
 bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled) {
     if (i < 0 || i >= (int)s_user.size()) return false;
@@ -568,19 +573,28 @@ static void PluginTrashSweep() {
 
 bool XjsPluginUninstall(int i, std::wstring* err) {
     if (i < 0 || i >= (int)s_plugins.size() || !err) return false;
-    XjsPluginEntry& e = s_plugins[i];
+    std::wstring id = s_plugins[i].mf.id;
+    bool prevEnabled = s_plugins[i].enabled;
     XjsPluginDisable(i);   /* 闸门关+用户态同步+面板会话结束+下线信号 (幂等; 不卸载不 Shutdown, 同禁用口径) */
     std::wstring trash = PluginTrashDir();
     CreateDirectoryW(trash.c_str(), NULL);
-    std::wstring dest = trash + L"\\" + e.mf.id, base = dest;
+    std::wstring dest = trash + L"\\" + id, base = dest;
     for (int n = 1; GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES; n++)
         dest = base + L"_" + std::to_wstring(n);
-    if (!MoveFileW(e.dir.c_str(), dest.c_str())) {   /* 改名同卷瞬时; 锁定中的 DLL 不破映像映射 */
+    if (!MoveFileW(s_plugins[i].dir.c_str(), dest.c_str())) {   /* 改名同卷瞬时; 锁定中的 DLL 不破映像映射 */
         *err = L"插件目录移动失败 (文件被其它程序占用?)";
+        /* 失败 = 目录没挪走 = 卸载没发生: 回滚启用态 (禁用不卸载 DLL, 插件仍在内存仍在注册表),
+           不落盘, 否则本会话被静默禁用、下次任意保存把它写成"已禁用" (用户只看到卸载失败) */
+        XjsPluginEntry& e = s_plugins[i];
+        e.enabled = prevEnabled;
+        PluginUserSync(e);
+        XjsPluginOnPluginsChanged();   /* 回滚后再发一次变化信号, 订阅者重查恢复 */
         return false;
     }
-    s_plugins.erase(s_plugins.begin() + i);   /* 注册表摘除 (下次 XjsSaveConfig 连用户启用态一并落掉) */
+    s_plugins.erase(s_plugins.begin() + i);   /* 注册表摘除 */
+    XjsPluginUserStateErase(id.c_str());   /* 移除用户启用态记录 (防重装同标识残留"已禁用") */
     XjsPluginOnPluginsChanged();   /* 注册表变化信号 (plugins.list 订阅者重查) */
+    XjsSaveConfig();   /* 卸载即时落盘 (原注释误以为下次保存自动清, 实则 s_user 只增不删) */
     return true;
 }
 

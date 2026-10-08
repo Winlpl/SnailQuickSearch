@@ -2022,6 +2022,7 @@ bool XjsPluginUninstall(int i, std::wstring* err);   /* 卸载: 停用+目录挪
 /* 用户状态 (启用) — XjsLoadConfig/XjsSaveConfig 经此读写顶层 "插件" 键 (picojson 留 engine 文件)
    (旧配置条目里的「已确认版本」键随风险确认框移除已废弃, 读到忽略即可) */
 void XjsPluginUserStateSet(const wchar_t* id, bool enabled);
+void XjsPluginUserStateErase(const wchar_t* id);   /* 卸载后按 id 移除用户启用态记录 (防重装残留"已禁用") */
 int  XjsPluginUserStateCount();
 bool XjsPluginUserStateAt(int i, std::wstring* id, bool* enabled);
 
