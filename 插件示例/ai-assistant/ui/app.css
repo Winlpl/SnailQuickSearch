@@ -23,7 +23,7 @@
   --ai-user-bubble-bg:color-mix(in srgb,var(--ai-user-accent) 18%,var(--surface-raised));
   --ai-user-bubble-border:color-mix(in srgb,var(--ai-user-accent) 34%,transparent);
   --ai-user-bubble-text:color-mix(in srgb,var(--ai-user-accent) 6%,var(--text-primary));
-  /* 消息内容列左右各让出的宽度 = 头像 26 + 行内间距 10 (气泡与授权卡同源) */
+  /* 消息行已由头像和 gap 占位，内容列不再重复扣除两侧间距 */
   --ai-msg-gutter:36px;
   --ai-composer-radius:12px;
 }
@@ -139,12 +139,13 @@ textarea,input{user-select:text;-webkit-user-select:text}
 /* ==================== 对话流 ==================== */
 .ai-thread-wrap{position:relative;display:flex;flex:1 1 auto;min-width:0;min-height:0}
 /* 左内边距 40px 给左缘轮次跳转条留位 */
-.ai-thread{position:relative;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:18px 20px 14px 40px}
+/* 跳转刻度浮在内容左缘，不额外挤出大块空白 */
+.ai-thread{position:relative;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:10px 12px 8px 6px}
 .ai-thread::-webkit-scrollbar,.ai-thread *::-webkit-scrollbar{width:16px;height:16px}
 .ai-thread::-webkit-scrollbar-thumb,.ai-thread *::-webkit-scrollbar-thumb{border:4px solid transparent;background-clip:padding-box}
 .ai-thread::-webkit-scrollbar-thumb:hover,.ai-thread *::-webkit-scrollbar-thumb:hover{border:4px solid transparent;background-clip:padding-box}
 .ai-thread::-webkit-scrollbar-thumb:active,.ai-thread *::-webkit-scrollbar-thumb:active{border:4px solid transparent;background-clip:padding-box}
-.ai-thread-inner{display:flex;flex-direction:column;gap:16px;width:100%;max-width:min(1600px,100%);margin:0 auto;
+.ai-thread-inner{display:flex;flex-direction:column;gap:12px;width:100%;max-width:min(1600px,100%);margin:0 auto;
                  user-select:text;-webkit-user-select:text}
 /* 对话区里不参与文本选择的只有交互控件与图标 */
 .ai-thread-inner button,.ai-msg-avatar,.ai-reasoning-ic,.ai-reasoning-chevron,.ai-meta-btn,.ai-user-del{user-select:none;-webkit-user-select:none}
@@ -154,7 +155,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 .ai-msg-avatar{display:grid;flex:0 0 auto;width:26px;height:26px;place-items:center;border-radius:50%;font-size:13px}
 .ai-msg-assistant .ai-msg-avatar{background:color-mix(in srgb,var(--accent-violet) 20%,transparent);color:var(--accent-violet)}
 .ai-msg-user .ai-msg-avatar{background:var(--btn-secondary-hover);color:var(--text-secondary)}
-.ai-msg-main{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 auto;max-width:calc(100% - var(--ai-msg-gutter)*2)}
+.ai-msg-main{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 auto;max-width:calc(100% - var(--ai-msg-gutter))}
 .ai-msg-user .ai-msg-main{align-items:flex-end}
 
 .ai-bubble{padding:9px 12px;border-radius:var(--ai-surface-radius);font-size:12.5px;line-height:1.72;
@@ -564,7 +565,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 @keyframes ai-jump-flash{0%,12%{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-violet) 55%,transparent)}100%{box-shadow:0 0 0 2px transparent}}
 
 /* ---- 空态 ---- */
-.ai-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:52px 20px 40px;text-align:center}
+.ai-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:32px 16px 24px;text-align:center}
 .ai-empty-icon{font-size:32px;color:var(--accent-violet);opacity:.62}
 .ai-empty-title{font-size:14px;color:var(--text-primary)}
 .ai-empty-desc{max-width:460px;font-size:12px;line-height:1.75;color:var(--text-secondary)}
@@ -611,7 +612,7 @@ textarea,input{user-select:text;-webkit-user-select:text}
 
 /* ==================== 输入区 ====================
    整个区域文本指针: 留白也是"点一下就能继续打字"的地方 */
-.ai-composer{flex:0 0 auto;padding:12px 20px 14px;cursor:text}
+.ai-composer{flex:0 0 auto;padding:8px 16px 10px;cursor:text}
 .ai-composer-inner{width:100%;max-width:min(1600px,100%);margin:0 auto}
 .ai-composer-box{--r:var(--ai-composer-radius);position:relative;display:flex;flex-direction:column;gap:6px;
                  padding:9px 9px 7px 12px;border:1px solid var(--glass-border);border-radius:var(--r);

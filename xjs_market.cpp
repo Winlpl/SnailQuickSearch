@@ -634,11 +634,11 @@ static void XjsMkPaint(HWND hwnd) {
            (2026-10-07 用户口径); 有异常状态时警色替代 (错误比简介重要) */
         if (e.statusErr.empty())
             XjsMkDrawEllLines(e.desc,
-                XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
+                XjsRectF(cr.left + SS(16), cr.top + SS(60), cr.right - SS(16), cr.top + SS(60) + SS(26)),
                 s_mk.tfDesc, s_mk.brDim);
         else
             XjsMkDrawEllLines(e.statusErr,
-                XjsRectF(cr.left + SS(16), cr.top + SS(56), cr.right - SS(16), cr.top + SS(56) + SS(30)),
+                XjsRectF(cr.left + SS(16), cr.top + SS(60), cr.right - SS(16), cr.top + SS(60) + SS(26)),
                 s_mk.tfDesc, s_mk.brWarn);
         /* 右上角控件: 已安装 = 启用开关 (设置页同款, 可点, 启停走设置页同一执行端);
            未安装/演示卡 = "安装" 主行动钮 (accent 实底, 悬停 accent2, 松开触发)。
