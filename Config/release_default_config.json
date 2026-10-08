@@ -7,6 +7,10 @@
     {
       "标识": "space-map",
       "启用": true
+    },
+    {
+      "标识": "sql-generator",
+      "启用": true
     }
   ]
 }
