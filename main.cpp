@@ -531,6 +531,18 @@ void XjsOnPopupResult(int id) {
             case 4: XjsSettingsShowDonate(); break;                    /* 捐赠 = 开设置直达捐赠页 */
             case 3: XjsAppCloseWindow(g_hWnd, XCLOSE_EXIT); break;     /* 退出 = 强制真退出 */
         }
+    } else if (id >= IDM_OVER_BASE && id < IDM_OVER_BASE + 8) {
+        /* 标题栏 `...` 溢出菜单 (窗口过小收纳的控制按钮): 与直控按钮同一口径 */
+        switch (id - IDM_OVER_BASE) {
+            case 0: ShowWindow(g_hWnd, SW_MINIMIZE); break;
+            case 1: ShowWindow(g_hWnd, IsZoomed(g_hWnd) ? SW_RESTORE : SW_MAXIMIZE); break;
+            case 2: XjsDismissWindow(g_hWnd); break;   /* 关闭 = 同标题栏 ✕ 策略入口 (主窗藏托盘/子窗真销毁) */
+            case 3:   /* 置顶开关 (与直控图钉同口径) */
+                g_topmost = !g_topmost;
+                SetWindowPos(g_hWnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                XjsSaveConfig();
+                break;
+        }
     } else if (id >= IDM_PLUGIN_BASE && id < IDM_PLUGIN_BASE + 200) {
         /* 插件菜单项 (票号表): 定位登记内容 → 插件 OnCommand。
            本分支必须排在无上界的 IDM_MENU_BASE 段之前; 票号上限见 xjs_plugin.cpp XJS_TICKET_MAX */
@@ -931,7 +943,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_GETMINMAXINFO: {
             DefWindowProcW(hwnd, msg, wParam, lParam);
             MINMAXINFO* mmi = (MINMAXINFO*)lParam;
-            /* 不限制最小窗口尺寸 (用户口径 2026-10-09): 可拖到任意小, 布局自行兜底 */
+            /* 最小窗口尺寸 (用户口径 2026-10-09 改: 设硬下限, 不再可拖到任意小):
+               按本窗 DPI 将逻辑值折算物理像素, 保证标题栏控件与若干列表行始终放得下 */
+            const float ms = XjsWindowDpi(hwnd) / 96.0f;
+            mmi->ptMinTrackSize.x = (LONG)(380.0f * ms + 0.5f);
+            mmi->ptMinTrackSize.y = (LONG)(260.0f * ms + 0.5f);
             /* WS_POPUP 窗口最大化默认铺满整块显示器(盖住任务栏): 显式钳到最近显示器的工作区 */
             MONITORINFO mi = { sizeof(mi) };
             if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
@@ -987,7 +1003,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 XjsUpdateHoverState(pt);
                 /* 交互元素 → HTCLIENT; 其余标题栏 → 拖动 */
                 if (g_hoverWndBtn != WBTN_NONE) return HTCLIENT;
-                if (g_hoverBtn & (HB_MENU | HB_PILL | HB_CLEAR | HB_HISTORY | HB_FILTER)) return HTCLIENT;
+                if (g_hoverBtn & (HB_MENU | HB_PILL | HB_CLEAR | HB_HISTORY | HB_FILTER | HB_OVERFLOW)) return HTCLIENT;
                 /* 搜索框/筛选药丸本体 → HTCLIENT (输入交互); 药丸上下的标题栏空带 (各 5px)
                    → HTCAPTION: 最大化时按住顶带拖动=还原窗口 (此前该列整体 HTCLIENT 拖不动) */
                 if (XjsPtIn(g_layout.searchBox, pt) || XjsPtIn(g_layout.filterBtn, pt)) return HTCLIENT;

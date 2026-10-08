@@ -50,13 +50,13 @@ void XjsChromeLayout() {
     float iconSize = XSF(22);
     XjsRect iconR = XjsRectF(XSF(12), (XSF(40) - iconSize) / 2, XSF(12) + iconSize, (XSF(40) + iconSize) / 2);
     (void)iconR;
-    /* ☰菜单按钮 = 图标区(24) + 实测"菜单"文本宽 + 右留白(10): 右缘与左侧内容边距(☰左缘≈9.5)对称,
-       旧固定宽 74 右侧空白过大 (2026-09-15) */
-    L.menuBtn = XjsRectF(XSF(48), XSF(6),
-                            XSF(48) + XSF(24) + XjsMeasureText(XjsT(L"菜单.菜单按钮"), g_tfMenu) + XSF(10), XSF(34));
     /* 窗口按钮 (右起): 置顶 ─ □ ✕。≡菜单按钮已移除 (与左侧 ☰菜单双入口重复, 2026-09-17);
-       控制按钮(─□✕)可按每窗设置隐藏, 隐藏后只留置顶图钉且靠右缘 (左侧元素随之填充) */
-    float bw = XSF(32), bh = XSF(28);
+       控制按钮(─□✕)可按每窗设置隐藏, 隐藏后只留置顶图钉且靠右缘 (左侧元素随之填充)。
+       窗口过窄时先省略文字 (menuCompact/filterCompact), 仍放不下搜索框则进溢出态 (overflowMode):
+       收起筛选下拉与 置顶/─/□/✕, 只留 `...` 溢出钮, 点 `...` 弹出菜单 (置顶 + 筛选分类 + 最小化/最大化/关闭)。
+       (2026-10-09 用户口径: 过小窗口不再让搜索框压到控件之上, 改用 `...` 收纳) */
+    const float minSearch = XSF(200);
+    float bw = XSF(32), bh = XSF(28), ovW = XSF(40);
     float bx = L.w - XSF(8);
     for (int b = WBTN_CLOSE; b >= WBTN_PIN; b--) {
         if (b != WBTN_PIN && !g_showCtrlBtns) { L.btnRects[b] = XjsRectF(0, 0, 0, 0); continue; }
@@ -65,11 +65,35 @@ void XjsChromeLayout() {
         bx -= XSF(2);
     }
     float btnLeft = L.btnRects[WBTN_PIN].left;   /* 图钉恒可见且必是最左按钮 (控制按钮显示时它排在最左, 隐藏时它是唯一) */
-    /* 筛选下拉: ☐ 图标 + 名称 + ˅ (可按每窗设置隐藏, 搜索框向右填满空位) */
+    /* ☰菜单按钮 = 图标区(24) + 实测"菜单"文本宽 + 右留白(10); 筛选下拉 = ☐ 图标 + 名称 + ˅ */
+    float menuW_full = XSF(24) + XjsMeasureText(XjsT(L"菜单.菜单按钮"), g_tfMenu) + XSF(10);
+    float menuW_icon = XSF(34);   /* 省文字: 仅图标 + 右留白 */
+    std::wstring filterName = g_filters.empty() ? L"全部" : g_filters[g_filterSel].name;
+    float filterW_full = XjsMeasureText(filterName.c_str(), g_tfMenu) + XSF(58);
+    float filterW_icon = XSF(46); /* 省文字: 仅图标 + 箭头 */
+    float menuW = menuW_full, filterW = g_showFilterBox ? filterW_full : 0.0f;
+    L.menuCompact = false; L.filterCompact = false;
+    /* 搜索框可用宽: 左界随菜单宽, 右界 = 按钮组左缘 - 间距 - (筛选框宽 + 间距); menuW 按引用取当前值 */
+    auto searchAvail = [&](float rightEdge, float fW) {
+        float sLeft = XSF(48) + menuW + XSF(16);
+        float sRight = rightEdge - XSF(12) - (g_showFilterBox ? (fW + XSF(12)) : 0);
+        return sRight - sLeft;
+    };
+    if (searchAvail(btnLeft, filterW) < minSearch) { L.menuCompact = true; menuW = menuW_icon; }
+    if (g_showFilterBox && searchAvail(btnLeft, filterW) < minSearch) { L.filterCompact = true; filterW = filterW_icon; }
+    L.menuBtn = XjsRectF(XSF(48), XSF(6), XSF(48) + menuW, XSF(34));
+    /* 文字都省完仍放不下 → 溢出态 (仅当右侧确有可收项: 筛选框可见或控制按钮可见) */
+    L.overflowMode = false; L.overflowBtn = XjsRectF(0, 0, 0, 0);
+    if (searchAvail(btnLeft, filterW) < minSearch && (g_showFilterBox || g_showCtrlBtns)) {
+        L.overflowMode = true;
+        /* 右缘只留 `...` 贴右; 筛选下拉与 置顶/─/□/✕ 全收起进 `...` 菜单, 搜索框右界基准 = `...` 左缘 */
+        float ox = L.w - XSF(8) - ovW;
+        L.overflowBtn = XjsRectF(ox, (XSF(40) - bh) / 2, ox + ovW, (XSF(40) - bh) / 2 + bh);
+        for (int b = WBTN_CLOSE; b >= WBTN_PIN; b--) L.btnRects[b] = XjsRectF(0, 0, 0, 0);
+        btnLeft = ox;
+    }
     float searchRight;
-    if (g_showFilterBox) {
-        std::wstring filterName = g_filters.empty() ? L"全部" : g_filters[g_filterSel].name;
-        float filterW = XjsMeasureText(filterName.c_str(), g_tfMenu) + XSF(58);
+    if (g_showFilterBox && !L.overflowMode) {
         L.filterBtn = XjsRectF(btnLeft - XSF(12) - filterW, XSF(5), btnLeft - XSF(12), XSF(35));
         searchRight = L.filterBtn.left - XSF(12);
     } else {
@@ -78,7 +102,7 @@ void XjsChromeLayout() {
     }
     /* 搜索框 */
     float searchLeft = L.menuBtn.right + XSF(16);
-    L.searchBox = XjsRectF(searchLeft, XSF(5), xf_max(searchRight, searchLeft + XSF(200)), XSF(35));
+    L.searchBox = XjsRectF(searchLeft, XSF(5), xf_max(searchRight, searchLeft + minSearch), XSF(35));
     L.modeBtn = XjsRectF(L.searchBox.left + XSF(3), XSF(7), L.searchBox.left + XSF(31), XSF(33));
     L.historyBtn = XjsRectF(L.searchBox.right - XSF(29), XSF(7), L.searchBox.right - XSF(3), XSF(33));
     L.clearBtn = XjsRectF(L.historyBtn.left - XSF(28), XSF(7), L.historyBtn.left, XSF(33));
@@ -703,14 +727,16 @@ void XjsChromeRenderTitlebar() {
         XjsRect r = L.menuBtn;
         bool hov = (g_hoverBtn & HB_MENU) || g_appMenuOpen;
         if (hov) g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(6), XSF(6)), g_br[XTH_ROW_HOVER]);
-        float cx = r.left + XSF(14), cy = (r.top + r.bottom) / 2;
+        float cx = L.menuCompact ? (r.left + r.right) / 2 : r.left + XSF(14), cy = (r.top + r.bottom) / 2;
         for (int k = -1; k <= 1; k++)
             g_rt->DrawLine(XjsPoint2F(cx - XSF(4.5f), cy + k * XSF(3)), XjsPoint2F(cx + XSF(4.5f), cy + k * XSF(3)),
                 g_appMenuOpen ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_DIM], 1.4f);
-        std::wstring t = XjsT(L"菜单.菜单按钮");
-        g_rt->DrawText(t.c_str(), (UINT32)t.length(), g_tfMenu,
-            XjsRectF(r.left + XSF(24), r.top, r.right, r.bottom),
-            g_appMenuOpen ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_DIM]);
+        if (!L.menuCompact) {   /* 窗口过窄: 省"菜单"文字 (仅留图标) */
+            std::wstring t = XjsT(L"菜单.菜单按钮");
+            g_rt->DrawText(t.c_str(), (UINT32)t.length(), g_tfMenu,
+                XjsRectF(r.left + XSF(24), r.top, r.right, r.bottom),
+                g_appMenuOpen ? (XjsBrush*)g_br[XTH_ACCENT] : (XjsBrush*)g_br[XTH_TEXT_DIM]);
+        }
     }
     /* 搜索框: 聚焦 = 背景在 --panel 上加深一档 (用户口径 2026-09-22, 临时刷走 XjsTempBrush
        两后端中立); 仍不画焦点外圈/高亮边 (用户口径 2026-09-16), 边框恒普通。
@@ -753,8 +779,8 @@ void XjsChromeRenderTitlebar() {
         XjsHostedRender();
         XjsSearchRender();
     }
-    /* 筛选下拉: ☰ 全部 ˅ */
-    {
+    /* 筛选下拉: ☰ 全部 ˅ (溢出态/每窗隐藏 = 零矩形, 跳过不画) */
+    if (L.filterBtn.right > L.filterBtn.left) {
         XjsRect fb = L.filterBtn;
         XjsRoundedRect fr = XjsRoundedRectF(fb, XSF(8), XSF(8));
         g_rt->FillRoundedRectangle(fr, g_br[XTH_PANEL]);
@@ -766,8 +792,9 @@ void XjsChromeRenderTitlebar() {
         g_rt->DrawLine(XjsPoint2F(ix - XSF(4), iy), XjsPoint2F(ix + XSF(4), iy), ic, 1.3f);
         g_rt->DrawLine(XjsPoint2F(ix - XSF(4), iy + XSF(4)), XjsPoint2F(ix + XSF(4), iy + XSF(4)), ic, 1.3f);
         std::wstring name = g_filters.empty() ? L"全部" : g_filters[g_filterSel].name;
-        g_rt->DrawText(name.c_str(), (UINT32)name.length(), g_tfMenu,
-            XjsRectF(fb.left + XSF(22), fb.top, fb.right - XSF(18), fb.bottom), g_br[XTH_TEXT]);
+        if (!L.filterCompact)   /* 窗口过窄: 省筛选名称文字 (仅留图标+箭头) */
+            g_rt->DrawText(name.c_str(), (UINT32)name.length(), g_tfMenu,
+                XjsRectF(fb.left + XSF(22), fb.top, fb.right - XSF(18), fb.bottom), g_br[XTH_TEXT]);
         /* 箭头 */
         float cx = fb.right - XSF(12), cy = (fb.top + fb.bottom) / 2;
         g_rt->DrawLine(XjsPoint2F(cx - XSF(3), cy - XSF(1.5f)), XjsPoint2F(cx, cy + XSF(1.5f)), ic, 1.3f);
@@ -829,6 +856,16 @@ void XjsChromeRenderTitlebar() {
             Line(3.7f, 4.2f, 3.2f, 1.5f);                       /* L3.2 1.5 z */
             if (pinActive) g_rt->ResetTransform();
         }
+    }
+    /* `...` 溢出按钮 (窗口过小: 收起筛选下拉与 ─□✕ 后的收纳入口, 点击弹菜单) */
+    if (L.overflowMode) {
+        XjsRect r = L.overflowBtn;
+        if (g_hoverBtn & HB_OVERFLOW)
+            g_rt->FillRoundedRectangle(XjsRoundedRectF(r, XSF(6), XSF(6)), g_br[XTH_ROW_HOVER]);
+        float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        XjsBrush* dc = (XjsBrush*)g_br[XTH_TEXT_DIM];
+        for (int k = -1; k <= 1; k++)
+            g_rt->FillEllipse(XjsEllipseF(XjsPoint2F(cx + k * XSF(6), cy), XSF(1.6f), XSF(1.6f)), dc);
     }
 }
 
@@ -970,6 +1007,7 @@ void XjsUpdateHoverState(POINT pt) {
             if (XjsPtIn(g_layout.historyBtn, pt)) newBtn |= HB_HISTORY;
             if (g_layout.filterBtn.right > g_layout.filterBtn.left &&   /* 隐藏态 = 零矩形 (每窗设置) */
                 XjsPtIn(g_layout.filterBtn, pt)) newBtn |= HB_FILTER;
+            if (g_layout.overflowMode && XjsPtIn(g_layout.overflowBtn, pt)) newBtn |= HB_OVERFLOW;
         }
     } else if (pt.y >= g_layout.statusbar.top) {
         int plugHover = -1;   /* 插件状态栏项 (hoverFlag = 100+下标, 渲染同源) */
@@ -1148,6 +1186,7 @@ static int XjsChromeHitCmd(POINT pt) {
     if (XjsPtIn(g_layout.menuBtn, pt)) return 5;
     if (g_layout.filterBtn.right > g_layout.filterBtn.left &&   /* 隐藏态 = 零矩形 (每窗设置) */
         XjsPtIn(g_layout.filterBtn, pt)) return 6;
+    if (g_layout.overflowMode && XjsPtIn(g_layout.overflowBtn, pt)) return 10;   /* `...` 溢出钮 */
     if (XjsPtIn(g_layout.modeBtn, pt)) return 7;
     if (XjsSearchClearVisible() && XjsPtIn(g_layout.clearBtn, pt)) return 8;
     if (XjsPtIn(g_layout.historyBtn, pt)) return 9;
@@ -1270,6 +1309,24 @@ bool XjsChromeMouseUp(POINT pt) {
             XjsSearchYieldKeys();   /* 历史下拉面板: 键交列表, 光标不灭 */
             XjsShowHistoryPanel();
             break;
+        case 10: {
+            /* `...` 溢出菜单 (窗口过小收纳): 筛选分类 + 置顶/最小化/最大化(还原)/关闭 */
+            XjsSearchYieldKeys();
+            std::vector<XjsPopupItem> items;
+            if (g_showFilterBox) {
+                for (int i = 0; i < (int)g_filters.size(); i++)
+                    items.push_back({ IDM_FILTER_BASE + i, g_filters[i].name, L"", i == g_filterSel, false });
+                if (!items.empty()) items.push_back({ 0, L"", L"", false, true });   /* 分隔线 */
+            }
+            items.push_back({ IDM_OVER_BASE + 3, XjsT(L"通用词.置顶"), L"", g_topmost, false });
+            items.push_back({ IDM_OVER_BASE + 0, XjsT(L"通用词.最小化"), L"", false, false });
+            items.push_back({ IDM_OVER_BASE + 1, IsZoomed(g_hWnd) ? XjsT(L"通用词.还原") : XjsT(L"通用词.最大化"), L"", false, false });
+            items.push_back({ IDM_OVER_BASE + 2, XjsT(L"通用词.关闭窗口"), L"", false, false });
+            POINT anchor = { (LONG)g_layout.overflowBtn.left, (LONG)g_layout.overflowBtn.bottom };
+            ClientToScreen(g_hWnd, &anchor);
+            XjsShowPopupMenu(g_hWnd, anchor, items, XSF(180));
+            break;
+        }
         default: break;
     }
     return true;

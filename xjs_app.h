@@ -148,10 +148,11 @@ void XjsSetPhase(const wchar_t* p);
 #define IDM_HOSTED_SRC_BASE 7000   /* 托管标签"切换搜索来源"菜单: +来源下标 */
 #define IDM_TRAY_BASE       8000   /* 托盘右键菜单: +1恢复窗口 +2设置 +4捐赠(开设置直达捐赠页) +3退出程序 */
 #define IDM_FCTX_BASE       9000   /* 输入字段右键编辑菜单 (路由层通用): +0剪切 +1复制 +2粘贴 +3全选 +4删除 */
+#define IDM_OVER_BASE       9100   /* 标题栏 `...` 溢出菜单 (窗口过小收纳): +0最小化 +1最大化/还原 +2关闭 +3置顶开关 */
 #define IDM_PLUGIN_BASE     10000  /* 插件菜单/状态栏项 (票号表下标, 上限200; 回传 → XjsPluginOnMenuTicket) */
 
 /* 悬停位 (标题栏搜索框内) */
-enum HoverBits { HB_CLEAR = 1, HB_HISTORY = 2, HB_FILTER = 4, HB_PILL = 8, HB_MENU = 16 };
+enum HoverBits { HB_CLEAR = 1, HB_HISTORY = 2, HB_FILTER = 4, HB_PILL = 8, HB_MENU = 16, HB_OVERFLOW = 32 };
 
 /* 标题栏窗口按钮 (2026-09-17 移除右侧 ≡ 菜单按钮: 与左侧 ☰"菜单"重复, 双入口不合适;
    应用菜单唯一入口 = 左侧 ☰菜单按钮) */
@@ -526,6 +527,10 @@ struct XjsLayout {
     XjsRect clearBtn{};     // 清空
     XjsRect historyBtn{};   // 历史
     XjsRect filterBtn{};    // 筛选下拉 (☰ 全部 ˅)
+    bool menuCompact = false;   // 窗口过窄: ☰菜单按钮省略"菜单"文字 (仅画图标)
+    bool filterCompact = false; // 窗口过窄: 筛选下拉省略名称文字 (仅画图标+箭头)
+    bool overflowMode = false;  // 窗口过小: 收起筛选下拉与 置顶/─□✕, 只留 `...` 溢出钮
+    XjsRect overflowBtn{};      // `...` 溢出按钮 (非溢出态 = 零矩形)
     XjsRect listHead{};     // 表头 28px
     XjsRect list{};         // 列表区 (预览面板打开时右缘收窄)
     XjsRect vtrack{};       // 滚动条轨道
