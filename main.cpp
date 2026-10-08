@@ -931,8 +931,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_GETMINMAXINFO: {
             DefWindowProcW(hwnd, msg, wParam, lParam);
             MINMAXINFO* mmi = (MINMAXINFO*)lParam;
-            mmi->ptMinTrackSize.x = (LONG)XSF(720);   /* 最小尺寸也是尺寸值, 跟 DPI 缩放 */
-            mmi->ptMinTrackSize.y = (LONG)XSF(420);
+            /* 不限制最小窗口尺寸 (用户口径 2026-10-09): 可拖到任意小, 布局自行兜底 */
             /* WS_POPUP 窗口最大化默认铺满整块显示器(盖住任务栏): 显式钳到最近显示器的工作区 */
             MONITORINFO mi = { sizeof(mi) };
             if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
