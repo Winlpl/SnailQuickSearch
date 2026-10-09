@@ -884,13 +884,17 @@ struct XjsHostedTag {
     std::wstring word;              /* 显示词 (= 命中的模式名, 链内忽略大小写唯一) */
     std::vector<std::wstring> srcIds;   /* 同名来源 (customSearchModes 的 id, ≥1) */
     int active = 0;                 /* 当前生效来源下标 */
-    double born = 0;                /* 入场动画起点 (秒, GetTickCount64 口径; 源样式 hostedTagIn .22s) */
+    /* 字面量段 (URL 协议 q|.. / ms=[..] 建的标签): 无模式来源 (srcIds 空), word 即搜索词,
+       litMode = 已解析的模式号 (0..4)。编辑框文字后 XjsHostedExecChain 需据此复现整链,
+       否则无来源标签会被当失效跳过 → 一改字整条链被清空 (2026-10-09 实锤) */
+    bool lit = false;
+    int litMode = 0;
 };
 void XjsHostedExecChain(const std::wstring& tailKw);   /* 标签链(+尾阶段)执行; 无标签时清标签回普通搜索 */
 bool XjsHostedTrySearch(const std::wstring& keyword);  /* 输入词命中模式名 → 转标签接管 (真=已接管) */
 bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput); /* 词转标签 (输入命中/模式菜单点击共用) */
 void XjsHostedRemoveTag(int idx);                      /* 移除标签并重搜剩余链 (无标签回普通搜索) */
-void XjsUrlRunMultiStages(const std::vector<std::pair<int, std::wstring>>& stages, int defMode); /* URL 协议多重搜索: 每段做成内联托管标签(srcIds 留空, 仅显 word)显示于搜索框, 并以引擎多重搜索 JSON 链式提交 (复用 XjsHostedCommit)。段 first=模式号0..4或-1(=defMode), second=搜索词 */
+void XjsUrlRunMultiMs(const std::vector<std::pair<int, std::wstring>>& msStages, const std::wstring& tailQ, int tailMode, int defMode); /* URL ms 多重链 (唯一多重入口, JSON): msStages 先执行(各成内联标签), q(=tailQ)作链末节兼搜索框主词; 引擎 JSON=[ms...,q]。段 -1=defMode, tailMode<0=defMode */
 void XjsHostedClearTags();                             /* 静默清空标签 (不触发搜索) */
 void XjsHostedPurgeMode(const std::wstring& modeId);   /* 模式删除: 剔除其来源并重搜 (源样式 purgeHostedSources) */
 void XjsHostedPickSource(int srcIdx);                  /* 来源切换菜单命令: 换当前来源并重搜整链 */

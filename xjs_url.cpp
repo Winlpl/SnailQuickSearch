@@ -4,11 +4,18 @@
  *       高完整性侧 WndProc WM_COPYDATA 分支校验魔数 + 大小 → UTF-8 URL → 本文件 XjsUrlApplyFromText。
  *       冷启动 (无实例): XjsAppMain 主窗建完读 g_startupUrl 应用一次。
  *
- * 语法: snailsearch://<action>[?<query>]  (P1 只支持 new/open/focus + q|mode|view|skin|zoom|preview|save)
- *       q 支持 "a|b|c" 多重搜索 (引擎 XJS_KEYWORD_MULTI 链式过滤): 每段可带模式前缀
- *       wild:/re:/sql:/lua: (无前缀=本窗当前模式); 单段无前缀回落普通搜索并记历史。
+ * 语法: snailsearch://<action>[?<query>]  (动作: new/open(=new)/focus)
+ *       (支持参数: q|ms|mode|view|skin|zoom|preview|save|win|sort|order|scope|cfg|匹配开关|addmode|pos|size 等)
+ *       q = 单一主关键词 (原样, 不再按 '|' 分段/解 wild:/re:/sql:/lua: 模式前缀 —— 旧式多重写法已废弃)。
+ *       ms=<原样 JSON> = 唯一的多重搜索链入口 (引擎 XJS_KEYWORD_MULTI 链式过滤): 每段 {"q":词,"mode":..},
+ *       段词可含任意字符 (含 '|'/':'); 各段做成内联托管标签显示于搜索框, q 若同时给出则作为链末节追加在最后
+ *       (见 UrlParseStagesJson / XjsUrlRunMultiMs)。mode 可为整数 0..4 或别名 wild/re/sql/lua/lua-exec (缺省回落本窗当前模式)。
  *       save=0 缺省: OpenNew(-1) 建临时窗 (w->urlTransient=true), 关窗走 DestroyAndFree 时移除档案槽;
- *       save=1 P1 暂按 save=0 走, 打日志"P2 支持" (方案 六.P1)。
+ *       save=1 持久命名档案窗: win=<名> 命中同名存活窗则提到前台, 命中未打开档案则按槽重建, 否则新建并改名;
+ *             无 win= 则建 GUID 自动名持久窗 (关窗档案保留, ☰启动器可按槽重建)。
+ *       sort=<字段>&order=asc|desc: 建窗即套用初始排序并写入本窗档案默认排序 (字段=引擎口径中文串)。
+ *       scope=<JSON>: 搜索范围白名单, 与 ms 同口径 — [{"p":路径,"rec":bool}..] 或 ["路径"..] (rec 缺省 true=递归, false=仅本层);
+ *       逐路径独立设递归, 只收绝对路径 (含: 或 \, 无通配 *?)。旧式 '|' 分隔写法已废弃 (见 UrlParseScopeJson)。
  *
  * 校验: 一律按"不可信输入"处理 — 枚举 clamp, 未知键忽略, 载荷 >32KB 拒, scheme 不匹配丢。
  *       任何解析错误不弹窗, 不建窗; 只在 debug 输出计数。
@@ -86,13 +93,15 @@ static bool UrlPair(const std::wstring& v, int* a, int* b) {
     };
     return num(v.substr(0, c), a) && num(v.substr(c + 1), b);
 }
-/* 路径列表 → 引擎 SearchFilterConfig JSON (UTF-8 窄串); 递归默认 true (与 ai-assistant 口径一致) */
-static std::string UrlScopeJson(const std::vector<std::wstring>& paths) {
+/* pos= 坐标哨兵: 屏幕坐标可为负 (主屏左/上方的副屏), 不能用 -1 当"未给"; 取 INT_MIN。 */
+static const int kNoCoord = -2147483647 - 1;
+/* 路径列表(各带递归标志) → 引擎 SearchFilterConfig JSON (UTF-8 窄串); 每路径独立"递归子目录" */
+static std::string UrlScopeJson(const std::vector<std::pair<std::wstring,bool>>& paths) {
     picojson::array arr;
-    for (auto& wp : paths) {
+    for (auto& pr : paths) {
         picojson::object o;
-        o["路径"] = picojson::value(Utf16ToUtf8(wp.c_str()));
-        o["递归子目录"] = picojson::value(true);
+        o["路径"] = picojson::value(Utf16ToUtf8(pr.first.c_str()));
+        o["递归子目录"] = picojson::value(pr.second);
         arr.push_back(picojson::value(o));
     }
     picojson::object root;
@@ -106,25 +115,141 @@ static const XjsCustomMode* UrlFindCustomMode(const std::wstring& name, const st
     return NULL;
 }
 
+/* 多重搜索原样 JSON (ms= 的 JSON 形式): 段词可含 '|'/':'/中文等任意字符, 不受 '|' 分隔符口径限制。
+   载荷 = percent-decode 后的 UTF-8 JSON, 顶层可为数组 (逐元素) 或 {"stages":[..]} 包裹, 每元素:
+     - 字符串                → 该段搜索词, 模式回落本窗当前 (mode=-1);
+     - {"q":"词","mode":..}  → 词取 q|word|kw|搜索词 首个命中; mode 取 mode|m|搜索模式,
+                               可为整数 0..4 或别名 wild/wildcard|re/regex|sql|lua|lua-exec (缺省/非法=-1)。
+   解析失败 / 非上述结构 / 无有效段 → 返回 false, 调用方(ms)忽略该值(不再回落 '|' 分段, 旧式分段入口已删)。 */
+static bool UrlParseStagesJson(const std::string& utf8, std::vector<std::pair<int, std::wstring>>* out) {
+    picojson::value v;
+    if (!picojson::parse(v, utf8).empty()) return false;
+    const picojson::array* arrp = NULL;
+    if (v.is<picojson::array>()) arrp = &v.get<picojson::array>();
+    else if (v.is<picojson::object>()) {           /* 容错: 也接受 {"stages":[..]} 包裹 */
+        picojson::object& o = v.get<picojson::object>();
+        for (const char* kk : { "stages", "\u6bb5", "\u591a\u91cd" }) {   /* stages / 段 / 多重 */
+            auto it = o.find(kk);
+            if (it != o.end() && it->second.is<picojson::array>()) { arrp = &it->second.get<picojson::array>(); break; }
+        }
+    }
+    if (!arrp) return false;
+    auto resolveMode = [](const picojson::value& mv) -> int {
+        if (mv.is<double>()) { int n = (int)mv.get<double>(); return (n >= 0 && n < XMODE_COUNT) ? n : -1; }
+        if (mv.is<std::string>()) {
+            std::string s = mv.get<std::string>();
+            for (auto& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            if (s == "wild" || s == "wildcard") return XMODE_WILDCARD;
+            if (s == "re" || s == "regex")      return XMODE_REGEX;
+            if (s == "sql")                     return XMODE_SQL;
+            if (s == "lua" || s == "lua-filter" || s == "luafilter") return XMODE_LUA;
+            if (s == "lua-exec" || s == "luaexec" || s == "exec")    return XMODE_LUA_EXEC;
+            bool num = !s.empty(); for (char c : s) if (c < '0' || c > '9') num = false;
+            if (num) { int n = atoi(s.c_str()); return (n >= 0 && n < XMODE_COUNT) ? n : -1; }
+        }
+        return -1;
+    };
+    std::vector<std::pair<int, std::wstring>> stages;
+    for (auto& e : *arrp) {
+        std::string wordUtf8; int mode = -1;
+        if (e.is<std::string>()) wordUtf8 = e.get<std::string>();
+        else if (e.is<picojson::object>()) {
+            const picojson::object& o = e.get<picojson::object>();
+            for (const char* wk : { "q", "word", "kw", "\u641c\u7d22\u8bcd" }) {   /* q/word/kw/搜索词 */
+                auto it = o.find(wk);
+                if (it != o.end() && it->second.is<std::string>()) { wordUtf8 = it->second.get<std::string>(); break; }
+            }
+            for (const char* mk : { "mode", "m", "\u641c\u7d22\u6a21\u5f0f" }) {   /* mode/m/搜索模式 */
+                auto it = o.find(mk);
+                if (it != o.end()) { mode = resolveMode(it->second); break; }
+            }
+        }
+        if (wordUtf8.empty()) continue;
+        stages.emplace_back(mode, Utf8ToUtf16(wordUtf8.c_str()));
+    }
+    if (stages.empty()) return false;
+    *out = std::move(stages);
+    return true;
+}
+
+/* 搜索范围 JSON (scope= 的 JSON 形式, 与 ms 同口径): 载荷 = percent-decode 后的 UTF-8 JSON,
+   顶层可为数组 (逐元素) 或 {"搜索范围"/"范围"/"scope":[..]} 包裹, 每元素:
+     - 字符串              → 路径, 递归子目录缺省 true;
+     - {"p":"路径",...}  → 路径取 p|path|路径|word; 递归取 rec|recursive|递归|递归子目录 (bool/0/1/false, 缺省 true)。
+   只收绝对路径 (含: 或 \) 且无通配符 *?。解析失败 / 无有效路径 → 返回 false。 */
+static bool UrlParseScopeJson(const std::string& utf8, std::vector<std::pair<std::wstring,bool>>* out) {
+    picojson::value v;
+    if (!picojson::parse(v, utf8).empty()) return false;
+    const picojson::array* arrp = NULL;
+    if (v.is<picojson::array>()) arrp = &v.get<picojson::array>();
+    else if (v.is<picojson::object>()) {           /* 容错: 也接受 {"搜索范围":[..]} 包裹 */
+        picojson::object& o = v.get<picojson::object>();
+        for (const char* kk : { "\u641c\u7d22\u8303\u56f4", "\u8303\u56f4", "scope" }) {   /* 搜索范围 / 范围 / scope */
+            auto it = o.find(kk);
+            if (it != o.end() && it->second.is<picojson::array>()) { arrp = &it->second.get<picojson::array>(); break; }
+        }
+    }
+    if (!arrp) return false;
+    auto resolveRec = [](const picojson::value& rv) -> bool {
+        if (rv.is<bool>()) return rv.get<bool>();
+        if (rv.is<double>()) return rv.get<double>() != 0.0;
+        if (rv.is<std::string>()) {
+            std::string s = rv.get<std::string>();
+            for (auto& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            if (s == "0" || s == "false" || s == "no" || s == "off") return false;
+        }
+        return true;
+    };
+    std::vector<std::pair<std::wstring,bool>> paths;
+    for (auto& e : *arrp) {
+        std::string pathUtf8; bool rec = true;
+        if (e.is<std::string>()) pathUtf8 = e.get<std::string>();
+        else if (e.is<picojson::object>()) {
+            const picojson::object& o = e.get<picojson::object>();
+            for (const char* wk : { "p", "path", "\u8def\u5f84", "word" }) {   /* p/path/路径/word */
+                auto it = o.find(wk);
+                if (it != o.end() && it->second.is<std::string>()) { pathUtf8 = it->second.get<std::string>(); break; }
+            }
+            for (const char* rk : { "rec", "recursive", "\u9012\u5f52", "\u9012\u5f52\u5b50\u76ee\u5f55" }) {   /* rec/recursive/递归/递归子目录 */
+                auto it = o.find(rk);
+                if (it != o.end()) { rec = resolveRec(it->second); break; }
+            }
+        }
+        if (pathUtf8.empty()) continue;
+        std::wstring wp = Utf8ToUtf16(pathUtf8.c_str());
+        if (wp.find_first_of(L"*?") == std::wstring::npos
+            && (wp.find(L':') != std::wstring::npos || wp.find(L'\\') != std::wstring::npos))
+            paths.emplace_back(wp, rec);
+    }
+    if (paths.empty()) return false;
+    *out = std::move(paths);
+    return true;
+}
+
 /* 解析结果 (P1 只装必要字段) */
 struct XjsUrlReq {
     std::wstring action;              /* 归一化小写: new/open/focus (其它 → new) */
-    /* q / qs: '|' 拆分多重段, 每段 = (模式索引 0..3 或 -1=本窗默认, 搜索词) */
-    std::vector<std::pair<int, std::wstring>> stages;
+    std::wstring q;                   /* 主关键词 q/qs: 单一、原样 (旧式 '|' 分段/模式前缀已废弃; 多重过滤一律走 ms JSON) */
     int mode = -1;                    /* -1 = 未指定; 0..4 内置有档 */
     std::wstring modeName;            /* 非空 = 按名称选用户自定义模式 (与 mode 互斥) */
     std::wstring view;                /* list/details, 空 = 未指定 */
     std::wstring skin;                /* 皮肤标识, 空 = 未指定 */
     int zoom = -1;                    /* -1 = 未指定; 5..20 */
     int preview = -1;                 /* -1 = 未指定; 0/1 */
-    int save = 0;                     /* 0=临时 (缺省), 1=请求落盘 (P1 只打日志) */
-    std::vector<std::wstring> scopePaths;   /* 搜索范围路径 (scope= 按 | 拆分, 应用时生成引擎 JSON) */
+    int save = 0;                     /* 0=临时窗 (缺省, 关窗即删), 1=持久命名档案窗 (win= 指定名, 关窗档案保留) */
+    std::vector<std::pair<std::wstring,bool>> scopePaths;   /* 搜索范围 (scope= JSON): 每项 = (路径, 是否递归子目录 rec 缺省 true) */
     /* URL 添加自定义搜索模式 (addmode/mtype/tpl/mdesc/priv): addMode 非空即触发新增 */
     std::wstring addMode, addDesc, addType, addTpl;
     int addPriv = 0;                        /* 1=窗口私有 (ownerName=本窗档案名), 0=全局共享 */
-    /* 窗口初始几何 (像素): pos=x,y / size=w,h; -1 或未填 = 不改该项 */
-    int winX = -1, winY = -1, winW = -1, winH = -1;
+    /* 窗口初始几何 (像素): pos=x,y / size=w,h; winX/winY 哨兵 kNoCoord(坐标可负), winW/winH 哨兵 -1(尺寸必正) = 不改该项 */
+    int winX = kNoCoord, winY = kNoCoord, winW = -1, winH = -1;
+    /* save=1 持久命名档案窗的窗口名 (win=/name=); 空 = GUID 自动名 */
+    std::wstring winName;
+    /* 初始排序 (sort=字段 & order=asc/desc): sortField 空=不改; sortAsc -1=未指定/0=降序/1=升序 */
+    std::wstring sortField; int sortAsc = -1;
     std::string cfgJson;   /* cfg=<JSON>: 原样 UTF-8 配置对象, 交 XjsUrlApplyWindowConfig 写入本窗档案 */
+    /* ms=<多重搜索链, 独立于 q>: 链先执行, UrlDoNew 把 q 作末段追加; 每段 = (模式 0..4 或 -1=本窗默认, 搜索词) */
+    std::vector<std::pair<int, std::wstring>> msStages;
     /* 匹配开关三态 (-1 未指定 / 0 关 / 1 开), 对齐 XjsMatchSettings 8 字段 */
     int mPf = -1, mPi = -1, mPe = -1, mWs = -1, mWq = -1, mFw = -1, mCs = -1, mEa = -1;
 };
@@ -150,10 +275,10 @@ static bool UrlParse(const std::wstring& raw, XjsUrlReq* out) {
         std::wstring hostW = (qmark == std::wstring::npos) ? raw.substr(pos) : raw.substr(pos, qmark - pos);
         hostLow = ToLowerAscii(Utf16ToUtf8(hostW.c_str()));
     }
-    /* 动作白名单 (P1); 未知 → new (方案 四.4) */
+    /* 动作白名单; 未知 → new (方案 四.4) */
     if (hostLow.empty() || hostLow == "new" || hostLow == "open") out->action = L"new";
     else if (hostLow == "focus") out->action = L"focus";
-    else out->action = L"new";   /* reuse/search P2; 冷落 new 保持不报错 */
+    else out->action = L"new";   /* 未知动作回落 new, 保持不报错 */
 
     /* query 拆对 */
     if (qmark != std::wstring::npos && qmark + 1 < raw.size()) {
@@ -171,37 +296,11 @@ static bool UrlParse(const std::wstring& raw, XjsUrlReq* out) {
             std::wstring keyL = Utf8ToUtf16(ToLowerAscii(k).c_str());
             std::wstring val = Utf8ToUtf16(vRaw.c_str());
             if (keyL == L"q" || keyL == L"qs") {
-                /* 多重段分隔: 裸 '|' 或 '%7C'(大小写不敏感) 都认 —— 浏览器/命令行会把裸 '|' 编码成 '%7C',
-                   两者必须等价。限制: 多重段内不再支持字面 '|' (通配符"或"/SQL || 请用单段)。
-                   每段解码后取可选模式前缀 wild:/re:/sql:/lua: (大小写不敏感) → 该段模式 0/1/2/3;
-                   无前缀 = -1 (本窗当前模式); 冒号前须精确命中白名单才当前缀 (Windows 路径 C:\ 不受影响)。 */
-                std::vector<std::string> segsEnc;
-                size_t start = 0, p = 0;
-                while (p < vEnc.size()) {
-                    size_t dl = 0;
-                    if (vEnc[p] == '|') dl = 1;
-                    else if (vEnc[p] == '%' && p + 2 < vEnc.size() && vEnc[p + 1] == '7' && (vEnc[p + 2] == 'C' || vEnc[p + 2] == 'c')) dl = 3;
-                    if (dl) { segsEnc.push_back(vEnc.substr(start, p - start)); p += dl; start = p; }
-                    else p++;
-                }
-                segsEnc.push_back(vEnc.substr(start));
-                for (auto& segEnc : segsEnc) {
-                    std::string dec; UrlPctDecode(segEnc, &dec);
-                    std::wstring one = Utf8ToUtf16(dec.c_str());
-                    if (one.empty()) continue;
-                    int smode = -1;
-                    size_t colon = one.find(L':');
-                    if (colon != std::wstring::npos) {
-                        std::wstring pre = one.substr(0, colon);
-                        for (auto& c : pre) if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
-                        if      (pre == L"wild") smode = 0;
-                        else if (pre == L"re")   smode = 1;
-                        else if (pre == L"sql")  smode = 2;
-                        else if (pre == L"lua")  smode = 3;
-                        if (smode >= 0) one.erase(0, colon + 1);   /* 命中前缀才剥, 否则整段留作词 */
-                    }
-                    if (!one.empty()) out->stages.emplace_back(smode, one);
-                }
+                out->q = val;                     /* 单一主关键词, 原样 (不再按 '|' 分段/解模式前缀) */
+            } else if (keyL == L"ms" || keyL == L"multi") {
+                /* ms = 唯一的多重搜索链入口 (JSON, 独立于 q): 链先执行, q(若给)作末段追加在最后 (见 UrlDoNew)。
+                   仅接受原样 JSON [{"q","mode"}] (段词可含 '|'); 旧式 '|' 分段入口已删除。 */
+                UrlParseStagesJson(vRaw, &out->msStages);
             } else if (keyL == L"mode") {
                 bool numeric = !val.empty();
                 for (wchar_t c : val) if (c < L'0' || c > L'9') { numeric = false; break; }
@@ -230,18 +329,9 @@ static bool UrlParse(const std::wstring& raw, XjsUrlReq* out) {
                 if (val == L"1" || val == L"true") out->save = 1;
                 else if (val == L"0" || val == L"false") out->save = 0;
             } else if (keyL == L"scope") {
-                /* '|' 分隔多路径; 只收对对应路径 (含: 或 \) 且无通配符 *? */
-                size_t j = 0;
-                while (j <= val.size()) {
-                    size_t bar = val.find(L'|', j);
-                    std::wstring one = (bar == std::wstring::npos) ? val.substr(j) : val.substr(j, bar - j);
-                    if (!one.empty()
-                        && one.find_first_of(L"*?") == std::wstring::npos
-                        && (one.find(L':') != std::wstring::npos || one.find(L'\\') != std::wstring::npos))
-                        out->scopePaths.push_back(one);
-                    if (bar == std::wstring::npos) break;
-                    j = bar + 1;
-                }
+                /* scope = JSON (与 ms 同口径): [{"p":路径,"rec":bool}..] 或 ["路径"..], 顶层可 {"搜索范围":[..]} 包裹;
+                   每路径独立"递归子目录"(rec 缺省 true)。旧式 '|' 分隔 + '!' 前缀已废弃。 */
+                UrlParseScopeJson(vRaw, &out->scopePaths);
             } else if (keyL == L"pinyinfull")   { out->mPf  = UrlBit(val);
             } else if (keyL == L"pinyininitial"){ out->mPi  = UrlBit(val);
             } else if (keyL == L"pinyinexact")  { out->mPe  = UrlBit(val);
@@ -257,6 +347,12 @@ static bool UrlParse(const std::wstring& raw, XjsUrlReq* out) {
             } else if (keyL == L"priv")         { out->addPriv = (UrlBit(val) == 1) ? 1 : 0;
             } else if (keyL == L"pos")          { UrlPair(val, &out->winX, &out->winY);
             } else if (keyL == L"size")         { UrlPair(val, &out->winW, &out->winH);
+            } else if (keyL == L"win" || keyL == L"name") { out->winName = UrlClean(val, 40);   /* save=1 持久命名档案窗名 (同重命名上限 40 字) */
+            } else if (keyL == L"sort")         { out->sortField = UrlClean(val, 24);           /* 排序字段 (引擎口径: 文件名/文件大小/修改时间/创建时间/访问时间/文件评分/别名/文件夹/文件属性) */
+            } else if (keyL == L"order") {
+                std::wstring lo; for (wchar_t c : val) lo += (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c;
+                if (lo == L"asc" || lo == L"1" || lo == L"true") out->sortAsc = 1;
+                else if (lo == L"desc" || lo == L"0" || lo == L"false") out->sortAsc = 0;
             } else if (keyL == L"cfg")          { out->cfgJson = vRaw; }   /* 原样 UTF-8 JSON (含中文键), 不转 UTF-16 */
             /* 未知键: 忽略 (方案 四.4) */
         }
@@ -274,16 +370,50 @@ static void UrlFocusMain() {
     SetForegroundWindow(h);
 }
 
-/* new (P1 唯一建窗路径, save=0/1 都走临时窗; save=1 时打日志) */
+/* new: 建窗主路径 — save=0 临时窗 / save=1 持久命名档案窗 (复用存活窗、按槽重建或新建改名) */
 static void UrlDoNew(const XjsUrlReq& req, std::wstring* err) {
     if (g_isScanning) { if (err) *err = L"扫描中禁止新建窗口"; return; }
-    XjsSearchWindow::OpenNew(-1);              /* 走既有 slot 分配 = XjsUiProfileCount() */
     XjsSearchWindow* w = NULL;
-    int n = XjsSearchWindow::Count();
-    if (n > 0) w = XjsSearchWindow::At(n - 1); /* 最新入表 = 刚建 */
+    if (req.save == 1) {
+        /* 持久命名档案窗: 同名存活窗复用(提到前台) → 同名未打开档案按槽重建 → 否则新建并按 win= 改名。
+           不设 urlTransient (关窗档案保留, ☰启动器可按槽重建)。 */
+        if (!req.winName.empty()) {
+            for (int i = 0; i < XjsSearchWindow::Count(); i++) {           /* ① 存活窗同名 */
+                XjsSearchWindow* c = XjsSearchWindow::At(i);
+                if (c && c->hWnd && c->name == req.winName) { w = c; XjsSummonActivate(c->hWnd); break; }
+            }
+            if (!w) {
+                int slot = -1;
+                for (int i = 1; i < XjsUiProfileCount(); i++) {            /* ② 未打开档案同名 (主窗槽0名固定不参与) */
+                    XjsUiProfile* p = XjsUiProfileAt(i);
+                    if (p && p->name == req.winName) { slot = i; break; }
+                }
+                if (slot > 0) { XjsSearchWindow::OpenNew(slot); w = XjsSearchWindow::AtSlot(slot); }
+                else {                                                       /* ③ 全新: 建后改名 */
+                    XjsSearchWindow::OpenNew(-1);
+                    int n = XjsSearchWindow::Count();
+                    if (n > 0) w = XjsSearchWindow::At(n - 1);
+                    if (w && w->hWnd && !XjsSearchWindow::NameInUse(req.winName.c_str(), w)) {
+                        XjsUiProfile* p = XjsUiProfileAt(w->uiIndex);
+                        std::wstring old = w->name;
+                        if (p) p->name = req.winName;
+                        w->name = req.winName;
+                        XjsCmRenameWindow(old, req.winName);
+                    }
+                }
+            }
+        } else {
+            XjsSearchWindow::OpenNew(-1);                                  /* 无名持久窗 (GUID) */
+            int n = XjsSearchWindow::Count();
+            if (n > 0) w = XjsSearchWindow::At(n - 1);
+        }
+    } else {
+        XjsSearchWindow::OpenNew(-1);              /* 临时窗: 走既有 slot 分配 = XjsUiProfileCount() */
+        int n = XjsSearchWindow::Count();
+        if (n > 0) w = XjsSearchWindow::At(n - 1); /* 最新入表 = 刚建 */
+        if (w && w->hWnd) w->urlTransient = true;  /* 关窗即删的底座 (方案 一.4) */
+    }
     if (!w || !w->hWnd) { if (err) *err = L"窗口创建失败 (16 顶/资源不足)"; return; }
-    w->urlTransient = true;                    /* 关窗即删的底座 (方案 一.4) */
-    if (req.save == 1 && err && err->empty()) *err = L"save=1 暂按 save=0 处理 (P2 支持持久档案)";
 
     /* 字段覆写 (每窗): mode / view / preview / zoom; 皮肤走 XjsApplySkinToWindow 唯一入口 */
     XjsWindowScope scope(w);                   /* Cur() 切到 w, 后续 g_* 宏落到本窗 */
@@ -313,16 +443,32 @@ static void UrlDoNew(const XjsUrlReq& req, std::wstring* err) {
         XjsApplySkinToWindow(w, req.skin);     /* 内部含 XjsSaveConfig (方案 一.4: 关窗即删仍会短暂污染, 已 P1 折中) */
     }
     /* 窗口初始几何: pos=x,y / size=w,h (任一给定即 SetWindowPos, 未给项沿用当前矩形) */
-    if (req.winX >= 0 || req.winY >= 0 || req.winW > 0 || req.winH > 0) {
+    if (req.winX != kNoCoord || req.winY != kNoCoord || req.winW > 0 || req.winH > 0) {
         RECT rc; GetWindowRect(w->hWnd, &rc);
-        int x  = req.winX >= 0 ? req.winX : rc.left;
-        int y  = req.winY >= 0 ? req.winY : rc.top;
+        int x  = req.winX != kNoCoord ? req.winX : rc.left;
+        int y  = req.winY != kNoCoord ? req.winY : rc.top;
         int ww = req.winW > 0  ? req.winW : (int)(rc.right - rc.left);
         int hh = req.winH > 0  ? req.winH : (int)(rc.bottom - rc.top);
         SetWindowPos(w->hWnd, NULL, x, y, ww, hh, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     /* cfg=<JSON>: 常规窗口设置项写入本窗档案并即时生效 (在几何应用后、搜索执行前) */
     if (!req.cfgJson.empty()) XjsUrlApplyWindowConfig(w, req.cfgJson);
+    /* cfg 可能改写了 appearPos(出现位置), 但建窗时的 WM_ACTIVATE 早于此步、已按旧档(=0)定过位 ——
+       未显式给 pos= 时按新档立即重定位一次 (等价于"关闭→回托盘→再唤起"才生效的那步, 提前到 URL 应用当下;
+       appearPos 无效/为 0 时 ApplyAppearPos 内部自会 return; 与 WM_ACTIVATE 侧同口径跳过最大化/最小化) */
+    if (req.winX == kNoCoord && req.winY == kNoCoord && !IsIconic(w->hWnd) && !IsZoomed(w->hWnd))
+        w->ApplyAppearPos();
+    /* 初始排序 (sort=字段 & order=asc/desc): 写入本窗档案默认排序 + 立即对结果对象套用。
+       sortField 用引擎口径 UTF-8 串 (文件名/文件大小/修改时间/创建时间/访问时间/文件评分/别名/文件夹/文件属性);
+       order 缺省 (-1) 按降序 (与新建窗口档案默认档一致)。须在下方 SetText 触发搜索前设好, 使首搜即按此序出结果。 */
+    if (!req.sortField.empty()) {
+        bool asc = (req.sortAsc >= 0) ? (req.sortAsc == 1) : false;
+        XjsUiProfile* sp = XjsUiProfileAt(w->uiIndex);
+        if (sp) { sp->sortField = req.sortField; sp->sortWay = asc; }   /* 落档: ☰启动器按槽重建时沿用 */
+        XjsEngineEnsureResult();
+        std::string sf = Utf16ToUtf8(req.sortField.c_str());
+        XjsResultSetSortField(g_result, sf.c_str(), asc ? TRUE : FALSE);
+    }
     /* 搜索范围: 路径列表 → 引擎 JSON, 存每窗字段 (必须在下方 SetText 触发搜索前设好) */
     if (!req.scopePaths.empty()) w->searchScope = UrlScopeJson(req.scopePaths);
     /* 匹配开关: 三态命中才覆写, 有变更则下推引擎 (XjsApplyMatchSettingsFor 直传 w, 不依赖 Cur) */
@@ -339,16 +485,16 @@ static void UrlDoNew(const XjsUrlReq& req, std::wstring* err) {
         if (dirty) XjsApplyMatchSettingsFor(w);
     }
 
-    /* 搜索执行 (优先自定义模式名 → 多重/单段 q → 仅切模式):
-       - 单段无前缀: 普通搜索 (本窗模式), XjsSearchSetText 即搜并记历史;
-       - 单段带模式前缀: 先设本窗模式再普通搜索;
-       - 多段: 组引擎 XJS_KEYWORD_MULTI JSON 链式过滤 (每段独立模式, 缺省用本窗当前模式)。 */
+    /* 搜索执行 (优先自定义模式名 → ms JSON 多重链 → 单主词 q → 仅切模式):
+       - ms 多重链: 引擎 XJS_KEYWORD_MULTI JSON 链式过滤 (每段独立模式), q 作链末主词;
+       - 单主词 q: 普通搜索 (本窗模式), XjsSearchSetText 即搜并记历史。
+       (旧式 q='a|b' 竖线分段 / 段前缀 wild:/re:/sql:/lua: 入口已删除, 多重一律走 ms) */
     if (!req.addMode.empty()) {
         /* URL 添加自定义搜索模式: 先建模式 (共享/私有) → 添加即用 (输入词静默入框 → 模式名转托管标签) */
         std::wstring owner = req.addPriv ? w->name : std::wstring();
         std::wstring mtype = req.addType.empty() ? L"wildcard" : req.addType;
         if (XjsCustomModeAdd(req.addMode, req.addDesc, mtype, req.addTpl, req.addPriv, owner)) {
-            if (!req.stages.empty()) XjsSearchSetTextQuiet(req.stages.front().second);
+            if (!req.q.empty()) XjsSearchSetTextQuiet(req.q);
             XjsHostedWordAsTag(req.addMode, false);
         } else if (err && err->empty()) {
             *err = L"添加搜索模式失败 (名称/模板为空或类型非法)";
@@ -356,19 +502,19 @@ static void UrlDoNew(const XjsUrlReq& req, std::wstring* err) {
     } else if (!req.modeName.empty()) {
         const XjsCustomMode* cm = UrlFindCustomMode(req.modeName, w->name);
         if (cm) {
-            if (!req.stages.empty()) XjsSearchSetTextQuiet(req.stages.front().second);
+            if (!req.q.empty()) XjsSearchSetTextQuiet(req.q);
             XjsHostedWordAsTag(cm->name, false);
-        } else if (!req.stages.empty()) {
-            XjsSearchSetText(req.stages.front().second);   /* 模式名未命中 → 回落普通搜索 */
+        } else if (!req.q.empty()) {
+            XjsSearchSetText(req.q);   /* 模式名未命中 → 回落普通搜索 */
         }
-    } else if (req.stages.size() >= 2) {
-        int defMode = (req.mode >= 0) ? req.mode : (int)w->mode;   /* 无前缀段的缺省模式 */
-        XjsUrlRunMultiStages(req.stages, defMode);   /* 每段做成内联托管标签显示于搜索框 + 引擎 JSON 链式提交 */
-    } else if (req.stages.size() == 1) {
-        if (req.stages[0].first >= 0) w->mode = req.stages[0].first;   /* 段前缀指定模式: 落到本窗再普通搜索 */
-        XjsSearchSetText(req.stages[0].second);
+    } else if (!req.msStages.empty()) {
+        /* ms 多重链 (JSON) 先执行, q(主词)作为链末节追加 ("先多重、q 放最后") */
+        int defMode = (req.mode >= 0) ? req.mode : (int)w->mode;   /* 无前缀段/q 的缺省模式 */
+        XjsUrlRunMultiMs(req.msStages, req.q, defMode, defMode);
+    } else if (!req.q.empty()) {
+        XjsSearchSetText(req.q);                   /* 单主词普通搜索 (本窗模式), 即搜并记历史 */
     } else if (req.mode >= 0) {
-        XjsSearchNow(false);                   /* 只切模式: 按新模式重搜现词 */
+        XjsSearchNow(false);                       /* 只切模式: 按新模式重搜现词 */
     }
     w->Invalidate();
 }

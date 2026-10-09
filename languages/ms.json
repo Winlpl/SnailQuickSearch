@@ -178,6 +178,8 @@
  "设置.通用.双击Ctrl.说明": "Tekan Ctrl dua kali untuk memanggil tetingkap pilihan. Ciri ini memantau input papan kekunci berterusan, sesetengah antivirus mungkin salah tandakan; disarankan kekal dilumpuhkan jika tidak digunakan",
  "设置.通用.开机自启动": "Mula automatik semasa but",
  "设置.通用.开机自启动.说明": "Mula automatik selepas log masuk (sembunyi ke tray, berjalan sebagai pentadbir); seru melalui ikon tray, kekunci pintas atau Ctrl dwi",
+ "设置.通用.URL协议": "Protokol URL",
+ "设置.通用.URL协议.说明": "Daftarkan pengendali protokol snailsearch:// supaya halaman web, dialog Jalankan, atau program lain boleh mencetuskan carian secara terus (ditulis ke registri pengguna semasa; boleh dimatikan bila-bila masa)",
  "设置.窗口.主窗名说明": "Ini tetingkap utama program, tetap sebagai \"Tetingkap Lalai\", tidak boleh dinamakan semula",
  "设置.窗口.窗口名称.说明": "Nama tetingkap ini untuk membezakan beberapa tetingkap carian yang terbuka serentak; klik butang di kanan untuk ubah",
  "设置.窗口.全局快捷键": "Kekunci pintas sejagat",

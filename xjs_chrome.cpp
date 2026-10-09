@@ -103,7 +103,12 @@ void XjsChromeLayout() {
     }
     /* 搜索框 */
     float searchLeft = L.menuBtn.right + XSF(16);
-    L.searchBox = XjsRectF(searchLeft, XSF(5), xf_max(searchRight, searchLeft + minSearch), XSF(35));
+    float sbRight = xf_max(searchRight, searchLeft + minSearch);
+    /* 溢出态右侧只剩 `...` 无可再收: 搜索框(含清空/历史钮)不得越过 `...` 左缘。
+       minSearch 经 XSF 随缩放放大, 放大后 xf_max 会把搜索框右缘顶穿 `...` 造成重叠
+       (2026-10-09 用户口径: 开启缩放后 `...` 重叠) —— 溢出态改以 searchRight 为准, 允许搜索框收窄 */
+    if (L.overflowMode) sbRight = xf_max(searchLeft, searchRight);
+    L.searchBox = XjsRectF(searchLeft, XSF(5), sbRight, XSF(35));
     L.modeBtn = XjsRectF(L.searchBox.left + XSF(3), XSF(7), L.searchBox.left + XSF(31), XSF(33));
     L.historyBtn = XjsRectF(L.searchBox.right - XSF(29), XSF(7), L.searchBox.right - XSF(3), XSF(33));
     L.clearBtn = XjsRectF(L.historyBtn.left - XSF(28), XSF(7), L.historyBtn.left, XSF(33));
@@ -464,17 +469,12 @@ void XjsHostedRender() {
     if ((g_hostedTags.empty() && !inMode) || !g_rt) return;
     if (g_hostedRegion.right <= g_hostedRegion.left) return;
     g_rt->PushAxisAlignedClip(g_hostedRegion, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    double now = (double)GetTickCount64() / 1000.0;
     for (int i = 0; i < (int)g_hostedRects.size() && i < (int)g_hostedTags.size(); i++) {
         XjsHostedTag& t = g_hostedTags[i];
         XjsRect r = g_hostedRects[i];
-        /* 入场动画 (源样式 hostedTagIn .22s: scale .7→1 + 透明 .3→1) */
-        float e = xf_min((float)((now - t.born) / 0.22), 1.0f);
-        if (e < 0) e = 0;
-        float sc = 0.7f + 0.3f * e, al = 0.3f + 0.7f * e;
-        float cxm = (r.left + r.right) / 2, cym = (r.top + r.bottom) / 2;
-        XjsRect a = XjsRectF((r.left - cxm) * sc + cxm, (r.top - cym) * sc + cym,
-                                    (r.right - cxm) * sc + cxm, (r.bottom - cym) * sc + cym);
+        /* 无入场动画: 标签直接以最终尺寸/不透明显示 (源样式 hostedTagIn .22s 缩放+淡入按用户口径去掉, 体验更干脆) */
+        const float al = 1.0f;
+        XjsRect a = r;
         bool multi = t.srcIds.size() > 1;
         bool hov = (g_hostHoverTag == i);
         XjsColor accent = g_skin.accent; accent.a *= al;

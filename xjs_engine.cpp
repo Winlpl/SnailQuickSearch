@@ -1718,7 +1718,12 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
     bool tplConsumesBox = false;              /* 链中任一模板含 <keyword> = 输入文字已由模板消费 */
     for (int i = 0; i < (int)g_hostedTags.size(); i++) {
         const XjsHostedTag& t = g_hostedTags[i];
-        if (t.srcIds.empty()) continue;
+        if (t.lit) {                       /* 字面量段 (URL): word 即搜索词, 不消费框内文字 */
+            stageQueries.push_back(t.word);
+            tagStages.push_back(i);
+            continue;
+        }
+        if (t.srcIds.empty()) continue;    /* 无来源且非字面量 = 来源已全失效的历史标签, 跳过 (不中断链) */
         XjsCustomMode v;
         if (!XjsModeViewById(t.srcIds[t.active], &v)) continue;   /* 来源失效 (prune 后不会出现, 同原多阶段跳过口径) */
         bool found = false;
@@ -1739,8 +1744,14 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
     std::wstring titleWord = !tail.empty() ? tail : g_hostedTags[tagStages[0]].word;   /* 框内文字(含被模板消费的)优先 */
     if (tagStages.size() == 1 && !hasTail) {
         /* 单标签直接执行: 模板(占位符已替换)按类型显式指定 (全局模式可能是通配符, 空参会让 SQL 模板按通配符跑) */
+        const XjsHostedTag& only = g_hostedTags[tagStages[0]];
+        if (only.lit) {                    /* 字面量单段 (URL 删剩一段): word 按自身模式直接执行 */
+            XjsHostedCommit(Utf16ToUtf8(stageQueries[0].c_str()), g_modeToKeyword[only.litMode], titleWord);
+            XjsSearchWindow::Cur()->Invalidate();
+            return;
+        }
         XjsCustomMode v;
-        if (XjsModeViewById(g_hostedTags[tagStages[0]].srcIds[g_hostedTags[tagStages[0]].active], &v)) {
+        if (XjsModeViewById(only.srcIds[only.active], &v)) {
             XjsHostedCommit(Utf16ToUtf8(stageQueries[0].c_str()), XjsCmKeyword(v.type), titleWord);
             XjsSearchWindow::Cur()->Invalidate();
         }
@@ -1762,6 +1773,12 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
             o["搜索词"] = picojson::value(Utf16ToUtf8(tail.c_str()));
         } else {
             XjsHostedTag& t = g_hostedTags[tagStages[i]];
+            if (t.lit) {                    /* 字面量段: 模式号→阶段串 + word 直接入链 */
+                o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageModeByG(t.litMode)));
+                o["搜索词"] = picojson::value(Utf16ToUtf8(stageQueries[i].c_str()));
+                arr.push_back(picojson::value(o));
+                continue;
+            }
             XjsCustomMode v;
             if (!XjsModeViewById(t.srcIds[t.active], &v)) continue;
             o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageMode(v.type)));
@@ -1773,33 +1790,38 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
     XjsSearchWindow::Cur()->Invalidate();
 }
 
-/* URL 协议多重搜索: 首段=主关键词填进搜索框(普通文字, 不标签化), 第2段起做成"内联托管标签"(srcIds 留空 →
-   渲染只读 word、不弹来源菜单, 安全)显示在搜索框前部; 整链以引擎多重搜索 JSON 链式提交 (复用 XjsHostedCommit
-   正规出口, 不自建第二份搜索路径)。段 first = 模式号 (0..4) 或 -1 (= defMode 本窗当前模式); second = 搜索词。
+/* URL ms 多重搜索: msStages 各段做成内联托管标签(先执行), q(=tailQ)作为搜索框主词兼链末节 —— "先多重、q 放最后"。
+   引擎 JSON = [msStages..., {tailQ}] (tailQ 空则只 ms 链)。段 first = 模式号 0..4 或 -1(=defMode); tailMode<0 → 用 defMode。
    须在 UI 线程、XjsWindowScope(目标窗) 内调用。 */
-void XjsUrlRunMultiStages(const std::vector<std::pair<int, std::wstring>>& stages, int defMode) {
-    if (!g_engine || g_isScanning || stages.empty()) return;
+void XjsUrlRunMultiMs(const std::vector<std::pair<int, std::wstring>>& msStages, const std::wstring& tailQ, int tailMode, int defMode) {
+    if (!g_engine || g_isScanning || msStages.empty()) return;
     if (!XjsEngineEnsureResult()) return;
+    int tm = (tailMode >= 0) ? tailMode : defMode;
+    if (tm < 0 || tm > 4) tm = 0;
     XjsHostedClearTags();
-    XjsSearchSetTextQuiet(stages.front().second);   /* 首段=主关键词: 填搜索框普通文字, 不标签化 */
+    XjsSearchSetTextQuiet(tailQ);   /* q = 链末节, 填搜索框普通文字(不标签化), 显示在标签之后 */
     picojson::array arr;
-    for (size_t i = 0; i < stages.size(); i++) {
-        const auto& st = stages[i];
+    for (size_t i = 0; i < msStages.size(); i++) {
+        const auto& st = msStages[i];
         int m = (st.first >= 0) ? st.first : defMode;
         if (m < 0 || m > 4) m = 0;
-        if (i >= 1) {   /* 第 2 段起做成内联托管标签 (主关键词留框不标签化); srcIds 空 → 渲染只读 word、不弹来源菜单 */
-            XjsHostedTag t;
-            t.word = st.second;
-            t.born = (double)GetTickCount64() / 1000.0;
-            g_hostedTags.push_back(t);
-        }
+        XjsHostedTag t;               /* ms 段 → 内联托管标签 (srcIds 空 → 渲染只读 word, 不弹来源菜单) */
+        t.word = st.second;
+        t.lit = true; t.litMode = m;   /* 字面量段: 编辑框文字后仍可复现整链 */
+        g_hostedTags.push_back(t);
         picojson::object o;
         o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageModeByG(m)));
         o["搜索词"] = picojson::value(Utf16ToUtf8(st.second.c_str()));
         arr.push_back(picojson::value(o));
     }
+    if (!tailQ.empty()) {             /* q 追加为链末节 */
+        picojson::object o;
+        o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageModeByG(tm)));
+        o["搜索词"] = picojson::value(Utf16ToUtf8(tailQ.c_str()));
+        arr.push_back(picojson::value(o));
+    }
     g_hostedCaret = (int)g_hostedTags.size();
-    XjsHostedCommit(picojson::value(arr).serialize(), XJS_KEYWORD_MULTI, stages.front().second);
+    XjsHostedCommit(picojson::value(arr).serialize(), XJS_KEYWORD_MULTI, tailQ);
     XjsSearchWindow::Cur()->Invalidate();
 }
 
@@ -1887,7 +1909,6 @@ bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput) {
         t.word = word;
         t.srcIds = srcIds;
         t.active = 0;
-        t.born = (double)GetTickCount64() / 1000.0;
         g_hostedTags.push_back(t);
     } else {
         /* 同词再次命中 (模式重发/菜单再点): 刷新来源集合, 尽量保留当前选中来源 */
@@ -2295,10 +2316,16 @@ void XjsSaveConfig() {
     picojson::array uiarr;
     for (int i = 0; i < XjsUiProfileCount(); i++) {
         XjsUiProfile* p = XjsUiProfileAt(i);
+        bool transient = false;
         for (int wi = 0; wi < XjsSearchWindow::Count(); wi++) {
             XjsSearchWindow* w = XjsSearchWindow::At(wi);
-            if (w->uiIndex == i && w->hWnd) { XjsCollectUiProfileInto(w, *p); break; }
+            if (w->uiIndex == i && w->hWnd) { XjsCollectUiProfileInto(w, *p); transient = w->urlTransient; break; }
         }
+        /* snailsearch:// 临时窗 (urlTransient) 关窗即删, 其档案槽只在存活期占位, 一律不写进配置数组 ——
+           否则"关子窗时先 XjsSaveConfig 再 DestroyAndFree 摘槽"的时序会把临时窗 GUID 档案落进 config,
+           进程被强杀 (build.bat 杀实例) 或关闭后未再触发保存时, 残留成"未打开"的幽灵档案
+           (2026-10-09 用户实测偶发泄漏) */
+        if (transient) continue;
         picojson::object o;
         o[K_WINNAME] = picojson::value(Utf16ToUtf8(p->name.c_str()));
         o[K_SKIN] = picojson::value(Utf16ToUtf8(p->skin.c_str()));

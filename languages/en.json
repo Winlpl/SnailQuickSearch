@@ -178,6 +178,8 @@
  "设置.通用.双击Ctrl.说明": "Press Ctrl twice to summon the chosen window. This feature continuously monitors keyboard input and some antivirus tools may false-flag it; keep it disabled if unused",
  "设置.通用.开机自启动": "Start with Windows",
  "设置.通用.开机自启动.说明": "Start automatically after login (hidden to tray, running as administrator); summon via tray icon, hotkey, or double-Ctrl",
+ "设置.通用.URL协议": "URL protocol",
+ "设置.通用.URL协议.说明": "Register the snailsearch:// protocol handler so web pages, the Run dialog, or other programs can launch searches directly (writes to the current user's registry; can be turned off anytime)",
  "设置.窗口.主窗名说明": "This is the program's main window, fixed as \"Default Window\"; it cannot be renamed",
  "设置.窗口.窗口名称.说明": "This window's name, to tell apart multiple open search windows; click the button to rename",
  "设置.窗口.全局快捷键": "Global hotkey",
