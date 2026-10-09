@@ -403,9 +403,14 @@ void XjsSearchWindow::DestroyAndFree() {
             s_wins[--s_winCount] = NULL;
             /* 档案槽 (uiIndex) 不回收不前移: 槽持久绑定命名窗口档案, ☰菜单启动器
                可随时按未打开的槽重建窗口 (曾按存活序前移, 与持久槽语义冲突) */
+            /* 例外: snailsearch:// URL 建的临时窗 (urlTransient) 关窗即删 —
+               先取 XjsPluginOnWindowsCompacted 后移代, 再移除档案槽会前移其它窗 uiIndex;
+               顺序: s_wins 摘除 → 插件令牌代递增 → 本窗 urlTransient 则 XjsUiProfilesRemove
+               (内部同步把 s_wins 中 uiIndex>slot 前移, 不会回响本窗已拆毁上下文) */
             /* 整体前移 = 后窗换槽: 插件窗口令牌按 (代<<32)|槽号 寻址, 从摘除槽起递增代号
                作废旧令牌 (否则旧令牌命中压缩后占住该槽的别的窗口 = 串窗) */
             XjsPluginOnWindowsCompacted(i);
+            if (urlTransient && uiIndex > 0) XjsUiProfilesRemove(uiIndex);   /* 主窗 slot=0 永远不挨 */
             if (s_curWin == this) SetCur(NULL);
             {   /* 持面板锁跨越拆毁: 位图型面板的插件工作线程可能在锁内做归属校验/交付拷贝
                    (任意线程 API), 锁内看到的必是活对象 (CS 同线程可重入, 析构链无自锁死) */

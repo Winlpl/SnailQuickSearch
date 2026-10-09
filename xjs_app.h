@@ -110,6 +110,11 @@
 #define WM_PV_IMG_READY     (WM_APP + 6)      /* 预览图片异步装载完成 (工作线程 → 窗口; lParam=作业代号) */
 #define WM_PV_TXT_READY     (WM_APP + 7)      /* 预览文本异步装载完成 (流式分块; lParam=作业代号) */
 
+/* snailsearch:// URL 协议跨完整性送达 魔数 (WM_COPYDATA 的 dwData):
+   'S''N''L''U' 四字节拼接 = 0x534E4C55; 提权侧 WndProc 见此魔数才取 lpData,
+   别的程序发的 WM_COPYDATA 一律回落 DefWindowProc (方案 四.10) */
+#define SNAIL_URL_MAGIC     0x534E4C55u
+
 /* 面板接管事件类型 (镜像 xjs_plugin_sdk.h 的 XJS_PANEL_*; SDK 头只有 xjs_plugin.cpp include,
    宿主路由走这套同名值 — xjs_plugin.cpp 内 static_assert 逐项对值, 禁止单边改号) */
 enum { XJS_HPANEL_OPEN = 1, XJS_HPANEL_CLOSE = 2, XJS_HPANEL_RESIZE = 3, XJS_HPANEL_MOUSE_MOVE = 4,
@@ -861,6 +866,12 @@ bool XjsCmApplies(const XjsCustomMode& cm, const std::wstring& winName);   /* �
 int  XjsCmWindowCount(const std::wstring& winName);   /* 该档案名下专属模式数 (删除确认提示用) */
 int  XjsCmPurgeWindow(const std::wstring& winName);   /* 删除档案: 连带删除其专属模式 (返回剔除数) */
 void XjsCmRenameWindow(const std::wstring& oldName, const std::wstring& newName);  /* 窗口改名: 专属模式归属随迁 */
+/* URL 协议: 以编程方式添加自定义搜索模式 (等价"＋添加搜索模式"弹窗保存: id 生成/头插/落盘)。
+   type = wildcard/regex/sql/lua/lua-exec; scope 0=全局共享 1=仅 ownerName 窗。真=已添加。 */
+bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const std::wstring& type,
+                      const std::wstring& tpl, int scope, const std::wstring& ownerName);
+/* URL 协议 cfg=<JSON>: 键名对齐配置文件中文主键, 写入本窗档案并即时生效 (常规项; 热键/列布局后续)。 */
+void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8);
 /* 药丸模式菜单打开时的自定义模式 id 快照 (xjs_chrome.cpp): 菜单按作用范围过滤后下标≠全局下标,
    且菜单开着时容器可能被其它窗口改动 — 回传统一按 id 定位 (菜单鼠标互斥, 全进程单份快照) */
 std::wstring XjsCmodeMenuIdAt(int idx);   /* 越界=空串 */
@@ -879,6 +890,7 @@ void XjsHostedExecChain(const std::wstring& tailKw);   /* 标签链(+尾阶段)�
 bool XjsHostedTrySearch(const std::wstring& keyword);  /* 输入词命中模式名 → 转标签接管 (真=已接管) */
 bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput); /* 词转标签 (输入命中/模式菜单点击共用) */
 void XjsHostedRemoveTag(int idx);                      /* 移除标签并重搜剩余链 (无标签回普通搜索) */
+void XjsUrlRunMultiStages(const std::vector<std::pair<int, std::wstring>>& stages, int defMode); /* URL 协议多重搜索: 每段做成内联托管标签(srcIds 留空, 仅显 word)显示于搜索框, 并以引擎多重搜索 JSON 链式提交 (复用 XjsHostedCommit)。段 first=模式号0..4或-1(=defMode), second=搜索词 */
 void XjsHostedClearTags();                             /* 静默清空标签 (不触发搜索) */
 void XjsHostedPurgeMode(const std::wstring& modeId);   /* 模式删除: 剔除其来源并重搜 (源样式 purgeHostedSources) */
 void XjsHostedPickSource(int srcIdx);                  /* 来源切换菜单命令: 换当前来源并重搜整链 */
@@ -1030,6 +1042,7 @@ struct XjsUiProfile {
 class XjsSearchWindow {
 public:
     bool isMain = false;         /* 主窗: 托盘/热键/引擎生命周期/配置归属 */
+    bool urlTransient = false;   /* snailsearch:// URL 建的临时窗: 关窗时从 s_uiProfiles 同步移除该档案槽 (方案 一.4 关窗即删) */
     int uiIndex = 0;             /* 绑定的 uiWindows 档案槽 (持久: 关窗档案保留, 菜单可按槽位重建窗口;
                                     主窗恒槽 0; 不再是存活序号, 窗口无编号只有名称) */
     std::wstring name;           /* 窗口名称 (显示用身份; 主窗固定 XJS_MAIN_WIN_NAME, 其余默认 GUID, 可重命名) */
@@ -1062,6 +1075,7 @@ public:
     bool openAsync = true;
     bool openHideWindow = false;
     XjsMatchSettings match;      /* 搜索匹配 ×8 (每窗, 随 uiWindows 档案持久化) */
+    std::string searchScope;     /* 搜索范围: 引擎 SearchFilterConfig JSON (UTF-8 窄串), 空=不限定 (URL 协议运行时注入) */
     std::vector<std::wstring> history[XMODE_COUNT];   /* 搜索历史 (每窗; 按搜索模式分档, 下标=XjsSearchMode) */
     std::wstring histPending;            /* 待落账搜索词 (历史落账制: 停止输入/焦点交列表 且搜索成功完成才进 history) */
     int histPendingMode = 0;             /* 待记词所属搜索模式 (arm 时快照 g_mode, 防落账前切档记错档) */
@@ -1440,6 +1454,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_sbDragFromPt    (XjsSearchWindow::Cur()->sbDragFromPt)
 #define g_sbDragPt        (XjsSearchWindow::Cur()->sbDragPt)
 #define g_previewVisible  (XjsSearchWindow::Cur()->previewVisible)
+#define g_searchScope     (XjsSearchWindow::Cur()->searchScope)   /* 搜索范围 JSON (URL 协议注入, 每窗运行时) */
 #define g_openElevated    (XjsSearchWindow::Cur()->openElevated)     /* 打开文件: 继承管理员权限 (每窗) */
 #define g_openAsync       (XjsSearchWindow::Cur()->openAsync)        /* 打开文件: 异步线程执行 (每窗) */
 #define g_openHideWindow  (XjsSearchWindow::Cur()->openHideWindow)   /* 打开文件后隐藏窗口 (每窗) */
@@ -1503,6 +1518,8 @@ extern std::atomic<bool> g_busy;
 extern std::atomic<bool> g_syncFileChanged;     /* 引擎级同步变化标记: SYNC_* 回调签名无结果对象 (源样式单窗都落窗口成员, dome 多窗按信号归属分两级) */
 extern std::atomic<bool> g_doubleCtrl;          /* 双击 Ctrl 当前激活态 (目标有效=真; 钩子线程读, 默认关: 杀软误报) */
 extern std::wstring g_doubleCtrlTarget;         /* 双击 Ctrl 触发目标窗口名 ("默认窗口"/档案名; 空=禁用; UI 线程) */
+extern std::wstring g_startupUrl;               /* 冷启动时从命令行捕获的 snailsearch:// URL (提权后首窗建立之后应用一次即清空) */
+extern bool g_urlProtocolEnabled;               /* 配置顶层 "URL协议启用": 决定是否在启动与开关切换时同步 HKCU 挂钩 */
 extern std::atomic<bool> g_dbReady;             /* 数据库就绪 (加载/首扫完成): 结果对象只允许就绪后创建 (早建=被定死文件名序) */
 extern int g_fileCount;
 extern std::wstring g_scanDrive;
@@ -1666,6 +1683,17 @@ void XjsDoubleCtrlApply();        /* 按目标有效性实时启停钩子 (下�
 void XjsApplyMatchSettingsFor(XjsSearchWindow* w);   /* w->match → w->result (xjs_result_SetSearchSettings) */
 void XjsDismissWindow(HWND hwnd);   /* 窗口消失统一策略入口 (✕/热键/失焦关闭/双击Ctrl/Esc末级): 主窗藏托盘, 子窗真销毁 */
 void XjsElevateAndRestart();
+
+/* ---- URL 协议 (snailsearch://, xjs_url.cpp, P1) ----
+ * 平台口径:
+ *   - 提权侧 WM_CREATE 已 ChangeWindowMessageFilterEx(WM_COPYDATA, MSGFLT_ALLOW);
+ *   - 第二实例中完整性 wWinMain 命中单实例 mutex 时, 若命令行带 URL, 优先
+ *     SendMessageTimeout(WM_COPYDATA, SNAIL_URL_MAGIC, COPYDATASTRUCT*), 失败回落 WM_WAKEUP;
+ *   - 冷启动 (无实例): XjsAppMain 建完主窗后从 g_startupUrl 取一次性应用。 */
+bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err);   /* 解析+分发, 返回否=丢弃 (不弹窗) */
+void XjsUrlRegisterScheme(bool enable);                             /* HKCU 挂钩/摘钩 (幂等) */
+bool XjsUrlIsRegisteredScheme();                                    /* 当前 HKCU 挂钩态 (UI 开关显示) */
+bool XjsUrlSendCopyData(HWND target, const wchar_t* url);           /* 中 IL 侧发送入口: TRUE=送达 */
 std::vector<std::wstring> XjsSplitLines(const std::wstring& text);     /* 文本预览分行 */
 
 /* ---- 绘图后端 (xjs_d2d = D2D 实现 / xjs_gdiplus = GDI+ 实现, XjsGfxApi 两张表) ---- */

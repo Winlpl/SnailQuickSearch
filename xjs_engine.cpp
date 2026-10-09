@@ -300,8 +300,8 @@ void XjsSearchNow(bool commitHistory) {
     int fingerprint = -1;
     /* g_modeToKeyword 直接映射: Lua 过滤档=-3 谓词 / Lua 执行档=-4 执行 (引擎已移除专用入口,
        两种 Lua 均经 Query 以类型提交);
-       SearchFilterConfig=NULL: 宿主搜索框暂无路径白名单入口, 不下推过滤 (需要时由调用方传 JSON) */
-    fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], NULL, FALSE);
+       SearchFilterConfig: 宿主搜索框无 UI 入口, 但 URL 协议可注入每窗 scope (g_searchScope, 空=NULL 不下推) */
+    fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], g_searchScope.empty() ? NULL : g_searchScope.c_str(), FALSE);
     if (fingerprint != -1) {
         g_searching.store(true);   /* 重绘转用快照画, 完成/失败回调解除 */
         g_searchFingerprint = fingerprint;
@@ -618,6 +618,7 @@ static const char* const K_SEARCHMODE = "搜索模式";          /* 窗口条目
 static const char* const K_ZOOM = "页面缩放";               /* 曾顶层共享, 已每窗化 (条目内; 顶层旧键迁移后废弃) */
 static const char* const K_DOUBLECTRL = "双击Ctrl目标";      /* 顶层: 档案名, 空=禁用 */
 static const char* const K_ENGINE = "绘制引擎";              /* 顶层: "d2d"|"gdiplus", 重启生效 (设置-通用) */
+static const char* const K_URLPROTO = "URL协议启用";          /* 顶层: snailsearch:// HKCU 挂钩开关 (设置-通用新增) */
 static const char* const K_WINRECT = "窗口矩形";             /* 窗口条目内: {横坐标,纵坐标,宽,高,DPI}; 曾为顶层共享键(已迁入槽0后废弃) */
 static const char* const K_REBUILD = "重建记忆";             /* 顶层: 重建对话框记忆 */
 static const char* const K_GUIDE = "新手引导不再提示";        /* 顶层: 完成引导/点"不再提示"=1, 启动不再自动播放 */
@@ -1493,6 +1494,69 @@ void XjsCmRenameWindow(const std::wstring& oldName, const std::wstring& newName)
         if (cm.scope == 1 && cm.ownerName == oldName) cm.ownerName = newName;
 }
 
+/* URL 协议添加自定义搜索模式: 与 "＋添加搜索模式" 弹窗保存 (XjsMdlgSave) 同一口径 —
+   id = "m"+时间戳36进制, 头部插入, 上限 100, XjsSaveConfig 落盘 (共享进顶层/私有的按 ownerName 归窗口条目)。 */
+bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const std::wstring& type,
+                      const std::wstring& tpl, int scope, const std::wstring& ownerName) {
+    if (name.empty() || tpl.empty()) return false;
+    static const wchar_t* const TYPES[5] = { L"wildcard", L"regex", L"sql", L"lua", L"lua-exec" };
+    std::wstring t; for (wchar_t c : type) t += (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c;
+    int ti = -1; for (int i = 0; i < 5; i++) if (t == TYPES[i]) { ti = i; break; }
+    if (ti < 0) return false;   /* 类型非法 */
+    XjsCustomMode cm;
+    wchar_t buf[24]; unsigned long long tk = GetTickCount64();
+    const wchar_t* digits = L"0123456789abcdefghijklmnopqrstuvwxyz"; int n = 0;
+    do { buf[n++] = digits[tk % 36]; tk /= 36; } while (tk); buf[n] = 0;
+    cm.id = std::wstring(L"m") + std::wstring(buf, n);
+    cm.name = name; cm.desc = desc; cm.type = TYPES[ti]; cm.tpl = tpl;
+    cm.scope = (scope == 1) ? 1 : 0;
+    cm.ownerName = cm.scope == 1 ? ownerName : std::wstring();
+    g_customModes.insert(g_customModes.begin(), cm);
+    if ((int)g_customModes.size() > 100) g_customModes.resize(100);
+    XjsSaveConfig();
+    return true;
+}
+
+/* URL 协议 cfg=<JSON> 注入: 键名 = 配置文件中文主键 (与 XjsSaveConfig 写入的窗口条目同构),
+   逐键写入本窗字段 + 对应生效动作 (任务栏图标/置顶/语言需主动作, 其余靠重排), 末尾统一落盘+重绘。
+   只处理"专用参数未覆盖"的常规项; 皮肤/视图/缩放/预览/搜索模式/匹配由各自专用参数负责。
+   热键组合与列布局本轮不纳入。 */
+void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8) {
+    if (!w || cfgJsonUtf8.empty()) return;
+    picojson::value v;
+    if (!picojson::parse(v, cfgJsonUtf8).empty() || !v.is<picojson::object>()) return;
+    const picojson::object& o = v.get<picojson::object>();
+    XjsWindowScope scope(w);              /* Cur()=w, 生效动作经 g_* 宏落到本窗 */
+    bool dirty = false;
+    auto bget = [&](const char* k, bool* out){ auto it=o.find(k); if(it!=o.end()&&it->second.is<bool>()){ *out=it->second.get<bool>(); return true; } return false; };
+    auto nget = [&](const char* k, int* out){ auto it=o.find(k); if(it!=o.end()&&it->second.is<double>()){ *out=(int)it->second.get<double>(); return true; } return false; };
+    auto sget = [&](const char* k, std::wstring* out){ auto it=o.find(k); if(it!=o.end()&&it->second.is<std::string>()){ *out=Utf8ToUtf16(it->second.get<std::string>().c_str()); return true; } return false; };
+    bool b; int n; std::wstring s;
+    if (bget("显示状态栏",&b))     { w->showStatusbar=b; dirty=true; }
+    if (bget("显示筛选框",&b))     { w->showFilterBox=b; dirty=true; }
+    if (bget("显示控制按钮",&b))   { w->showCtrlBtns=b; dirty=true; }
+    if (bget("极简控制菜单",&b))   { w->minimalCtrlMenu=b; dirty=true; }
+    if (bget("驱动器进度条",&b))   { w->driveProgress=b; dirty=true; }
+    if (bget("悬停高亮",&b))       { w->rowHover=b; dirty=true; }
+    if (bget("悬停残影",&b))       { w->rowHoverFade=b; dirty=true; }
+    if (bget("打开提权",&b))       { w->openElevated=b; dirty=true; }
+    if (bget("异步打开",&b))       { w->openAsync=b; dirty=true; }
+    if (bget("打开后隐藏",&b))     { w->openHideWindow=b; dirty=true; }
+    if (bget("预览静音",&b))       { w->mediaMute=b; dirty=true; }
+    if (bget("置顶",&b))           { w->topmost=b; SetWindowPos(w->hWnd, b?HWND_TOPMOST:HWND_NOTOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE); dirty=true; }
+    if (bget("任务栏图标",&b))     { w->taskbarIcon=b; w->ApplyTaskbarIcon(); dirty=true; }
+    if (nget("失焦行为",&n))       { w->blurAction=n; dirty=true; }
+    if (nget("出现位置",&n))       { w->appearPos=n; dirty=true; }
+    if (nget("鼠标打开",&n))       { w->mouseOpen=n; dirty=true; }
+    if (nget("默认选中",&n))       { w->defaultSel=n; dirty=true; }
+    if (nget("创建填入搜索框",&n)) { w->createFill=n; dirty=true; }
+    if (nget("预览宽度",&n))       { if(n>=0) w->previewWidth=n; dirty=true; }
+    if (nget("预览音量",&n))       { w->mediaVol=(n<0?0:n>100?100:n)/100.0f; dirty=true; }
+    if (sget("创建关键词",&s))     { w->createKeyword=s; dirty=true; }
+    if (sget("界面语言",&s))       { int li=XjsLangIndexFromCode(s.c_str()); if(li>=0) XjsApplyUiLang(w, li); }
+    if (dirty) { XjsSaveConfig(); w->Invalidate(); }
+}
+
 static const wchar_t* XjsCmStageMode(const std::wstring& type) {
     if (type == L"regex") return L"正则";
     if (type == L"sql") return L"SQL";
@@ -1626,7 +1690,7 @@ int XjsHostedPrune() {
    (源样式 state.lastKeyword = 尾阶段词 || 首标签词) */
 static void XjsHostedCommit(const std::string& kw, int kwType, const std::wstring& titleWord) {
     if (!g_searching.load()) XjsDebounceSnapshot();
-    int fingerprint = xjs_result_Query(g_result, kw.c_str(), kwType, NULL, FALSE);   /* SearchFilterConfig=NULL, 同 XjsSearchNow */
+    int fingerprint = xjs_result_Query(g_result, kw.c_str(), kwType, g_searchScope.empty() ? NULL : g_searchScope.c_str(), FALSE);   /* 搜索范围透传 (同 XjsSearchNow) */
     if (fingerprint == -1) return;
     g_searching.store(true);
     g_searchFingerprint = fingerprint;
@@ -1706,6 +1770,36 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
         arr.push_back(picojson::value(o));
     }
     XjsHostedCommit(picojson::value(arr).serialize(), XJS_KEYWORD_MULTI, titleWord);
+    XjsSearchWindow::Cur()->Invalidate();
+}
+
+/* URL 协议多重搜索: 首段=主关键词填进搜索框(普通文字, 不标签化), 第2段起做成"内联托管标签"(srcIds 留空 →
+   渲染只读 word、不弹来源菜单, 安全)显示在搜索框前部; 整链以引擎多重搜索 JSON 链式提交 (复用 XjsHostedCommit
+   正规出口, 不自建第二份搜索路径)。段 first = 模式号 (0..4) 或 -1 (= defMode 本窗当前模式); second = 搜索词。
+   须在 UI 线程、XjsWindowScope(目标窗) 内调用。 */
+void XjsUrlRunMultiStages(const std::vector<std::pair<int, std::wstring>>& stages, int defMode) {
+    if (!g_engine || g_isScanning || stages.empty()) return;
+    if (!XjsEngineEnsureResult()) return;
+    XjsHostedClearTags();
+    XjsSearchSetTextQuiet(stages.front().second);   /* 首段=主关键词: 填搜索框普通文字, 不标签化 */
+    picojson::array arr;
+    for (size_t i = 0; i < stages.size(); i++) {
+        const auto& st = stages[i];
+        int m = (st.first >= 0) ? st.first : defMode;
+        if (m < 0 || m > 4) m = 0;
+        if (i >= 1) {   /* 第 2 段起做成内联托管标签 (主关键词留框不标签化); srcIds 空 → 渲染只读 word、不弹来源菜单 */
+            XjsHostedTag t;
+            t.word = st.second;
+            t.born = (double)GetTickCount64() / 1000.0;
+            g_hostedTags.push_back(t);
+        }
+        picojson::object o;
+        o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageModeByG(m)));
+        o["搜索词"] = picojson::value(Utf16ToUtf8(st.second.c_str()));
+        arr.push_back(picojson::value(o));
+    }
+    g_hostedCaret = (int)g_hostedTags.size();
+    XjsHostedCommit(picojson::value(arr).serialize(), XJS_KEYWORD_MULTI, stages.front().second);
     XjsSearchWindow::Cur()->Invalidate();
 }
 
@@ -1932,6 +2026,7 @@ void XjsLoadConfig() {
     /* 双击 Ctrl 唤起目标 (空/名称不存在 = 禁用) */
     g_doubleCtrlTarget = XjsConfig::Str(g_cfg.Root(), K_DOUBLECTRL, L"");
     g_gfxEngine = (XjsConfig::Str(g_cfg.Root(), K_ENGINE, L"d2d") == L"gdiplus") ? 1 : 0;   /* 绘制引擎 (重启生效) */
+    g_urlProtocolEnabled = XjsConfig::Bool(g_cfg.Root(), K_URLPROTO, false) != 0;   /* snailsearch:// HKCU 开关记忆 */
     XjsGuideSetDismissed(XjsConfig::Bool(g_cfg.Root(), K_GUIDE, false));   /* 新手引导 "不再提示" */
 
     /* 插件用户状态 (顶层 "插件" 数组): 标识/启用 — 目录发现与清单在 XjsPluginStartup 扫描 */
@@ -2315,6 +2410,7 @@ void XjsSaveConfig() {
 
     g_cfg.Set(K_DOUBLECTRL, Utf16ToUtf8(g_doubleCtrlTarget.c_str()));
     g_cfg.Set(K_ENGINE, std::string(g_gfxEngine == 1 ? "gdiplus" : "d2d"));   /* std::string 包裹: 裸三元是 const char*, 会被隐式匹配到 Set(bool) 重载落盘成 true (09-24 白屏崩溃元凶之一) */
+    g_cfg.Set(K_URLPROTO, g_urlProtocolEnabled);   /* snailsearch:// 开关 (Set(bool) 重载) */
     g_cfg.Set(K_GUIDE, XjsGuideDismissed());   /* 新手引导 "不再提示" (Set(bool) 重载) */
     /* 语言已每窗化 (条目 "语言"); 顶层键废弃, LoadConfig 读作迁移种子后 erase */
 

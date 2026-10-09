@@ -27,6 +27,7 @@ enum XjsSetAct {
     ACT_DCCTRL = 311,
     ACT_ENGINE = 321,      /* 绘制引擎 D2D/GDI+ (进程共享, 重启生效; 菜单回传 901/902) */
     ACT_LANG = 322,        /* 界面语言 (每窗 = owner, 即时生效; 菜单回传 919=自动 920..925=zh/zh-TW/en/ko/th/ms) */
+    ACT_URLPROTO = 323,    /* snailsearch:// URL 协议 HKCU 挂钩开关 (全局, 设置-通用新增) */
     ACT_DRIVEPROG = 312,   /* 绘制驱动器占用进度条 (每窗) */
     ACT_ROWHOVER = 313,    /* 高亮鼠标经过行 (每窗) */
     ACT_HOVERFADE = 314,   /* 鼠标经过残影 (每窗, 依赖 ACT_ROWHOVER) */
@@ -777,6 +778,7 @@ static bool XjsSetBuildRows() {
                    g_doubleCtrlTarget.empty() ? XjsT(L"通用词.禁用") : g_doubleCtrlTarget.c_str(), false, false);
             bool autoOn = XjsIsAutoStartEnabled() != 0;
             addRow(ACT_AUTOSTART, CT_SWITCH, XjsT(L"设置.通用.开机自启动"), XjsT(L"设置.通用.开机自启动.说明"), L"", autoOn, false);
+            addRow(ACT_URLPROTO, CT_SWITCH, XjsT(L"设置.通用.URL协议"), XjsT(L"设置.通用.URL协议.说明"), L"", g_urlProtocolEnabled, false);
             break;
         }
         case SC_WIN: {  /* 窗口 (每窗: 快捷键+名称+窗口行为; 主窗固定"默认窗口"不可改) */
@@ -2404,6 +2406,14 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             if (!XjsSetAutoStart(!XjsIsAutoStartEnabled()))
                 XjsToastShow(s_set.hwnd, XjsT(L"错误.开机自启动失败"), XTOAST_WARN, SS(1));
             break;
+        case ACT_URLPROTO: {
+            /* snailsearch:// HKCU 挂钩开关: 翻转 → 注册/摘钩 → 落盘 → 重画设置窗行 (开关回显新态) */
+            g_urlProtocolEnabled = !g_urlProtocolEnabled;
+            XjsUrlRegisterScheme(g_urlProtocolEnabled);
+            XjsSaveConfig();
+            InvalidateRect(s_set.hwnd, NULL, FALSE);
+            break;
+        }
         case ACT_MEMLOCK: {
             /* 内存页锁定: 动作按真实状态决定 (开关显示即真实态), 成功后回执新状态行 (原版同款) */
             int cur = XjsMemLockQuery();

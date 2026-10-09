@@ -105,6 +105,7 @@
     <ClCompile Include="xjs_pdf.cpp" />
     <ClCompile Include="xjs_guide.cpp" />
     <ClCompile Include="xjs_market.cpp" />
+    <ClCompile Include="xjs_url.cpp" />
     <ClCompile Include="md4c\md4c.c" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>

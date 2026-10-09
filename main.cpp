@@ -836,6 +836,9 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             /* 第二实例唤起通道 (见 wWinMain 单实例守卫): 管理员进程的窗口默认拒收低权限进程
                的一切消息, 对 WM_WAKEUP 放行后未提权的重复启动才能唤醒本窗 (UIPI 白名单) */
             ChangeWindowMessageFilterEx(hwnd, WM_WAKEUP, MSGFLT_ALLOW, NULL);
+            /* snailsearch:// URL 协议 跨完整性送达通道 (xjs_url.cpp): WM_COPYDATA 落在 UIPI 默认拦截区
+               (< WM_USER 0x0400), 必须显式放行; 中完整性实例 wWinMain 命中本窗时优先走这条, 失败回落 WM_WAKEUP */
+            ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, NULL);
             AddClipboardFormatListener(hwnd);   /* 剪切灰显: 剪贴板被外部替换即恢复 */
             XjsSetPhase(L"wm-create:focus");
             XjsSearchCaretAttach();   /* 搜索框光标闪烁驱动器绑定本窗 (失活由 WM_ACTIVATE 广播) */
@@ -1645,6 +1648,19 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             XjsSummonActivate(hwnd);
             return 0;
         }
+        case WM_COPYDATA: {
+            /* snailsearch:// URL 协议送达入口 (xjs_url.cpp 中完整性侧 XjsUrlSendCopyData 发送, WM_CREATE 已放行);
+               dwData 不是 SNAIL_URL_MAGIC 的一律回落 DefWindowProc — 避免误吞其它程序的 COPYDATA (方案 四.10);
+               cbData 超 32KB 拒收; URL 内容一律当不可信输入, 校验全在 XjsUrlApplyFromText */
+            COPYDATASTRUCT* cds = (COPYDATASTRUCT*)lParam;
+            if (!cds || cds->dwData != (ULONG_PTR)SNAIL_URL_MAGIC || cds->cbData == 0 || cds->cbData > 32 * 1024 || !cds->lpData)
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            std::string buf((const char*)cds->lpData, cds->cbData);
+            while (!buf.empty() && buf.back() == '\0') buf.pop_back();
+            std::wstring url = Utf8ToUtf16(buf.c_str());
+            XjsUrlApplyFromText(url.c_str(), NULL);
+            return TRUE;   /* WM_COPYDATA 约定: 已处理返非零 */
+        }
         case WM_TRAY_NOTIFY: {
             if (wParam == ID_TRAY_ICON) {
                 if (lParam == WM_LBUTTONUP) {
@@ -1908,9 +1924,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int 
                下跨完整性级别调 ShowWindow/SetForegroundWindow 对管理员进程的窗口无效 —
                走消息通道: 先把前台权让出 (用户刚启动的新进程持有前台权), 再投递 WM_WAKEUP
                (首实例 WM_CREATE 已对该消息 MSGFLT_ALLOW 放行, 跨 IL 也能送达),
-               恢复动作在首实例自己的特权上下文里执行 (与托盘唤起同口径) */
+               恢复动作在首实例自己的特权上下文里执行 (与托盘唤起同口径)。
+               snailsearch:// 命中时优先走 WM_COPYDATA 带 URL 载荷 (XjsUrlSendCopyData 失败才回落 WM_WAKEUP) */
             AllowSetForegroundWindow(ASFW_ANY);
-            PostMessageW(prev, WM_WAKEUP, 0, 0);
+            bool delivered = false;
+            if (lpCmdLine && *lpCmdLine) {
+                const wchar_t* p = wcsstr(lpCmdLine, L"snailsearch://");
+                if (p) {
+                    const wchar_t* e = wcschr(p, L' ');
+                    std::wstring url(p, e ? (size_t)(e - p) : wcslen(p));
+                    delivered = XjsUrlSendCopyData(prev, url.c_str());
+                }
+            }
+            if (!delivered) PostMessageW(prev, WM_WAKEUP, 0, 0);
             if (mu) CloseHandle(mu);
             return 0;
         }
@@ -1919,6 +1945,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int 
             return 0;   /* CreateMutex 失败或 3 秒宽限仍冲突: 放弃, 宁可不跑不双开 */
         }
         /* takenOver: 互斥量已到手, 旧实例已退出, 接管继续正常启动 */
+    }
+    /* 冷启动 URL 捕获 (无实例 或 上面的 takenOver 分支接手旧实例已退的情形): 扫命令行 剥出 snailsearch://...
+       存 g_startupUrl, XjsAppMain 建完主窗之后一次性应用。提权链路上 XjsElevateAndRestart
+       已透传命令行参数 (xjs_util.cpp GetCommandLineW 剥 argv[0]), URL 会自然跟到提权后的新进程 */
+    if (lpCmdLine && *lpCmdLine) {
+        const wchar_t* p = wcsstr(lpCmdLine, L"snailsearch://");
+        if (p) {
+            const wchar_t* e = wcschr(p, L' ');
+            g_startupUrl.assign(p, e ? (size_t)(e - p) : wcslen(p));
+        }
     }
     return XjsAppMain(hInstance, hPrev, lpCmdLine, nCmdShow);
 }
@@ -2004,6 +2040,11 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
         g_statusText = XjsT(L"状态栏.正在加载数据库");   /* 源样式 Search.StatusLoadingDb (省略号字符) */
     }
     XjsSearchWindow::Cur()->Invalidate();
+    XjsSetPhase(L"post-create:url-apply");
+    if (!g_startupUrl.empty()) {           /* 冷启动 URL 一次性应用 (提权后 XjsElevateAndRestart 透传至此) */
+        XjsUrlApplyFromText(g_startupUrl.c_str(), NULL);
+        g_startupUrl.clear();
+    }
     XjsSetPhase(L"message-loop");
     MSG msg = {};   /* 零初始化: GetMessage 返回 -1 时 wParam 未写入, 不初始化则退出码未定义 */
     while (true) {
