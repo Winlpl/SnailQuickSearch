@@ -99,6 +99,27 @@ plugins/<插件id>/
 - 内置示例插件 `space-map`(驱动器空间地图),见 [插件示例/](插件示例/)。
 - 开发入门见 [插件开发指南.md](插件开发指南.md)。
 
+## 🔗 URL 协议(snailsearch://)
+
+在 **设置 - 通用 - URL 协议** 打开开关后,浏览器里的链接、Windows 运行框(Win+R)、资源管理器地址栏、批处理脚本或任何其它程序都能直接唤起搜索:
+
+```text
+snailsearch://new?q=报告&filter=文档&sort=修改时间&order=desc   ← 新窗口搜"报告",只看文档,按修改时间倒序
+snailsearch://search?q=*.log                                  ← 就在已打开的窗口里搜,不再建新窗
+snailsearch://focus                                           ← 只把窗口唤回前台
+snailsearch://new?q=演唱会&filter=视频&preview=1&save=1&win=影音  ← 建一个名为"影音"的持久窗口
+snailsearch://search?reveal=C:\Tools\readme.txt               ← 在资源管理器里定位这个文件
+```
+
+- **动作**:`new`(= `open`)建窗或用 `win=` 复用同名窗口档案 · `search`(= `find`)唤起已有窗口并就地应用参数 · `focus` 唤起主窗口。带参数的 `focus`/`search` 会把参数应用到那扇窗,不会偷偷新建窗口。
+- **搜索**:`q` 关键词 · `ms` 多重搜索链(JSON,每段可各自指定模式)· `mode` 搜索模式(数字 0~4、`wild`/`re`/`sql`/`lua`/`lua-exec`,或自定义模式名)· `filter` 文件分类(如 `图片、视频`)· `scope` 限定目录(JSON 或单条路径,可逐个设是否递归)。
+- **窗口**:`view`(严密/紧凑/详情/中等/大图标)· `skin` 皮肤 · `zoom` 页面缩放 5~20 · `preview` 预览开合 · `sort` + `order` 排序 · `pos` + `size` 位置尺寸 · `save` + `win` 是否留档与窗口名 · `cfg` 一次写入多项窗口设置(JSON)· `settings` 直达某一设置页。
+- **搜索模式管理**:`addmode` + `mtype` + `tpl` + `mdesc` + `priv` 添加模式 · `delmode` 删除 · `cleartags` 清空搜索框里的模式标签。
+- **文件动作**:`run` 用关联程序打开 · `reveal` 在资源管理器定位 · `props` 打开属性框。
+- **匹配开关**:`pinyinfull` `pinyininitial` `pinyinexact` `wildstar` `wildq` `fullwidth` `casesensitive` `emptyall`(取 `1`/`0`)。
+- **编码**:参数值里的 `&`、`#`、`%` 要写成百分号编码(`%26` `%23` `%25`);JSON 类参数(`ms`/`scope`/`cfg`/`filter`)整体编码后传入。
+- **安全边界(协议不运行它递来的程序)**:本程序以管理员权限运行,所以 `run=` 对 `exe cmd ps1 vbs js lnk msi chm iso docm` 一类可执行/脚本/宏文档**硬拒**(连确认框都不弹),其余文档类会弹确认框显示完整路径由你决定;添加、删除搜索模式同样要确认;`cfg` 不含"打开提权"。Lua 模式开放——引擎的 Lua 是纯检索沙箱,危险函数已移除,脚本只能查索引。参数被拒或你取消时,窗口右下角会说明原因,不会静默失败。
+
 ## 🖥️ 系统要求
 
 - Windows 10(1809+)或 Windows 11,x64。

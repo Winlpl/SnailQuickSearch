@@ -194,6 +194,20 @@ static const XjsSetCatNode SET_TREE[] = {
 };
 static const int SET_TREE_N = (int)(sizeof(SET_TREE) / sizeof(SET_TREE[0]));
 
+/* URL 协议 settings=<分类名> → 分类下标: 按 SET_TREE 主键尾段比对 (简体中文短名, 数据串不译,
+   同 sort= 走引擎中文口径的道理)。口径同 XjsSettingsShowDonate —— SC_* 只住设置模块,
+   外部拿到的是下标值不碰枚举定义, 分类重排不会让深链静默指错页。假 = 名称不认识。 */
+bool XjsSettingsCatByName(const std::wstring& name, int* cat) {
+    static const wchar_t* kPrefix = L"设置分类.";
+    const size_t plen = wcslen(kPrefix);
+    for (int i = 0; i < SET_TREE_N; i++) {
+        if (SET_TREE[i].cat < 0) continue;                       /* 分组节点不可选中 */
+        if (wcsncmp(SET_TREE[i].name, kPrefix, plen) != 0) continue;
+        if (name == (SET_TREE[i].name + plen)) { if (cat) *cat = SET_TREE[i].cat; return true; }
+    }
+    return false;
+}
+
 /* 重建对话框: 7 个可选字段 (源样式 rebuild-opts 同序同名), 默认勾 评分/大小/修改/别名。
    这里存中文原文键 (文件级 static 禁调 XjsT — 跨编译单元初始化顺序未定), 读取点 XjsT() 取译文 */
 static const wchar_t* const RB_FIELDS[7] = { L"重建字段.评分", L"重建字段.文件大小", L"重建字段.修改时间",
@@ -417,9 +431,9 @@ static XjsSearchWindow* XjsSetOwner() {
     return s_setOwner;
 }
 
-/* 内置 md 文档页 (main.rc RCDATA → 通用引擎 xjs_md.cpp): 203=《搜索模式简介》 204=《第三方组件声明》。
-   资源块随进程存活, 锁定指针可长期使用; 实例随设置窗销毁释放 (XjsSetFreeMdDocs) */
-static const struct { int resId; } MD_PAGES[] = { { 203 }, { 204 } };
+/* 内置 md 文档页 (main.rc RCDATA → 通用引擎 xjs_md.cpp): 203=《搜索模式简介》 204=《第三方组件声明》
+   206=《URL 协议简介》。资源块随进程存活, 锁定指针可长期使用; 实例随设置窗销毁释放 (XjsSetFreeMdDocs) */
+static const struct { int resId; } MD_PAGES[] = { { 203 }, { 204 }, { 206 } };
 static XjsMdDoc* s_mdDoc[(int)(sizeof(MD_PAGES) / sizeof(MD_PAGES[0]))] = {};
 static bool s_mdPending[(int)(sizeof(MD_PAGES) / sizeof(MD_PAGES[0]))] = {};
                    /* 行模型构建时 RT 未就绪, 文档行高未知 → 首帧重建行模型 */
@@ -779,6 +793,9 @@ static bool XjsSetBuildRows() {
             bool autoOn = XjsIsAutoStartEnabled() != 0;
             addRow(ACT_AUTOSTART, CT_SWITCH, XjsT(L"设置.通用.开机自启动"), XjsT(L"设置.通用.开机自启动.说明"), L"", autoOn, false);
             addRow(ACT_URLPROTO, CT_SWITCH, XjsT(L"设置.通用.URL协议"), XjsT(L"设置.通用.URL协议.说明"), L"", g_urlProtocolEnabled, false);
+            /* 页尾文档卡 = snailsearch:// 语法与示例 (main.rc RCDATA 206, xjs_md 排版):
+               开关只说"能干什么",这一卡回答"怎么写这条链接" —— 外部集成不必离开程序查文档 */
+            XjsSetAppendMdPage(2, XjsT(L"设置.通用.URL协议"), L"URL协议简介.md");
             break;
         }
         case SC_WIN: {  /* 窗口 (每窗: 快捷键+名称+窗口行为; 主窗固定"默认窗口"不可改) */

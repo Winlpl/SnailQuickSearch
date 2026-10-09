@@ -15,3 +15,4 @@
 // 内置文档 (md4c 解析 + D2D 排版, 通用引擎见 xjs_md.cpp)
 203 RCDATA "搜索模式简介.md"        /* 设置 - 搜索模式 分类 */
 204 RCDATA "THIRD-PARTY-NOTICES.md" /* 设置 - 许可证 分类 */
+206 RCDATA "URL协议简介.md"         /* 设置 - 通用 页尾 "URL 协议" 文档卡 */

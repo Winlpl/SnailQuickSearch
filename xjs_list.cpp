@@ -1739,15 +1739,7 @@ void XjsListWheel(float delta) {
 
 /* 系统属性对话框 (Alt+双击/Alt+Enter/右键"属性") */
 void XjsShowProperties(int idx) {
-    std::wstring p = XjsItemPath(idx);
-    if (p.empty()) return;
-    SHELLEXECUTEINFOW sei = {0};
-    sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_INVOKEIDLIST;
-    sei.lpVerb = L"properties";
-    sei.lpFile = p.c_str();
-    sei.nShow = SW_SHOWNORMAL;
-    ShellExecuteExW(&sei);
+    XjsShowPropertiesPath(XjsItemPath(idx));   /* 路径版收口在 xjs_util (URL 协议 props= 同入口) */
 }
 
 bool XjsListKey(WPARAM vk) {

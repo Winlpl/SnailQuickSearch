@@ -380,6 +380,18 @@ void XjsOpenFolderAndSelect(const std::wstring& path) {
     }
 }
 
+/* 系统属性框按路径 = 唯一实现 (列表右键 XjsShowProperties 与 snailsearch:// props= 共用) */
+void XjsShowPropertiesPath(const std::wstring& path) {
+    if (path.empty()) return;
+    SHELLEXECUTEINFOW sei = {0};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_INVOKEIDLIST;
+    sei.lpVerb = L"properties";
+    sei.lpFile = path.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    ShellExecuteExW(&sei);
+}
+
 void XjsDeleteSelected() {
     std::vector<int> idxs = XjsSelIndices();
     if (idxs.empty()) return;

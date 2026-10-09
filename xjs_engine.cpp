@@ -369,6 +369,34 @@ void XjsApplyFilter(int idx) {
     XjsSearchNow(false);
 }
 
+/* 按分类名设筛选 (多选; 名称须取自引擎分类表 g_filters, 「全部」= 不加筛选且独占)。
+   与 XjsApplyFilter(下标) 同一落点 (SetSelectedFilter + 重搜), 供 URL 协议等"按名寻址"的入口共用 —
+   引擎侧 SetSelectedFilter 收 JSON 数组 ["图片","视频"] (2026-09-27 多选口径), 单名同样接受。
+   返回生效的分类数 (0 = 一个都不认识, 此时不做任何改动); 须在 XjsWindowScope(目标窗) 内调用。 */
+int XjsApplyFilterNames(const std::vector<std::wstring>& names) {
+    if (!g_result || names.empty() || g_filters.empty()) return 0;
+    std::vector<std::string> picked; int firstIdx = -1; bool all = false;
+    for (auto& nm : names) {
+        for (size_t i = 0; i < g_filters.size(); i++) {
+            if (g_filters[i].name != nm) continue;
+            if (g_filters[i].name == L"全部") { all = true; }
+            std::string u8 = Utf16ToUtf8(nm.c_str());
+            bool dup = false;
+            for (auto& p : picked) if (p == u8) { dup = true; break; }
+            if (!dup) { if (firstIdx < 0) firstIdx = (int)i; picked.push_back(u8); }
+            break;
+        }
+    }
+    if (picked.empty()) return 0;
+    if (all) { picked = { Utf16ToUtf8(L"全部") }; firstIdx = 0; }   /* 与其它分类并给 = 取「全部」(范围最大者即不设限) */
+    picojson::array arr;
+    for (auto& p : picked) arr.push_back(picojson::value(p));
+    xjs_result_SetSelectedFilter(g_result, picojson::value(arr).serialize().c_str());
+    g_filterSel = firstIdx < 0 ? 0 : firstIdx;
+    XjsSearchNow(false);
+    return (int)picked.size();
+}
+
 /* ==================== 行数据缓存 (含驱动器信息) ==================== */
 
 /* 驱动器行判定: 父目录ID == -1 (引擎分区根约定, 同正式版) */
@@ -1494,8 +1522,10 @@ void XjsCmRenameWindow(const std::wstring& oldName, const std::wstring& newName)
         if (cm.scope == 1 && cm.ownerName == oldName) cm.ownerName = newName;
 }
 
-/* URL 协议添加自定义搜索模式: 与 "＋添加搜索模式" 弹窗保存 (XjsMdlgSave) 同一口径 —
-   id = "m"+时间戳36进制, 头部插入, 上限 100, XjsSaveConfig 落盘 (共享进顶层/私有的按 ownerName 归窗口条目)。 */
+/* URL 协议添加自定义搜索模式: id 生成与 "＋添加搜索模式" 弹窗保存 (XjsMdlgSave) 同口径 —
+   id = "m"+时间戳36进制, 头部插入, 共享进顶层/私有的按 ownerName 归窗口条目, XjsSaveConfig 落盘。
+   两条拒绝口径与对话框不同 (URL 无人值守): 同名 = 拒绝 (对话框那条是"同名=原位编辑"),
+   满 100 = 拒绝新增 (对话框是"淘汰最旧+Toast", 这里静默淘汰等于替用户删掉自建模式)。 */
 bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const std::wstring& type,
                       const std::wstring& tpl, int scope, const std::wstring& ownerName) {
     if (name.empty() || tpl.empty()) return false;
@@ -1503,16 +1533,19 @@ bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const 
     std::wstring t; for (wchar_t c : type) t += (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c;
     int ti = -1; for (int i = 0; i < 5; i++) if (t == TYPES[i]) { ti = i; break; }
     if (ti < 0) return false;   /* 类型非法 */
+    int sc = (scope == 1) ? 1 : 0;
+    for (auto& ex : g_customModes)
+        if (ex.scope == sc && _wcsicmp(ex.name.c_str(), name.c_str()) == 0) return false;   /* 同作用域重名 */
+    if ((int)g_customModes.size() >= 100) return false;                                      /* 满额拒增 */
     XjsCustomMode cm;
     wchar_t buf[24]; unsigned long long tk = GetTickCount64();
     const wchar_t* digits = L"0123456789abcdefghijklmnopqrstuvwxyz"; int n = 0;
     do { buf[n++] = digits[tk % 36]; tk /= 36; } while (tk); buf[n] = 0;
     cm.id = std::wstring(L"m") + std::wstring(buf, n);
     cm.name = name; cm.desc = desc; cm.type = TYPES[ti]; cm.tpl = tpl;
-    cm.scope = (scope == 1) ? 1 : 0;
+    cm.scope = sc;
     cm.ownerName = cm.scope == 1 ? ownerName : std::wstring();
     g_customModes.insert(g_customModes.begin(), cm);
-    if ((int)g_customModes.size() > 100) g_customModes.resize(100);
     XjsSaveConfig();
     return true;
 }
@@ -1539,9 +1572,9 @@ void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8)
     if (bget("驱动器进度条",&b))   { w->driveProgress=b; dirty=true; }
     if (bget("悬停高亮",&b))       { w->rowHover=b; dirty=true; }
     if (bget("悬停残影",&b))       { w->rowHoverFade=b; dirty=true; }
-    if (bget("打开提权",&b))       { w->openElevated=b; dirty=true; }
     if (bget("异步打开",&b))       { w->openAsync=b; dirty=true; }
     if (bget("打开后隐藏",&b))     { w->openHideWindow=b; dirty=true; }
+    /* "打开提权" 故意不在白名单: 它决定子进程是否继承管理员令牌, 由外部链接来翻 = 替用户放大权限 */
     if (bget("预览静音",&b))       { w->mediaMute=b; dirty=true; }
     if (bget("置顶",&b))           { w->topmost=b; SetWindowPos(w->hWnd, b?HWND_TOPMOST:HWND_NOTOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE); dirty=true; }
     if (bget("任务栏图标",&b))     { w->taskbarIcon=b; w->ApplyTaskbarIcon(); dirty=true; }
@@ -1555,6 +1588,20 @@ void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8)
     if (sget("创建关键词",&s))     { w->createKeyword=s; dirty=true; }
     if (sget("界面语言",&s))       { int li=XjsLangIndexFromCode(s.c_str()); if(li>=0) XjsApplyUiLang(w, li); }
     if (dirty) { XjsSaveConfig(); w->Invalidate(); }
+}
+
+/* 删除自定义模式 (按 id) = 唯一入口: 摘表 + 落盘 + 标签链剔除该来源并重搜。
+   ☰药丸菜单行内 ✕ 与 snailsearch:// delmode= 共用 (曾只在 main.cpp 菜单分支手抄三步)。
+   真=删掉了某条; 假= id 不存在。须在 XjsWindowScope(发起窗) 内调用 (剔除的是本窗标签链)。 */
+bool XjsCustomModeRemoveById(const std::wstring& id) {
+    for (size_t i = 0; i < g_customModes.size(); i++) {
+        if (g_customModes[i].id != id) continue;
+        g_customModes.erase(g_customModes.begin() + i);
+        XjsSaveConfig();
+        XjsHostedPurgeMode(id);
+        return true;
+    }
+    return false;
 }
 
 static const wchar_t* XjsCmStageMode(const std::wstring& type) {

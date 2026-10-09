@@ -497,6 +497,7 @@ void XjsPopupReleaseResources();                /* 释放弹窗RT/画刷 (换肤
 extern int g_skinEpoch;                         /* 每次换肤 +1 (子窗口据此重建自己的画刷) */
 void XjsRegisterSettingsClass(HINSTANCE hInst);
 void XjsSettingsShow(int cat = -1);             /* 打开/前置设置窗口 (单例); cat>=0 = 打开后直接切到该分类页 (SC_*, xjs_settings.cpp) */
+bool XjsSettingsCatByName(const std::wstring& name, int* cat);   /* 分类中文短名 → SC_* 值 (SET_TREE 主键尾段; snailsearch:// settings= 用) */
 void XjsSettingsShowDonate();                   /* ☰菜单"捐赠": 打开设置并直达捐赠页 (分类 id 收在设置模块内, 外部经此入口防下标漂移) */
 bool XjsSettingsOpenFor(HWND ownerSearchHwnd);  /* 设置窗打开中且 owner=该搜索窗 (失焦关闭豁免判定用) */
 
@@ -866,10 +867,13 @@ bool XjsCmApplies(const XjsCustomMode& cm, const std::wstring& winName);   /* �
 int  XjsCmWindowCount(const std::wstring& winName);   /* 该档案名下专属模式数 (删除确认提示用) */
 int  XjsCmPurgeWindow(const std::wstring& winName);   /* 删除档案: 连带删除其专属模式 (返回剔除数) */
 void XjsCmRenameWindow(const std::wstring& oldName, const std::wstring& newName);  /* 窗口改名: 专属模式归属随迁 */
-/* URL 协议: 以编程方式添加自定义搜索模式 (等价"＋添加搜索模式"弹窗保存: id 生成/头插/落盘)。
+/* URL 协议: 以编程方式添加自定义搜索模式 (id 生成/头插/落盘同"＋添加搜索模式"弹窗, 但无人值守故更严:
+   同作用域重名 或 模式数已满 100 = 拒绝, 不静默淘汰用户既有模式)。
    type = wildcard/regex/sql/lua/lua-exec; scope 0=全局共享 1=仅 ownerName 窗。真=已添加。 */
 bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const std::wstring& type,
                       const std::wstring& tpl, int scope, const std::wstring& ownerName);
+/* 删除自定义模式 (按 id) 的唯一入口: 摘表 + 落盘 + 标签链剔除该来源并重搜 (药丸菜单 ✕ 与 URL delmode= 共用)。 */
+bool XjsCustomModeRemoveById(const std::wstring& id);
 /* URL 协议 cfg=<JSON>: 键名对齐配置文件中文主键, 写入本窗档案并即时生效 (常规项; 热键/列布局后续)。 */
 void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8);
 /* 药丸模式菜单打开时的自定义模式 id 快照 (xjs_chrome.cpp): 菜单按作用范围过滤后下标≠全局下标,
@@ -1642,6 +1646,7 @@ std::wstring XjsItemPath(int idx);
 void XjsOpenFile(const std::wstring& path);
 void XjsOpenFolderAndSelect(const std::wstring& path);
 void XjsShowProperties(int idx);                    // 系统"属性"对话框 (ShellExecuteEx verb=properties)
+void XjsShowPropertiesPath(const std::wstring& path);   /* 属性框按路径 (xjs_util, XjsShowProperties 与 snailsearch:// props= 共用) */
 void XjsDeleteSelected();
 void XjsCopySelected(bool namesOnly);
 void XjsCopyFilesToClipboard(const std::vector<int>& idxs, bool cut);  /* CF_HDROP+DropEffect (源样式剪切/复制文件) */
@@ -1693,8 +1698,11 @@ void XjsElevateAndRestart();
  *   - 提权侧 WM_CREATE 已 ChangeWindowMessageFilterEx(WM_COPYDATA, MSGFLT_ALLOW);
  *   - 第二实例中完整性 wWinMain 命中单实例 mutex 时, 若命令行带 URL, 优先
  *     SendMessageTimeout(WM_COPYDATA, SNAIL_URL_MAGIC, COPYDATASTRUCT*), 失败回落 WM_WAKEUP;
- *   - 冷启动 (无实例): XjsAppMain 建完主窗后从 g_startupUrl 取一次性应用。 */
+ *   - 冷启动 (无实例): XjsAppMain 建完主窗后从 g_startupUrl 取一次性应用。
+ * 语法: snailsearch://<action>[?<query>],动作 new/open(=new) 建窗或复用档案窗,focus 唤起主窗
+ *       (带参数时同时在主窗就地应用)。片段 #... 整段丢弃,动作段的尾斜杠不参与判定。 */
 bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err);   /* 解析+分发, 返回否=丢弃 (不弹窗) */
+std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd);         /* 命令行剥 URL (引号段优先, 空格不必编码) */
 void XjsUrlRegisterScheme(bool enable);                             /* HKCU 挂钩/摘钩 (幂等) */
 bool XjsUrlIsRegisteredScheme();                                    /* 当前 HKCU 挂钩态 (UI 开关显示) */
 bool XjsUrlSendCopyData(HWND target, const wchar_t* url);           /* 中 IL 侧发送入口: TRUE=送达 */
@@ -1753,6 +1761,7 @@ void XjsSyncWatchTick();             /* WM_TIMER(ID_TIMER_SYNCWATCH): 数量变�
 void XjsSearchNow(bool commitHistory);
 void XjsLoadFilters();
 void XjsApplyFilter(int idx);
+int XjsApplyFilterNames(const std::vector<std::wstring>& names);   /* 按分类名多选 (引擎 JSON 数组口径, 「全部」= 不加筛选); 返回生效数 */
 XjsRowData* XjsEnsureRowData(int idx);
 XjsRowData* XjsEnsureRowData(int idx, int fileId);   /* 指定文件ID版 (防抖绘制: 搜索中ID取自快照) */
 XjsBitmap* XjsGetRowIcon(int idx, int fileId, int iconPx, const char* askTag = "row");  // 返回位图归调用方所有, 用完 Release; askTag 透传 GetFileIco callbackInfo (ICON_ASK 闸门区分 列表行/预览卡)。排队期画临时默认图标但**不进缓存** (真图标就绪后须能取而代之)

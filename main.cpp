@@ -438,13 +438,8 @@ void XjsOnPopupResult(int id) {
                 else XjsHostedWordAsTag(v.name, false);
             }
         } else if (id & XJS_POPUP_DEL) {   /* 行内 ✕ 二次确认后删除 (源样式菜单 ✕ → removeCustomMode) */
-            if (!mid.empty()) {
-                for (size_t i = 0; i < g_customModes.size(); i++)
-                    if (g_customModes[i].id == mid) { g_customModes.erase(g_customModes.begin() + i); break; }
-                XjsSaveConfig();
-                XjsHostedPurgeMode(mid);   /* 标签链剔除该模式来源并重搜 (源样式 purgeHostedSources) */
+            if (!mid.empty() && XjsCustomModeRemoveById(mid))   /* 摘表+落盘+标签链剔除 = 单一入口 (URL delmode= 同径) */
                 XjsToastShow(g_hWnd, XjsT(L"模式对话框.已删除"), XTOAST_SUCCESS, XSF(1));
-            }
         } else if (id & XJS_POPUP_EDIT) {   /* 尾部 ✎: 编辑该模式 (源样式菜单项内联编辑按钮) */
             if (!mid.empty()) XjsModeDlgOpen(true, mid);
         } else {
@@ -1658,7 +1653,11 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             std::string buf((const char*)cds->lpData, cds->cbData);
             while (!buf.empty() && buf.back() == '\0') buf.pop_back();
             std::wstring url = Utf8ToUtf16(buf.c_str());
-            XjsUrlApplyFromText(url.c_str(), NULL);
+            std::wstring ue;
+            XjsUrlApplyFromText(url.c_str(), &ue);
+            /* 失败/被拒原因一律可见: 静默丢弃让集成方无从下手 (参数被 clamp 掉、名字不认识、
+               外部打开请求被拒 都只在这里才有机会被用户看见); 成功不提示 — 窗口与结果本身就是回执 */
+            if (!ue.empty()) XjsToastShow(hwnd, ue.c_str(), XTOAST_WARN, XSF(1));
             return TRUE;   /* WM_COPYDATA 约定: 已处理返非零 */
         }
         case WM_TRAY_NOTIFY: {
@@ -1927,15 +1926,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int 
                恢复动作在首实例自己的特权上下文里执行 (与托盘唤起同口径)。
                snailsearch:// 命中时优先走 WM_COPYDATA 带 URL 载荷 (XjsUrlSendCopyData 失败才回落 WM_WAKEUP) */
             AllowSetForegroundWindow(ASFW_ANY);
-            bool delivered = false;
-            if (lpCmdLine && *lpCmdLine) {
-                const wchar_t* p = wcsstr(lpCmdLine, L"snailsearch://");
-                if (p) {
-                    const wchar_t* e = wcschr(p, L' ');
-                    std::wstring url(p, e ? (size_t)(e - p) : wcslen(p));
-                    delivered = XjsUrlSendCopyData(prev, url.c_str());
-                }
-            }
+            std::wstring url = XjsUrlExtractFromCmdLine(lpCmdLine);
+            bool delivered = url.empty() ? false : XjsUrlSendCopyData(prev, url.c_str());
             if (!delivered) PostMessageW(prev, WM_WAKEUP, 0, 0);
             if (mu) CloseHandle(mu);
             return 0;
@@ -1949,13 +1941,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int 
     /* 冷启动 URL 捕获 (无实例 或 上面的 takenOver 分支接手旧实例已退的情形): 扫命令行 剥出 snailsearch://...
        存 g_startupUrl, XjsAppMain 建完主窗之后一次性应用。提权链路上 XjsElevateAndRestart
        已透传命令行参数 (xjs_util.cpp GetCommandLineW 剥 argv[0]), URL 会自然跟到提权后的新进程 */
-    if (lpCmdLine && *lpCmdLine) {
-        const wchar_t* p = wcsstr(lpCmdLine, L"snailsearch://");
-        if (p) {
-            const wchar_t* e = wcschr(p, L' ');
-            g_startupUrl.assign(p, e ? (size_t)(e - p) : wcslen(p));
-        }
-    }
+    if (lpCmdLine && *lpCmdLine) g_startupUrl = XjsUrlExtractFromCmdLine(lpCmdLine);
     return XjsAppMain(hInstance, hPrev, lpCmdLine, nCmdShow);
 }
 
@@ -2042,7 +2028,9 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     XjsSearchWindow::Cur()->Invalidate();
     XjsSetPhase(L"post-create:url-apply");
     if (!g_startupUrl.empty()) {           /* 冷启动 URL 一次性应用 (提权后 XjsElevateAndRestart 透传至此) */
-        XjsUrlApplyFromText(g_startupUrl.c_str(), NULL);
+        std::wstring ue;
+        XjsUrlApplyFromText(g_startupUrl.c_str(), &ue);
+        if (!ue.empty()) XjsToastShow(XjsSearchWindow::MainHwnd(), ue.c_str(), XTOAST_WARN, XSF(1));   /* 回执口径同 WM_COPYDATA */
         g_startupUrl.clear();
     }
     XjsSetPhase(L"message-loop");
