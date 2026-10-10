@@ -153,6 +153,7 @@ void XjsSetPhase(const wchar_t* p);
 #define IDM_HOSTED_SRC_BASE 7000   /* 托管标签"切换搜索来源"菜单: +来源下标 */
 #define IDM_TRAY_BASE       8000   /* 托盘右键菜单: +1恢复窗口 +2设置 +4捐赠(开设置直达捐赠页) +3退出程序 */
 #define IDM_FCTX_BASE       9000   /* 输入字段右键编辑菜单 (路由层通用): +0剪切 +1复制 +2粘贴 +3全选 +4删除 */
+#define IDM_URL_BASE       11000   /* snailsearch:// 确认框的"添加到别的窗口"清单: +窗口数组下标 (xjs_url.cpp) */
 #define IDM_OVER_BASE       9100   /* 标题栏 `...` 溢出菜单 (窗口过小收纳): +0最小化 +1最大化/还原 +2关闭 +3置顶开关 */
 #define IDM_PLUGIN_BASE     10000  /* 插件菜单/状态栏项 (票号表下标, 上限200; 回传 → XjsPluginOnMenuTicket) */
 
@@ -1636,7 +1637,8 @@ std::string Utf16ToUtf8(const wchar_t* str);
 std::wstring XjsTimeBadge(long long ms);            // 相对时间徽章: 刚刚/N分钟/N天/…
 std::wstring XjsAttrsText(unsigned long a);         // 属性位→中文标签: 目录/只读/隐藏/系统/归档, 0='-'
 std::wstring XjsFmt(const wchar_t* tpl, const std::wstring& a0 = L"",
-                    const std::wstring& a1 = L"", const std::wstring& a2 = L"");  // {0}{1}{2} 占位替换 (XjsT 模板键搭配用)
+                    const std::wstring& a1 = L"", const std::wstring& a2 = L"",
+                    const std::wstring& a3 = L"");  // {0}{1}{2}{3} 占位替换 (XjsT 模板键搭配用)
 std::wstring XjsTrimWs(const std::wstring& s, const wchar_t* set = L" \t\r\n");  // 去首尾空白 (默认 \r\n\t 空格; set 可换字符集)
 std::wstring XjsTimeText(long long ms);             // 完整时间文本
 std::wstring XjsNumText(long long n);               // 千分位
@@ -1644,7 +1646,7 @@ std::wstring XjsWanText(long long n);               // 4,483,452 (448.3万)
 void XjsCopyClipboard(const std::wstring& text);
 std::wstring XjsItemPath(int idx);
 void XjsOpenFile(const std::wstring& path);
-void XjsOpenFolderAndSelect(const std::wstring& path);
+bool XjsOpenFolderAndSelect(const std::wstring& path);   /* 真=已把定位请求交给 shell (反斜杠归一内含); 忽略返回值的调用点照旧 */
 void XjsShowProperties(int idx);                    // 系统"属性"对话框 (ShellExecuteEx verb=properties)
 void XjsShowPropertiesPath(const std::wstring& path);   /* 属性框按路径 (xjs_util, XjsShowProperties 与 snailsearch:// props= 共用) */
 void XjsDeleteSelected();
@@ -1702,6 +1704,7 @@ void XjsElevateAndRestart();
  * 语法: snailsearch://<action>[?<query>],动作 new/open(=new) 建窗或复用档案窗,focus 唤起主窗
  *       (带参数时同时在主窗就地应用)。片段 #... 整段丢弃,动作段的尾斜杠不参与判定。 */
 bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err);   /* 解析+分发, 返回否=丢弃 (不弹窗) */
+bool XjsUrlPopupResult(int id);   /* IDM_URL_BASE 段菜单结果 (确认框上选"添加到别的窗口"的落地); 非本段返回 false */
 std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd);         /* 命令行剥 URL (引号段优先, 空格不必编码) */
 void XjsUrlRegisterScheme(bool enable);                             /* HKCU 挂钩/摘钩 (幂等) */
 bool XjsUrlIsRegisteredScheme();                                    /* 当前 HKCU 挂钩态 (UI 开关显示) */
@@ -1868,6 +1871,7 @@ void XjsTrayRemove();
 UINT XjsTrayTaskbarCreatedMsg();           /* RegisterWindowMessage(L"TaskbarCreated") (惰性注册) */
 void XjsTrayReaddAfterExplorer(HWND hwnd); /* Explorer 重启广播处理: 托盘图标被系统销毁后强制重挂 */
 BOOL XjsHotkeysRegisterAll();     /* 注册全部档案槽的全局快捷键 (返回=主窗槽"未设置或注册成功", 供启动警告判定) */
+bool XjsHotkeyApplyToWindow(XjsSearchWindow* w, UINT mod, UINT vk);   /* 设/清某窗快捷键的唯一落地 (vk=0 清除); 假=被占用 */
 void XjsHotkeysUnregisterAll();   /* 卸载全部档案槽的全局快捷键 */
 std::wstring XjsHotkeyText(UINT mod, UINT vk);    /* 热键组合 → "Ctrl + Alt + A" 文本 (设置胶囊/主窗提醒共用) */
 

@@ -3199,22 +3199,13 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     return 0;
                 }
                 p->recHotkey = false;
-                /* 快捷键每窗: 写入 owner 的 hotkeyMod/Vk, 登记在主窗 hwnd (id = ID_HOTKEY_SHOW+档案槽) */
+                /* 快捷键每窗: 落地动作收口在 XjsHotkeyApplyToWindow (snailsearch:// hotkey= 同径) */
                 XjsSearchWindow* ow = XjsSetOwner();
-                HWND mainH = XjsSearchWindow::MainHwnd();   /* 热键登记在主窗 (随主窗角色迁移) */
-                if (ow && mainH) {
-                    int id = ID_HOTKEY_SHOW + ow->uiIndex;
-                    UnregisterHotKey(mainH, id);
-                    if (RegisterHotKey(mainH, id, mod, vk)) {
-                        ow->hotkeyMod = mod;
-                        ow->hotkeyVk = vk;
-                        ow->hotkeyActive = true;
-                        XjsSaveConfig();
+                if (ow) {
+                    if (XjsHotkeyApplyToWindow(ow, mod, vk))
                         XjsToastShow(s_set.hwnd, (L"「" + ow->name + XjsT(L"提示.模式快捷键已更新") + XjsHotkeyText(mod, vk)).c_str(), XTOAST_SUCCESS, SS(1));
-                    } else {
-                        ow->hotkeyActive = (RegisterHotKey(mainH, id, ow->hotkeyMod, ow->hotkeyVk) != FALSE);   /* 复原旧热键 (顺带刷新生效态) */
+                    else
                         XjsToastShow(s_set.hwnd, XjsT(L"提示.快捷键被占用"), XTOAST_WARN, SS(1));
-                    }
                 }
                 p->rowsDirty = true;
                 InvalidateRect(hwnd, NULL, FALSE);

@@ -2694,6 +2694,29 @@ BOOL XjsHotkeysRegisterAll() {
     return mainOk;
 }
 
+/* 以编程方式给某个窗口设/清全局快捷键 = 设置页录制与 snailsearch:// hotkey= 共用的落地动作:
+   登记在主窗 hwnd (id = ID_HOTKEY_SHOW+档案槽, 随主窗角色迁移), vk=0 = 清除。
+   真=已生效并落盘; 假=被其它程序占用 (旧热键会复原, 与录制分支同口径)。须在 XjsWindowScope(目标窗) 内调用。 */
+bool XjsHotkeyApplyToWindow(XjsSearchWindow* w, UINT mod, UINT vk) {
+    HWND mainH = w ? XjsSearchWindow::MainHwnd() : NULL;
+    if (!mainH) return false;
+    int id = ID_HOTKEY_SHOW + w->uiIndex;
+    UINT oldMod = w->hotkeyMod, oldVk = w->hotkeyVk;
+    UnregisterHotKey(mainH, id);
+    if (!vk) {                                   /* 清除: 不注册, 状态归零后落盘 */
+        w->hotkeyMod = w->hotkeyVk = 0; w->hotkeyActive = false;
+        XjsSaveConfig();
+        return true;
+    }
+    if (!RegisterHotKey(mainH, id, mod, vk)) {   /* 占用: 复原旧热键 (顺带刷新生效态) */
+        w->hotkeyActive = (RegisterHotKey(mainH, id, oldMod, oldVk) != FALSE);
+        return false;
+    }
+    w->hotkeyMod = mod; w->hotkeyVk = vk; w->hotkeyActive = true;
+    XjsSaveConfig();
+    return true;
+}
+
 void XjsHotkeysUnregisterAll() {
     HWND mainH = XjsSearchWindow::MainHwnd();
     if (!mainH) return;

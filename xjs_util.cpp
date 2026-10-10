@@ -87,12 +87,12 @@ std::wstring XjsAttrsText(unsigned long a) {
     return s.empty() ? L"-" : s;
 }
 
-/* {0}{1}{2} 占位替换 (i18n 模板键: 语序随语言变, 拼接必须过模板) */
+/* {0}{1}{2}{3} 占位替换 (i18n 模板键: 语序随语言变, 拼接必须过模板) */
 std::wstring XjsFmt(const wchar_t* tpl, const std::wstring& a0,
-                    const std::wstring& a1, const std::wstring& a2) {
+                    const std::wstring& a1, const std::wstring& a2, const std::wstring& a3) {
     std::wstring s = tpl;
-    const std::wstring* args[3] = { &a0, &a1, &a2 };
-    for (int i = 0; i < 3; i++) {
+    const std::wstring* args[4] = { &a0, &a1, &a2, &a3 };
+    for (int i = 0; i < 4; i++) {
         wchar_t tag[8]; _snwprintf(tag, 8, L"{%d}", i);
         size_t pos;
         while ((pos = s.find(tag)) != std::wstring::npos) {
@@ -367,17 +367,24 @@ void XjsOpenFile(const std::wstring& path) {
     if (hideWin && g_hWnd) ShowWindow(g_hWnd, SW_HIDE);
 }
 
-void XjsOpenFolderAndSelect(const std::wstring& path) {
-    if (path.empty()) return;
-    PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(path.c_str());
+/* 在资源管理器里定位并选中一个路径。真 = 已把请求交给 shell;假 = 连父目录都取不到,什么都没做
+   (调用方要给用户回执时看这个返回值, 别当成"一定打开了") */
+bool XjsOpenFolderAndSelect(const std::wstring& path) {
+    if (path.empty()) return false;
+    std::wstring p = path;
+    for (auto& c : p) if (c == L'/') c = L'\\';      /* shell 路径接口只认反斜杠 (URL 递来的路径可能带 /) */
+    PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(p.c_str());
     if (pidl) {
         SHOpenFolderAndSelectItems(pidl, 0, NULL, 0);
         ILFree(pidl);
-    } else {
-        size_t pos = path.rfind(L'\\');
-        if (pos != std::wstring::npos)
-            ShellExecuteW(NULL, L"explore", path.substr(0, pos).c_str(), NULL, NULL, SW_SHOWNORMAL);
+        return true;
     }
+    size_t pos = p.rfind(L'\\');
+    if (pos != std::wstring::npos && pos > 0) {
+        ShellExecuteW(NULL, L"explore", p.substr(0, pos).c_str(), NULL, NULL, SW_SHOWNORMAL);
+        return true;
+    }
+    return false;
 }
 
 /* 系统属性框按路径 = 唯一实现 (列表右键 XjsShowProperties 与 snailsearch:// props= 共用) */

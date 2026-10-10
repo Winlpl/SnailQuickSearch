@@ -10,7 +10,7 @@
  *       动作段取到第一个 '/' 为止 (尾斜杠不改语义), '#' 之后整段丢弃 (参数值里的 # 须写 %23)。
  *       focus/search 带任何窗口或搜索参数 = 唤起后把参数应用到那扇窗 (裸 focus 仍是纯唤起, 参数不再被静默吃掉)。
  *       参数 q|ms|mode|view|skin|zoom|preview|save|win|sort|order|scope|filter|cfg|匹配开关|
- *             addmode|mdesc|mtype|tpl|priv|delmode|cleartags|settings|pos|size|run|reveal|props
+ *             addmode|mdesc|mtype|tpl|priv|delmode|cleartags|hotkey|settings|pos|size|run|reveal|props
  *       q = 单一主关键词 (原样, 不再按 '|' 分段/解 wild:/re:/sql:/lua: 模式前缀 —— 旧式多重写法已废弃)。
  *       ms=<原样 JSON> = 唯一的多重搜索链入口 (引擎 XJS_KEYWORD_MULTI 链式过滤): 每段 {"q":词,"mode":..},
  *       段词可含任意字符 (含 '|'/':'); 各段做成内联托管标签显示于搜索框, q 若同时给出则作为链末节追加在最后
@@ -18,6 +18,8 @@
  *       save=0 缺省: OpenNew(-1) 建临时窗 (w->urlTransient=true), 关窗走 DestroyAndFree 时移除档案槽;
  *       save=1 持久命名档案窗: win=<名> 命中同名存活窗则提到前台, 命中未打开档案则按槽重建, 否则新建并改名;
  *             无 win= 则建 GUID 自动名持久窗 (关窗档案保留, ☰启动器可按槽重建)。
+ *       hotkey=<组合> (如 alt+a) 只对持久窗生效: 临时窗关窗即删, 把全局热键注册给它 = 死窗口占着组合键,
+ *       故 hotkey= 一律忽略并弹提示告知用户 (写法非法 / 被别的程序占用 同样提示, 不静默丢弃)。
  *       sort=<字段>&order=asc|desc: 建窗即套用初始排序并写入本窗档案默认排序 (字段=引擎口径中文串)。
  *       scope=<JSON>: 搜索范围白名单, 与 ms 同口径 — [{"p":路径,"rec":bool}..] 或 ["路径"..] (rec 缺省 true=递归, false=仅本层);
  *       逐路径独立设递归, 只收绝对路径 (含: 或 \, 无通配 *?)。旧式 '|' 分隔写法已废弃 (见 UrlParseScopeJson)。
@@ -232,6 +234,7 @@ static bool UrlParseScopeJson(const std::string& utf8, std::vector<std::pair<std
         }
         if (pathUtf8.empty()) continue;
         std::wstring wp = Utf8ToUtf16(pathUtf8.c_str());
+        for (auto& c : wp) if (c == L'/') c = L'\\';   /* 同 UrlAbsPath 口径: 斜杠归一后再交给引擎 */
         if (wp.find_first_of(L"*?") == std::wstring::npos
             && (wp.find(L':') != std::wstring::npos || wp.find(L'\\') != std::wstring::npos))
             paths.emplace_back(wp, rec);
@@ -246,11 +249,14 @@ static bool UrlParseScopeJson(const std::string& utf8, std::vector<std::pair<std
 static std::wstring UrlAbsPath(const std::wstring& v) {
     std::wstring s;
     for (wchar_t c : v) if (c >= 32 && c != 127) s += c;
+    /* 斜杠归一: 浏览器会把 URL 里的 '\' 规整成 '/' (chip 里写 C:\Windows\x.exe 实测就中招),
+       而 ILCreateFromPathW / ShellExecute 只认反斜杠 —— 不归一就是"点了没反应" */
+    for (auto& c : s) if (c == L'/') c = L'\\';
     s = XjsTrimWs(s);
     if (s.empty() || s.size() > 4000) return std::wstring();
     if (s.find_first_of(L"*?") != std::wstring::npos) return std::wstring();
     bool drive = s.size() >= 3 && s[1] == L':' && ((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'a' && s[0] <= L'z'))
-              && (s[2] == L'\\' || s[2] == L'/');
+              && s[2] == L'\\';
     bool unc = s.size() >= 2 && s[0] == L'\\' && s[1] == L'\\';
     return (drive || unc) ? s : std::wstring();
 }
@@ -279,6 +285,54 @@ static std::vector<std::wstring> UrlParseNames(const std::wstring& v) {
     }
     push(cur);
     return out;
+}
+
+/* hotkey=<修饰键+...+主键> (alt+a / ctrl+alt+f12 / win+space;分隔符 + 或 -,大小写不敏感)。
+   口径与设置页录制完全一致: 必须带修饰键 —— 裸键 RegisterHotKey 也会成功, 但那等于把该键从全系统拦下来。
+   出参 act: 1=设组合 2=清除 (none/off/0/无/清除) 3=写法不认识、缺主键或缺修饰键 (mod/vk 仅在 act=1 有意义)。
+   减号键请写 minus (单独的 - 会被当成分隔符)。 */
+static void UrlHotkey(const std::wstring& v, int* act, UINT* mod, UINT* vk) {
+    std::wstring s; for (wchar_t c : v) if (c >= 32 && c != 127) s += c;
+    std::wstring lo; for (wchar_t c : XjsTrimWs(s)) lo += (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c;
+    if (lo.empty() || lo == L"none" || lo == L"off" || lo == L"0" || lo == L"clear" || lo == L"无" || lo == L"清除") { *act = 2; return; }
+    auto keyVk = [](const std::wstring& k) -> UINT {
+        if (k.size() == 1) {
+            wchar_t c = k[0];
+            if (c >= L'a' && c <= L'z') return (UINT)(c - L'a' + L'A');
+            if (c >= L'0' && c <= L'9') return (UINT)c;
+            if (c == L',') return VK_OEM_COMMA;
+            if (c == L'.') return VK_OEM_PERIOD;
+        }
+        if (k.size() > 1 && k[0] == L'f') { int n = _wtoi(k.c_str() + 1); if (n >= 1 && n <= 24) return (UINT)(VK_F1 + n - 1); }
+        static const struct { const wchar_t* n; UINT vk; } T[] = {
+            { L"space", VK_SPACE }, { L"enter", VK_RETURN }, { L"return", VK_RETURN }, { L"tab", VK_TAB },
+            { L"esc", VK_ESCAPE }, { L"escape", VK_ESCAPE }, { L"backspace", VK_BACK }, { L"back", VK_BACK },
+            { L"delete", VK_DELETE }, { L"del", VK_DELETE }, { L"insert", VK_INSERT }, { L"ins", VK_INSERT },
+            { L"home", VK_HOME }, { L"end", VK_END }, { L"pageup", VK_PRIOR }, { L"pgup", VK_PRIOR },
+            { L"pagedown", VK_NEXT }, { L"pgdn", VK_NEXT }, { L"up", VK_UP }, { L"down", VK_DOWN },
+            { L"left", VK_LEFT }, { L"right", VK_RIGHT }, { L"minus", VK_OEM_MINUS }, { L"equals", VK_OEM_PLUS },
+            { L"comma", VK_OEM_COMMA }, { L"period", VK_OEM_PERIOD }, { L"pause", VK_PAUSE },
+            { L"capslock", VK_CAPITAL }, { L"numlock", VK_NUMLOCK }, { L"scrolllock", VK_SCROLL },
+        };
+        for (auto& e : T) if (k == e.n) return e.vk;
+        return 0;
+    };
+    UINT m = 0, main = 0;
+    size_t i = 0;
+    while (i <= lo.size()) {
+        size_t j = lo.find_first_of(L"+-", i);
+        std::wstring tok = XjsTrimWs(lo.substr(i, (j == std::wstring::npos) ? std::wstring::npos : j - i));
+        if (tok.empty()) { /* 空段 (连续分隔符或结尾) 跳过 */ }
+        else if (tok == L"ctrl" || tok == L"control") m |= MOD_CONTROL;
+        else if (tok == L"alt" || tok == L"menu") m |= MOD_ALT;
+        else if (tok == L"shift") m |= MOD_SHIFT;
+        else if (tok == L"win" || tok == L"windows" || tok == L"meta") m |= MOD_WIN;
+        else { main = keyVk(tok); if (!main) { *act = 3; return; } }
+        if (j == std::wstring::npos) break;
+        i = j + 1;
+    }
+    if (!main || !m) { *act = 3; return; }   /* 缺主键 / 缺修饰键: 不猜, 交给调用方告知用户 */
+    *act = 1; *mod = m; *vk = main;
 }
 
 /* 解析结果 (P1 只装必要字段) */
@@ -311,6 +365,9 @@ struct XjsUrlReq {
        cleartags=1: 清空本窗搜索框的托管标签链 (回到普通搜索) */
     std::wstring settingsCat, delMode;
     int clearTags = 0;
+    /* hotkey=<组合>: 本窗全局快捷键。hkAct 0=未给 1=设 2=清除 3=写法非法/缺修饰键 (必须告知用户);
+       只有持久窗能设 —— 临时窗关窗即删, 见 UrlApply 里的 urlTransient 判定 */
+    int hkAct = 0; UINT hkMod = 0, hkVk = 0; std::wstring hkRaw;
     /* ms=<多重搜索链, 独立于 q>: 链先执行, UrlApply 把 q 作末段追加; 每段 = (模式 0..4 或 -1=本窗默认, 搜索词) */
     std::vector<std::pair<int, std::wstring>> msStages;
     /* 匹配开关三态 (-1 未指定 / 0 关 / 1 开), 对齐 XjsMatchSettings 8 字段 */
@@ -448,6 +505,9 @@ static bool UrlParse(const std::wstring& rawIn, XjsUrlReq* out) {
                 out->settingsCat = UrlClean(val, 24);          /* 分类中文短名, 1/true = 通用页 */
             } else if (keyL == L"delmode")      { out->delMode = UrlClean(val, 64);
             } else if (keyL == L"cleartags")    { out->clearTags = (UrlBit(val) == 1) ? 1 : 0;
+            } else if (keyL == L"hotkey")       {
+                out->hkRaw = UrlClean(val, 32);
+                UrlHotkey(val, &out->hkAct, &out->hkMod, &out->hkVk);
             }
             /* 未知键: 忽略 (方案 四.4) */
         }
@@ -464,7 +524,7 @@ static bool UrlHasPayload(const XjsUrlReq& r) {
         || !r.skin.empty() || r.zoom >= 0 || r.preview >= 0 || !r.scopePaths.empty() || !r.sortField.empty()
         || !r.cfgJson.empty() || !r.addMode.empty() || !r.filterNames.empty()
         || !r.runPath.empty() || !r.revealPath.empty() || !r.propsPath.empty()
-        || !r.settingsCat.empty() || !r.delMode.empty() || r.clearTags != 0
+        || !r.settingsCat.empty() || !r.delMode.empty() || r.clearTags != 0 || r.hkAct != 0
         || r.winX != kNoCoord || r.winY != kNoCoord || r.winW > 0 || r.winH > 0
         || r.mPf >= 0 || r.mPi >= 0 || r.mPe >= 0 || r.mWs >= 0 || r.mWq >= 0 || r.mFw >= 0 || r.mCs >= 0 || r.mEa >= 0;
 }
@@ -536,6 +596,69 @@ static bool UrlExecExtension(const std::wstring& path) {
     return false;
 }
 
+/* 追加一条回执: 被忽略/被拒的参数必须说出来 (已有消息就用分隔符续上, 后到的不覆盖前一条, 也不被前一条顶掉) */
+static void UrlNote(std::wstring* err, const std::wstring& msg) {
+    if (!err) return;
+    if (!err->empty()) *err += L" · ";
+    *err += msg;
+}
+
+/* 窗口名显示用: 自动名窗口是 GUID, 摊在确认框/菜单里根本读不动 → 截前 8 位 (想要像样的名字去 设置-窗口管理 改名) */
+static std::wstring UrlWinLabel(const std::wstring& name) {
+    if (name.size() == 36 && name[8] == L'-') return name.substr(0, 8) + L"…";
+    return name;
+}
+
+/* 模式作用范围的人话 (确认框要摊开给用户看的东西不能只给 1/0): 私有模式带上归属窗口名 */
+static std::wstring UrlModeScopeText(int scope, const std::wstring& owner) {
+    return scope == 1 ? std::wstring(XjsT(L"菜单.仅本窗口")) + L" · " + UrlWinLabel(owner)
+                      : std::wstring(XjsT(L"模式对话框.全局共享"));
+}
+
+/* 一条"添加自定义模式"的请求 (确认框上用户点了什么就怎么落地) */
+struct XjsUrlAddReq { std::wstring name, desc, type, tpl, q; };
+
+/* 落地添加 (目标窗 = t): 唤起该窗 → 建模式 (scope/owner 按用户选) → 填词 → 模式名转托管标签执行。
+   失败只写 err (回执口径), 不弹窗。 */
+static void UrlCommitAddMode(XjsSearchWindow* t, const XjsUrlAddReq& a, int scope, std::wstring* err) {
+    if (!t || !t->hWnd) return;
+    XjsSummonActivate(t->hWnd);
+    XjsWindowScope sc(t);                       /* g_* 宏与搜索执行都落到这扇窗 */
+    std::wstring owner = (scope == 1) ? t->name : std::wstring();
+    if (!XjsCustomModeAdd(a.name, a.desc, a.type, a.tpl, scope, owner)) {
+        UrlNote(err, L"添加搜索模式失败 (名称/模板为空、类型非法、同名已存在或模式数已达上限)");
+        return;
+    }
+    if (!a.q.empty()) XjsSearchSetTextQuiet(a.q);
+    XjsHostedWordAsTag(a.name, false);
+    t->Invalidate();
+}
+
+/* "添加到别的窗口" 的两段式: 询问框是同步的, 窗口清单是异步弹窗菜单 (WM_POPUP_RESULT → XjsUrlPopupResult),
+   中间把这条请求暂存下来。同一时刻只挂一条 (URL 送达本身串行), 新请求直接覆盖。 */
+static XjsUrlAddReq g_pendAdd;
+static bool g_pendAddOpen = false;
+
+static void UrlOpenWindowPicker(XjsSearchWindow* from) {
+    std::vector<XjsPopupItem> items;
+    XjsPopupItem hd; hd.title = XjsT(L"URL协议.选窗口标题"); hd.header = true;
+    items.push_back(hd);
+    for (int i = 0; i < XjsSearchWindow::Count(); i++) {
+        XjsSearchWindow* c = XjsSearchWindow::At(i);
+        if (!c || !c->hWnd) continue;
+        XjsPopupItem it;
+        it.id = IDM_URL_BASE + i;
+        it.title = UrlWinLabel(c->name);
+        it.checked = (c == from);
+        if (c->urlTransient) { it.sub = XjsT(L"URL协议.临时窗标记"); it.disabled = true; }   /* 私有模式随临时窗即删, 存进去等于丢进黑洞 */
+        items.push_back(it);
+    }
+    RECT rc; GetWindowRect(from->hWnd, &rc);
+    /* XSF 返 float, POINT 成员是 LONG —— 聚合初始化会报窄化警告, 显式取整 */
+    POINT pt = { (LONG)(rc.left + (rc.right - rc.left) / 2 - XSF(120)), (LONG)(rc.top + (rc.bottom - rc.top) / 2) };
+    XjsShowPopupMenu(from->hWnd, pt, items, XSF(260));
+}
+
 /* 外部输入要"改用户数据 / 打开文件" = 先把内容摊开给用户看再问一次; 真=用户同意。
    拒绝/取消也要留原因 (静默跳过 = 集成方不知道被谁拒了)。 */
 static bool UrlConfirm(XjsSearchWindow* w, const wchar_t* titleKey, const std::wstring& body,
@@ -600,6 +723,19 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
        appearPos 无效/为 0 时 ApplyAppearPos 内部自会 return; 与 WM_ACTIVATE 侧同口径跳过最大化/最小化) */
     if (req.winX == kNoCoord && req.winY == kNoCoord && !IsIconic(w->hWnd) && !IsZoomed(w->hWnd))
         w->ApplyAppearPos();
+    /* 全局快捷键 (hotkey=): 只对持久窗开放 —— 临时窗 (urlTransient) 关窗即删, 把组合键注册给它等于
+       让一个不在了的窗口占着全局热键 (按下去没人认领), 所以直接忽略并告知用户:
+       命令行里写了 hotkey= 却没进配置, 必须说出来, 不能静默丢掉。写法非法同口径。 */
+    if (req.hkAct == 3) {
+        UrlNote(err, L"hotkey 写法无法识别 (要 修饰键+主键, 如 alt+a / ctrl+alt+f12): " + req.hkRaw);
+    } else if (req.hkAct && w->urlTransient) {
+        UrlNote(err, L"临时窗口不保存快捷键, 已忽略 hotkey=" + req.hkRaw + L" (要持久请用 save=1&win=窗口名)");
+    } else if (req.hkAct == 2) {
+        if (!XjsHotkeyApplyToWindow(w, 0, 0)) UrlNote(err, L"快捷键清除失败 (窗口或主窗不可用)");
+    } else if (req.hkAct == 1) {
+        if (XjsHotkeyApplyToWindow(w, req.hkMod, req.hkVk)) { /* 成功: 窗口出现本身就是回执 */ }
+        else UrlNote(err, L"快捷键注册失败 (已被其它程序占用): " + XjsHotkeyText(req.hkMod, req.hkVk));
+    }
     /* 初始排序 (sort=字段 & order=asc/desc): 写入本窗档案默认排序 + 立即对结果对象套用。
        sortField 用引擎口径 UTF-8 串 (文件名/文件大小/修改时间/创建时间/访问时间/文件评分/别名/文件夹/文件属性);
        order 缺省 (-1) 按降序 (与新建窗口档案默认档一致)。须在下方 SetText 触发搜索前设好, 使首搜即按此序出结果。 */
@@ -638,11 +774,14 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
        投毒闸: 删除是破坏性操作 (链接连发就能清空用户全部模式), 一律先确认。 */
     if (!req.delMode.empty()) {
         const XjsCustomMode* cm = UrlFindCustomMode(req.delMode, w->name);
-        std::wstring id = cm ? cm->id : std::wstring();
+        /* 摘表会令指针失效: id/类型/作用范围 先取成值再往下走 —— 同名可能同时存在"全局共享"与
+           "仅本窗口"两条, 摊开这三样用户才知道要删的是哪一条 */
+        std::wstring id, ctype, cscope;
+        if (cm) { id = cm->id; ctype = cm->type; cscope = UrlModeScopeText(cm->scope, cm->ownerName); }
         if (id.empty()) {
             if (err && err->empty()) *err = L"搜索模式不存在 (本窗可见范围): " + req.delMode;
         } else {
-            std::wstring body = XjsFmt(XjsT(L"URL协议.删除模式确认.说明"), req.delMode);
+            std::wstring body = XjsFmt(XjsT(L"URL协议.删除模式确认.说明"), req.delMode, ctype, cscope);
             if (UrlConfirm(w, L"URL协议.删除模式确认", body, L"通用词.删除", L"URL协议.已取消", err))
                 XjsCustomModeRemoveById(id);
         }
@@ -655,21 +794,34 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
        - 单主词 q: 普通搜索 (本窗模式), XjsSearchSetText 即搜并记历史。
        (旧式 q='a|b' 竖线分段 / 段前缀 wild:/re:/sql:/lua: 入口已删除, 多重一律走 ms) */
     if (!req.addMode.empty()) {
-        /* URL 添加自定义搜索模式: 先建模式 (共享/私有) → 添加即用 (输入词静默入框 → 模式名转托管标签) */
-        std::wstring owner = req.addPriv ? w->name : std::wstring();
-        std::wstring mtype = req.addType.empty() ? L"wildcard" : req.addType;
         /* 投毒闸: 模式一旦落盘就长期住在用户配置里, 用户之后每次点它都在执行这条模板 ——
-           外部链接要植入, 必须把 名称/类型/模板 摊开让用户亲自点头 (Lua 类型已在解析层拒绝) */
+           外部链接要植入, 必须把 名称/类型/作用范围/模板 摊开让用户亲自点头 */
+        std::wstring mtype = req.addType.empty() ? L"wildcard" : req.addType;
         std::wstring body = XjsFmt(XjsT(L"URL协议.添加模式确认.说明"),
-                                   req.addMode, mtype, req.addTpl.empty() ? std::wstring(L"-") : req.addTpl);
-        if (UrlConfirm(w, L"URL协议.添加模式确认", body, L"通用词.添加", L"URL协议.已取消", err)) {
-            if (XjsCustomModeAdd(req.addMode, req.addDesc, mtype, req.addTpl, req.addPriv, owner)) {
-                if (!req.q.empty()) XjsSearchSetTextQuiet(req.q);
-                XjsHostedWordAsTag(req.addMode, false);
-            } else if (err && err->empty()) {
-                *err = L"添加搜索模式失败 (名称/模板为空、类型非法、同名已存在或模式数已达上限)";
-            }
+                                   req.addMode, mtype, UrlModeScopeText(req.addPriv, w->name),
+                                   req.addTpl.empty() ? std::wstring(L"-") : req.addTpl);
+        /* 去处由用户在确认框上定: 链接只能写死一个目标窗, 而"这窗口不是我要的"往往正是看到这张卡才想到。
+           多窗时加第三个钮 = 弹窗口清单另选 (临时窗置灰, 选了也存不住)。
+           按钮 JSON 逐项拼再统一收尾 —— 手写漏掉收尾 ']' 会让整串解析失败, 询问框退化成单个"确定",
+           选择项和"取消"一起消失 (2026-10-10 实锤) */
+        std::vector<std::pair<std::string, const char*>> bs;      /* {按钮文字, style} */
+        bs.push_back({ XjsTUtf8(L"菜单.仅本窗口"), "primary" });
+        bs.push_back({ XjsTUtf8(L"模式对话框.全局共享"), "default" });
+        int idxOther = -1;
+        if (XjsSearchWindow::Count() > 1) { bs.push_back({ XjsTUtf8(L"URL协议.选其它窗口"), "default" }); idxOther = 2; }
+        bs.push_back({ XjsTUtf8(L"通用词.取消"), "default" });
+        std::string btns = "[";
+        for (size_t i = 0; i < bs.size(); i++) {
+            if (i) btns += ",";
+            btns += "{\"text\":\"" + bs[i].first + "\",\"style\":\"" + bs[i].second + "\"}";
         }
+        btns += "]";
+        XjsUrlAddReq a; a.name = req.addMode; a.desc = req.addDesc; a.type = mtype; a.tpl = req.addTpl; a.q = req.q;
+        int pick = XjsShowAskDialog(w->hWnd, XjsT(L"URL协议.添加模式确认"), body.c_str(), btns.c_str());
+        if (pick == 0)      UrlCommitAddMode(w, a, 1, err);
+        else if (pick == 1) UrlCommitAddMode(w, a, 0, err);
+        else if (idxOther >= 0 && pick == idxOther) { g_pendAdd = a; g_pendAddOpen = true; UrlOpenWindowPicker(w); }
+        else UrlNote(err, XjsT(L"URL协议.已取消"));
     } else if (!req.modeName.empty()) {
         const XjsCustomMode* cm = UrlFindCustomMode(req.modeName, w->name);
         if (cm) {
@@ -694,8 +846,17 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
     /* 文件动作 (与搜索可并存): reveal/props 只定位/看属性, 不执行内容 = 直接做;
        run= 是"用关联程序打开", 而本进程与宿主同权限 (管理员) —— 可执行/脚本/宏/挂载类目标硬拒且不弹确认
        (脚本内容用户读不懂, 点"打开"等于盲签), 其余文档类才询问一次 */
-    if (!req.revealPath.empty()) XjsOpenFolderAndSelect(req.revealPath);
-    if (!req.propsPath.empty()) XjsShowPropertiesPath(req.propsPath);
+    if (!req.revealPath.empty()) {
+        /* 存在性先验 + 落地返回值都要说话: 路径不在 / shell 没接住 = 用户看到的是"点了没反应" */
+        if (GetFileAttributesW(req.revealPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+            UrlNote(err, L"定位失败, 路径不存在: " + req.revealPath);
+        else if (!XjsOpenFolderAndSelect(req.revealPath))
+            UrlNote(err, L"定位失败 (取不到该路径的位置): " + req.revealPath);
+    }
+    if (!req.propsPath.empty()) {
+        if (GetFileAttributesW(req.propsPath.c_str()) != INVALID_FILE_ATTRIBUTES) XjsShowPropertiesPath(req.propsPath);
+        else UrlNote(err, L"看属性失败, 路径不存在: " + req.propsPath);
+    }
     if (!req.runPath.empty()) {
         if (UrlExecExtension(req.runPath)) {
             if (err && err->empty()) *err = L"已拒绝打开: 该文件属可执行/脚本类, URL 协议不运行任何程序";
@@ -736,6 +897,21 @@ static XjsSearchWindow* UrlPickLiveWindow(const std::wstring& winName) {
         }
     }
     return XjsSearchWindow::Main();
+}
+
+/* IDM_URL_BASE 段菜单结果 = 确认框上选了"其它窗口…"的那条添加, 落到所选窗口 (私有)。
+   真 = 属本段并已处理 (main.cpp 据此结束分发); 越界 = false 交回其它分支。 */
+bool XjsUrlPopupResult(int id) {
+    if (id < IDM_URL_BASE || id >= IDM_URL_BASE + 64) return false;
+    if (!g_pendAddOpen) return true;                 /* 菜单重影/迟到的结果: 吞掉, 不落到别的分支 */
+    g_pendAddOpen = false;
+    XjsUrlAddReq a = g_pendAdd;
+    XjsSearchWindow* t = XjsSearchWindow::At(id - IDM_URL_BASE);
+    if (!t || !t->hWnd || t->urlTransient) return true;   /* 窗口已关 或 临时窗 (菜单里本就置灰) */
+    std::wstring err;
+    UrlCommitAddMode(t, a, 1, &err);
+    if (!err.empty()) XjsToastShow(XjsSearchWindow::MainHwnd(), err.c_str(), XTOAST_WARN, XSF(1));
+    return true;
 }
 
 bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err) {

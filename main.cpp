@@ -538,6 +538,8 @@ void XjsOnPopupResult(int id) {
                 XjsSaveConfig();
                 break;
         }
+    } else if (id >= IDM_URL_BASE && id < IDM_URL_BASE + 64) {
+        XjsUrlPopupResult(id);   /* snailsearch:// 确认框上选"其它窗口…"的落地 (暂存态在 xjs_url.cpp) */
     } else if (id >= IDM_PLUGIN_BASE && id < IDM_PLUGIN_BASE + 200) {
         /* 插件菜单项 (票号表): 定位登记内容 → 插件 OnCommand。
            本分支必须排在无上界的 IDM_MENU_BASE 段之前; 票号上限见 xjs_plugin.cpp XJS_TICKET_MAX */

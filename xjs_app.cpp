@@ -410,7 +410,12 @@ void XjsSearchWindow::DestroyAndFree() {
             /* 整体前移 = 后窗换槽: 插件窗口令牌按 (代<<32)|槽号 寻址, 从摘除槽起递增代号
                作废旧令牌 (否则旧令牌命中压缩后占住该槽的别的窗口 = 串窗) */
             XjsPluginOnWindowsCompacted(i);
-            if (urlTransient && uiIndex > 0) XjsUiProfilesRemove(uiIndex);   /* 主窗 slot=0 永远不挨 */
+            if (urlTransient && uiIndex > 0) {
+                /* 临时窗的私有模式随窗一起走: 档案名是 GUID, 槽删了以后没有任何窗口会再叫这个名字,
+                   不连带清理就永久残留成"取不到的孤儿模式"(设置-窗口管理 删档案那条路径同口径先 purge) */
+                XjsCmPurgeWindow(name);
+                XjsUiProfilesRemove(uiIndex);   /* 主窗 slot=0 永远不挨 */
+            }
             if (s_curWin == this) SetCur(NULL);
             {   /* 持面板锁跨越拆毁: 位图型面板的插件工作线程可能在锁内做归属校验/交付拷贝
                    (任意线程 API), 锁内看到的必是活对象 (CS 同线程可重入, 析构链无自锁死) */
