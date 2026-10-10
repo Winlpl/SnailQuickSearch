@@ -11,6 +11,11 @@
 
 /* ==================== 行/卡片模型 ==================== */
 
+/* 窗口管理段宽 (= 可管理的档案槽上限): 行构建与命令分派共用同一常量, 段位互斥由 static_assert 锁死。
+   档案数只增不自动回收 (用户可在本页删除), 16 窗并发上限之外全靠这里兜住 —— 曾用 60:
+   行构建无上限而分派有, 档案攒到 60 后"重命名"按钮实际执行的是 ACT_OPEN 开关 (静默改配置) */
+static const int XJS_WINGM_SLOTS = 200;
+
 enum XjsSetCtrl { CT_INFO = 0, CT_SWITCH, CT_BUTTON, CT_PILL, CT_IMAGE, CT_INPUT, CT_TROW, CT_MDDOC };
 enum XjsSetAct {
     ACT_NONE = 0, ACT_PREVIEW, ACT_AUTOSTART, ACT_REBUILD, ACT_GITHUB, ACT_SITE, ACT_DONORS, ACT_GLM,
@@ -35,10 +40,13 @@ enum XjsSetAct {
     /* 窗口管理: 删除窗口档案 (1900+档案槽, 已打开则连窗销毁+卸热键)。
        基址曾在 316: 段宽 64 横穿 320..379 上 13 个动作常量, 显式 case 优先于范围判定 —
        删第 5 档案 (槽4) 实际执行 ACT_CLEARHIST 清空搜索历史, 属数据丢失级撞号, 已挪到最高空闲段 */
-    ACT_WINGM_DEL = 1900,
-    ACT_WINGM_REN = 1440,  /* 窗口管理: 重命名窗口档案 (1440+档案槽, 上限 59 — 避开 EXCL_DEL 400..1423
-                              与 OPEN 1500; 作用对象 = 档案槽: 存活窗改窗口名, 未打开档案改档案名,
-                              与 窗口名称行 同一入口 XjsSetApplyWindowRename) */
+    ACT_WINGM_DEL = 1700,   /* +档案槽 (段宽 XJS_WINGM_SLOTS, 已打开则连窗销毁+卸热键)。
+       基址曾在 316: 段宽 64 横穿 320..379 上 13 个动作常量, 显式 case 优先于范围判定 —
+       删第 5 档案 (槽4) 实际执行 ACT_CLEARHIST 清空搜索历史, 属数据丢失级撞号, 已挪到最高空闲段;
+       曾在 1900: 重命名段扩到 200 槽后让位 (与 OPEN 之间原 1503..1899 空闲区重新划分) */
+    ACT_WINGM_REN = 1440,  /* 窗口管理: 重命名窗口档案 (1440+档案槽, 段宽 XJS_WINGM_SLOTS — 避开
+                              EXCL_DEL 400..1423 与 OPEN; 作用对象 = 档案槽: 存活窗改窗口名,
+                              未打开档案改档案名, 与 窗口名称行 同一入口 XjsSetApplyWindowRename) */
     ACT_CLEARHIST = 320,
     ACT_HOTKEY = 330,    /* 全局快捷键: 点击进入录制, 按下新组合键生效 (Delete 清除取消注册, Esc 取消) */
     /* 窗口行为 (每窗, 2026-09-17): 走自绘菜单选择的项 = id 基址+选项下标, 其余为开关 */
@@ -65,7 +73,7 @@ enum XjsSetAct {
     ACT_PERF_SCNCLR = 396,  /* 遍历统计 清零 */
     ACT_PERF_SYNCLR = 397,  /* 同步统计 清零 (xjs_sync_ClearPerformanceText, 无开关 API) */
     ACT_EXCL_DEL = 400,  /* +排除目录索引 (上限 1024) */
-    ACT_OPEN = 1500,     /* +0..2 打开文件行为 (每窗: 继承管理员/异步线程/打开后隐藏) */
+    ACT_OPEN = 1640,     /* +0..2 打开文件行为 (每窗: 继承管理员/异步线程/打开后隐藏) */
     /* (插件管理页已撤 — 启停/重扫/开目录管理并进插件商城窗, 2026-10-06; 段 1600 空闲) */
     /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲。
        两张表已并入同一分类页 (2026-10-06), 不能再按 s_set.cat 路由 — 别名表动作拆独立段 */
@@ -81,14 +89,15 @@ static_assert(ACT_APPEAR + XJS_APPEAR_COUNT <= ACT_MEMLOCK, "出现位置档位�
 static_assert(ACT_PERF_SYNCLR + 1 <= ACT_EXCL_DEL, "内存/性能动作段越界, 与 ACT_EXCL_DEL 重叠");
 /* 段位互斥锁死 (枚举值即运行时命令 id, 曾发生 ACT_WINGM_DEL 段横穿后加常量 = 点删除执行别的动作):
    任何新动作段必须落在已锁段之外并在此补断言 */
-static_assert(ACT_WINGM_DEL + 64 <= ACT_TSAVE, "窗口管理删除段与 文件分类/别名 表格段重叠");
+static_assert(ACT_WINGM_DEL + XJS_WINGM_SLOTS <= ACT_TSAVE, "窗口管理删除段与 文件分类/别名 表格段重叠");
 static_assert(ACT_FDEL + 256 <= ACT_ADEL, "文件分类删除段与别名删除段重叠");
 static_assert(ACT_ADEL + 1024 <= ACT_ALIAS_TSAVE, "别名删除段与别名表保存/添加动作重叠");
 static_assert(ACT_ALIAS_TADD + 1 <= ACT_VIEW_MENU, "别名表动作段与视图/皮肤下拉结果段重叠");
 static_assert(ACT_VIEW_MENU + 5 <= ACT_SKIN_MENU, "视图下拉结果段与皮肤下拉结果段重叠");
 static_assert(ACT_SKIN_MENU + 300 <= 4096, "皮肤下拉结果段越出保留区 (扫描皮肤数上限 300)");
 static_assert(ACT_EXCL_DEL + 1024 <= ACT_WINGM_REN, "排除目录删除段与重命名段重叠");
-static_assert(ACT_WINGM_REN + 60 <= ACT_OPEN, "窗口重命名段 (上限 59 档案) 与打开行为段重叠");
+static_assert(ACT_WINGM_REN + XJS_WINGM_SLOTS <= ACT_OPEN, "窗口重命名段与打开行为段重叠");
+static_assert(ACT_OPEN + 3 <= ACT_WINGM_DEL, "打开行为段与窗口管理删除段重叠");
 
 /* 出现位置档位文字 (设置行当前值 + 下拉菜单同源; 档位序 = xjs_app.h XJS_APPEAR_*)。
    合成串走函数内 static 缓冲: 两处调用都即时拷进 std::wstring, 不跨调用持有 */
@@ -137,6 +146,10 @@ struct XjsSetRow {
     int tblCols = 0;                  /* CT_TROW: 列数 (3=文件分类 名称/类型/后缀, 2=别名 路径/别名); 列几何同源 XjsSetTblColRect */
     bool centerText = false;          /* 引导语等: 名称/描述水平居中 (用 tfNameC/tfDescC) */
     bool link = false;                /* 链接行: 名称 accent 色 + 手型光标, 整行点击触发 act (关于页 GLM 官网) */
+    const wchar_t* linkText = NULL;   /* 说明内嵌链接子串 (NULL=无; 与 linkUrl 成对): accent+下划线, 点击开 linkUrl。
+                                         存语言无关字面量 (协议名等, 各译文都原样含它), 按 desc.find 定位 */
+    const wchar_t* linkUrl = NULL;    /* 子串点击打开的 URL (ShellExecute open; 松开回放) */
+    std::vector<XjsRect> linkRects;   /* 子串命中矩形 (内容坐标, 行模型构建期排版实测; 绘制/命中/光标三处同源) */
     bool block = false;               /* 长文本块行: 名称固定在行顶, 说明占其余整块 (性能统计多行明细) —
                                          默认的 名称/说明 上下两半垂直居中排布会把多行文本挤出行框 */
     bool warnText = false;            /* 说明文字用警告色 (内存页锁定"需注销生效/授权已移除"状态行) */
@@ -268,6 +281,7 @@ struct XjsSettingsState {
     int pressAct = 0;      /* 行待定 (行 act 值, 0=无) */
     int pressSide = -1;    /* 侧边待定 (SET_TREE 下标) */
     int pressDlg = 0;      /* 对话框控件待定 (DHB id) */
+    bool pressLink = false;/* 说明内嵌链接待定 (松开仍命中子串才开 URL, 命令类同口径) */
 };
 static XjsSettingsState s_set;
 
@@ -793,6 +807,9 @@ static bool XjsSetBuildRows() {
             bool autoOn = XjsIsAutoStartEnabled() != 0;
             addRow(ACT_AUTOSTART, CT_SWITCH, XjsT(L"设置.通用.开机自启动"), XjsT(L"设置.通用.开机自启动.说明"), L"", autoOn, false);
             addRow(ACT_URLPROTO, CT_SWITCH, XjsT(L"设置.通用.URL协议"), XjsT(L"设置.通用.URL协议.说明"), L"", g_urlProtocolEnabled, false);
+            /* 说明里的协议名 = 内嵌链接 → 演示页 (语法/示例/各语言译文都原样含 "snailsearch://" 字面量) */
+            s_set.cards.back().rows.back().linkText = L"snailsearch://";
+            s_set.cards.back().rows.back().linkUrl  = L"https://www.xunjieso.com/url_demo.html";
             /* 页尾文档卡 = snailsearch:// 语法与示例 (main.rc RCDATA 206, xjs_md 排版):
                开关只说"能干什么",这一卡回答"怎么写这条链接" —— 外部集成不必离开程序查文档 */
             XjsSetAppendMdPage(2, XjsT(L"设置.通用.URL协议"), L"URL协议简介.md");
@@ -853,7 +870,9 @@ static bool XjsSetBuildRows() {
         }
         case SC_MANAGE: {  /* 窗口管理 (全局): 全部命名窗口档案, 可删除 (已打开连窗销毁+卸热键) */
             newCard(XjsT(L"设置分类.窗口管理"));
-            for (int k = 0; k < XjsUiProfileCount(); k++) {
+            /* 段宽封顶 (XJS_WINGM_SLOTS): 超出段宽的档案在本页不出管理行 —— 行 id 若越过段界
+               就会撞进 OPEN/TSAVE 等邻段 (分派按范围判定), 宁可少显示也不可错执行 */
+            for (int k = 0; k < XjsUiProfileCount() && k < XJS_WINGM_SLOTS; k++) {
                 XjsUiProfile* prof = XjsUiProfileAt(k);
                 if (!prof) continue;
                 XjsSearchWindow* w = XjsSearchWindow::AtSlot(k);
@@ -1135,6 +1154,59 @@ static bool XjsSetBuildRows() {
         cy = c.y + c.h + cardGap;
     }
     s_set.contentH = cy + SS(6);
+    /* 说明内嵌链接的命中矩形 (行模型构建期排版实测; r.y 此刻已由卡片几何落定):
+       排版口径与说明行高测量同源 (tfDesc × 同一 textR 让位公式), 绘制/命中/光标三处共用。
+       子串未命中 (译文不含该字面量) 或测量失败 (兼容模式帧外) = 无矩形不可点, 链接态不画 */
+    if (canMeasure) {
+        for (auto& c : s_set.cards)
+            for (auto& r : c.rows) {
+                r.linkRects.clear();
+                if (!r.linkText || !r.linkUrl || r.desc.empty()) continue;
+                size_t pos = r.desc.find(r.linkText);
+                if (pos == std::wstring::npos) continue;
+                float span = XjsSetRowCtrlSpan(r);
+                float textL = cx0Build + SS(18);
+                float textR = cx1Build - SS(18) - (span > 0 ? span + SS(14) : 0);
+                float descH = r.h / 2 - SS(2);   /* 说明矩形实高, 绘制侧 ((ry1-SS(6))-(mid-SS(2))) 同式 */
+                XjsTextLayout* lay = NULL;
+                /* maxH 必须取 descH 实高 (非虚高): tfDesc 是段落垂直居中 (fmts 循环统一 CENTER),
+                   DWrite 把行块在布局框内居中, hm.top 是"相对说明矩形顶"的行位 — 框高对了
+                   hm.top 才直接可用; 虚高 10000 会把命中矩形推到几千 px 外 (2026-10-11 实锤) */
+                if (FAILED(g_dw->CreateTextLayout(r.desc.c_str(), (UINT32)r.desc.length(), s_set.tfDesc,
+                                                  textR - textL, descH, &lay)) || !lay) continue;
+                XjsHitTestMetrics hm8[8];
+                std::vector<XjsHitTestMetrics> heap;
+                XjsHitTestMetrics* hm = hm8;
+                UINT32 got = 0;
+                HRESULT hr = lay->HitTestTextRange((UINT32)pos, (UINT32)wcslen(r.linkText), 0, 0, hm8, 8, &got);
+                if (FAILED(hr) && got > 8) {   /* DWRITE 缓冲不足: got 带回实需数量, 换堆缓冲重测 */
+                    heap.resize(got);
+                    hm = heap.data();
+                    got = 0;
+                    hr = lay->HitTestTextRange((UINT32)pos, (UINT32)wcslen(r.linkText), 0, 0,
+                                               hm, (UINT32)heap.size(), &got);
+                }
+                if (SUCCEEDED(hr) && got > 0) {
+                    /* 兼容模式的 HitTestTextRange = 单矩形近似 (恒 top=0), 说明换行后命中错位 —
+                       只在单行说明 (行高未长过 rowHDesc) 时作链接; 标准模式 (DWrite) 多行矩形精确恒可用 */
+                    bool singleLine = r.h <= rowHDesc + 0.5f;
+                    if (g_gfxEngineActive != 1 || singleLine || got > 1) {
+                        float descTop = r.y + r.h / 2 - SS(4);   /* 绘制侧说明矩形顶 (mid-SS(2), mid=ry0+h/2-SS(2)) */
+                        for (UINT32 i = 0; i < got; i++) {
+                            float yTop = descTop + hm[i].top;
+                            /* GDI+ 的单矩形近似恒 top=oy, 不感知段落垂直居中 — tfDesc 是 CENTER,
+                               手工补 (框高-块高)/2 (与 GdiDrawMultiLine 整块居中同式, 2026-10-11 实锤:
+                               漏补 = 命中带比文字墨迹高一个居中量); DWrite 的 hm.top 已含居中不再补 */
+                            if (g_gfxEngineActive == 1) yTop += (descH - hm[i].height) * 0.5f;
+                            r.linkRects.push_back(XjsRectF(textL + hm[i].left, yTop,
+                                                           textL + hm[i].left + hm[i].width,
+                                                           yTop + hm[i].height));
+                        }
+                    }
+                }
+                lay->Release();
+            }
+    }
     /* 输入字段几何随行模型失效: 重建后的模型里没有 CT_INPUT 行 (= 不在"数据维护"分类) 即字段不可见,
      * 须即刻失焦并清渲染矩形, 否则残留矩形仍被 XjsEditFieldMouseDown/Hit 命中 ——
      * 表现 = 在其它分类点旧位置聚焦到隐形输入框, 打字/回车全进它 (2026-09-15 实锤) */
@@ -2014,6 +2086,30 @@ static void XjsSetPaint(HWND hwnd) {
                     r.centerText ? s_set.tfDescC : s_set.tfDesc,
                     XjsRectF(textL, r.name.empty() ? ry0 + SS(6) : ry0 + SS(26), textR, ry1 - SS(6)),
                     r.warnText ? (XjsBrush*)s_set.brWarn : (XjsBrush*)s_set.brFaint);
+            } else if (!r.linkRects.empty() && r.linkText && r.linkUrl) {
+                /* 说明内嵌链接: 说明整段走排版绘制 (DrawText 给不了子串上色), 链接子串范围
+                   accent+下划线 (xjs_md 行内链接同款); 排版宽与构建期 linkRects 实测同源 */
+                float mid = ry0 + (ry1 - ry0) / 2 - SS(2);
+                s_set.rt->DrawText(r.name.c_str(), (UINT32)r.name.length(),
+                    r.centerText ? s_set.tfNameC : s_set.tfName,
+                    XjsRectF(textL, ry0 + SS(8), textR, mid), nameBr);
+                XjsTextLayout* lay = NULL;
+                /* maxH = 说明矩形实高 (非 10000): GDI+ 后端的 DrawTextLay 按布局 maxH 构造绘制矩形,
+                   多行文本整块垂直对齐随矩形高走 — 虚高会把整段推出行框外 (实测整行说明隐身);
+                   D2D 的 DrawTextLayout 不裁不位移, maxH 取实高两种后端同一观感 */
+                float descH = (ry1 - SS(6)) - (mid - SS(2));
+                if (s_set.tfDesc && descH > 0 &&
+                    SUCCEEDED(g_dw->CreateTextLayout(r.desc.c_str(), (UINT32)r.desc.length(), s_set.tfDesc,
+                                                     textR - textL, descH, &lay)) && lay) {
+                    size_t pos = r.desc.find(r.linkText);
+                    if (pos != std::wstring::npos) {
+                        XjsTextRange rg{(UINT32)pos, (UINT32)wcslen(r.linkText)};
+                        lay->SetDrawingEffect(s_set.brAccent, rg);
+                        lay->SetUnderline(TRUE, rg);
+                    }
+                    s_set.rt->DrawTextLayout(XjsPoint2F(textL, mid - SS(2)), lay, s_set.brFaint);
+                    lay->Release();
+                }
             } else {
                 float mid = ry0 + (ry1 - ry0) / 2 - SS(2);
                 s_set.rt->DrawText(r.name.c_str(), (UINT32)r.name.length(),
@@ -2181,19 +2277,38 @@ static void XjsSetAliasSave() {
     }
 }
 
-/* 链接行命中 (关于页 GLM 官网行): 手型光标用。按行模型现查 (y 补回滚动量),
-   x 须在内容区 (侧边栏纵列上不因行 y 相同而误显手型) */
-static bool XjsSetLinkRowHit(HWND hwnd, POINT pt) {
+/* 说明内嵌链接子串命中 (r.linkRects, 行模型构建期实测, 内容坐标): 返回所属行, 未命中=NULL。
+   只认子串矩形 — 整行链接行 (r.link) 不在此列, 其按下走行循环 pressAct 口径 */
+static XjsSetRow* XjsSetDescLinkRowAt(HWND hwnd, POINT pt) {
     float sideW = XjsSetSideW();
-    if (pt.x < sideW) return false;
+    if (pt.x < sideW) return NULL;
     RECT crc;
     GetClientRect(hwnd, &crc);
-    if (pt.x >= crc.right - SS(10)) return false;   /* 右缘滚动条带不算 */
+    if (pt.x >= crc.right - SS(10)) return NULL;   /* 右缘滚动条带不算 */
+    float x = (float)pt.x, y = pt.y + s_set.scroll;
+    for (auto& c : s_set.cards)
+        for (auto& r : c.rows) {
+            if (!r.linkUrl) continue;
+            for (auto& rc : r.linkRects)
+                if (y >= rc.top && y < rc.bottom && x >= rc.left && x < rc.right)
+                    return &r;
+        }
+    return NULL;
+}
+
+/* 链接命中 (手型光标用): 整行链接行 (关于页 GLM 官网行) 或 说明内嵌链接子串。
+   按行模型现查 (y 补回滚动量), x 须在内容区 (侧边栏纵列上不因行 y 相同而误显手型) */
+static XjsSetRow* XjsSetLinkRowAt(HWND hwnd, POINT pt) {
+    float sideW = XjsSetSideW();
+    if (pt.x < sideW) return NULL;
+    RECT crc;
+    GetClientRect(hwnd, &crc);
+    if (pt.x >= crc.right - SS(10)) return NULL;   /* 右缘滚动条带不算 */
     float y = pt.y + s_set.scroll;
     for (auto& c : s_set.cards)
         for (auto& r : c.rows)
-            if (r.link && y >= r.y && y < r.y + r.h) return true;
-    return false;
+            if (r.link && y >= r.y && y < r.y + r.h) return &r;
+    return XjsSetDescLinkRowAt(hwnd, pt);
 }
 
 /* 设置窗标题跟随 owner 窗口名称 (重命名/删除档案后同步刷新); 无 owner 回落主窗固定名。
@@ -2567,7 +2682,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                 XjsSaveConfig();
                 break;
             }
-            if (act >= ACT_WINGM_REN && act < ACT_WINGM_REN + 60) {
+            if (act >= ACT_WINGM_REN && act < ACT_WINGM_REN + XJS_WINGM_SLOTS) {
                 /* 窗口管理·重命名: 作用于档案槽 (槽上有存活窗口=改窗口名, 未打开=改档案名 —
                    未打开档案此前无处改名)。对话框结果经 XJS_SET_INPUT_RENAME 通道回
                    WM_INPUT_DONE, 与 窗口名称行 共用同一入口 XjsSetApplyWindowRename */
@@ -2581,7 +2696,7 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                                    w ? w->name : prof->name, XJS_SET_INPUT_RENAME);
                 break;
             }
-            if (act >= ACT_WINGM_DEL && act < ACT_WINGM_DEL + 64) {
+            if (act >= ACT_WINGM_DEL && act < ACT_WINGM_DEL + XJS_WINGM_SLOTS) {
                 /* 窗口管理·删除: 先经通用询问框二次确认 (禁系统 MessageBoxW), 通过后执行 ——
                    档案已打开 = 先真销毁窗口 (含结果对象, 快捷键随重注册卸载), 再删档案;
                    未打开 = 仅删档案。主窗槽 0 行已置灰, 不可达。
@@ -2806,7 +2921,7 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             }
             /* 光标随移动显式设置 (本处理直接 return 0 不过 DefWindowProc → WM_SETCURSOR
                不会到来, 与主窗 WM_MOUSEMOVE 同款兜底): 链接行=手型, 其余=箭头 */
-            SetCursor(LoadCursorW(NULL, XjsSetLinkRowHit(hwnd, pt) ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursorW(NULL, XjsSetLinkRowAt(hwnd, pt) ? IDC_HAND : IDC_ARROW));
             return 0;
         }
         case WM_MOUSELEAVE:
@@ -2976,6 +3091,14 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             XjsEditFieldMouseUp(hwnd);   /* 字段拖选收尾+释放捕获 (无拖选=无操作) */
             { RECT crc; GetClientRect(hwnd, &crc);
               XjsToastMouseUp(hwnd, SS(1), (float)crc.right, (float)crc.bottom, pt); }   /* Toast 按钮: 松开触发 */
+            /* 说明内嵌链接回放 (按下待定+松开仍命中子串, 命令类同口径): 打开链接 URL */
+            if (p->pressLink) {
+                p->pressLink = false;
+                XjsSetRow* lr = XjsSetDescLinkRowAt(hwnd, pt);
+                if (lr && lr->linkUrl)
+                    ShellExecuteW(hwnd, L"open", lr->linkUrl, NULL, NULL, SW_SHOWNORMAL);
+                return 0;
+            }
             /* 命令落地 (松开触发口径): 按下待定 + 松开仍命中同一目标才执行 */
             if (p->dlgOpen) {
                 if (p->pressDlg) {
@@ -3125,6 +3248,12 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 }
                 return 0;
             }
+            /* 说明内嵌链接: 按下记待定 (松开仍命中子串才开 URL, 命令类同口径)。整行链接行
+               (r.link) 不在此列走下方行循环; 该行本体是开关行, 子串外说明文字按下本就不触发 */
+            if (XjsSetDescLinkRowAt(hwnd, pt)) {
+                p->pressLink = true;
+                return 0;
+            }
             float y = pt.y + p->scroll;
             RECT crc;
             GetClientRect(hwnd, &crc);
@@ -3262,7 +3391,7 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 GetCursorPos(&pt);
                 ScreenToClient(hwnd, &pt);
                 if (XjsEditFieldHit(hwnd, pt)) { SetCursor(LoadCursorW(NULL, IDC_IBEAM)); return TRUE; }
-                if (XjsSetLinkRowHit(hwnd, pt)) { SetCursor(LoadCursorW(NULL, IDC_HAND)); return TRUE; }
+                if (XjsSetLinkRowAt(hwnd, pt)) { SetCursor(LoadCursorW(NULL, IDC_HAND)); return TRUE; }
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
@@ -3313,6 +3442,7 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             p->pressAct = 0;
             p->pressSide = -1;
             p->pressDlg = 0;
+            p->pressLink = false;
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);

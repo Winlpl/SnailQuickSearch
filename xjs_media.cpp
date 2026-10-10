@@ -555,7 +555,12 @@ void XjsSearchWindow::MediaSuspend() {
     c->eng->Release();
     c->eng = NULL;
     if (c->engEx) { c->engEx->Release(); c->engEx = NULL; }
+    int pw = c->frameW, ph = c->frameH;   /* 帧尺寸随 bits 保留: 挂起期海报垫显要过
+                                             XjsMediaFrameBitmap 的尺寸闸 (归零 = 海报永不可达,
+                                             bits 白留); 恢复路径 MediaLoadFile 会重置归零 */
     MediaDropFrameTarget(c);   /* 取帧目标面同放 (bits 保留 = 海报垫显) */
+    c->frameW = pw;
+    c->frameH = ph;
     c->suspended = true;
     if (hWnd) KillTimer(hWnd, ID_TIMER_MEDIA);   /* 泵无事可做 (Tick 对无会话本就摘表) */
 }

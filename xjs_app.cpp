@@ -218,6 +218,14 @@ void XjsUiProfilesRemove(int slot) {
     s_uiProfiles.erase(s_uiProfiles.begin() + slot);
     for (int i = 0; i < s_winCount; i++)
         if (s_wins[i]->uiIndex > slot) s_wins[i]->uiIndex--;
+    /* 槽数收缩后最高档 id 成为"幽灵热键": RegisterAll 的循环界是现有槽数, 永远够不着它 ——
+       不显式卸载的话, 被删槽的热键仍以旧 id 注册着, 按键会 XjsSummonSlot(已删槽) → 空槽重建窗口
+       (已删档案复活); 挪到低槽位的存活窗重注册同组合键又会被幽灵占着 = 永久注册失败。
+       卸完即全量重注册 (幂等, 重复调用安全): 挪位窗口的热键立即落回正确 id, 不等下一次机缘 */
+    if (HWND mainH = XjsSearchWindow::MainHwnd()) {
+        UnregisterHotKey(mainH, ID_HOTKEY_SHOW + (int)s_uiProfiles.size());
+        XjsHotkeysRegisterAll();
+    }
 }
 
 void XjsSearchWindow::InvalidateList() {

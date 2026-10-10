@@ -529,6 +529,20 @@ static bool UrlHasPayload(const XjsUrlReq& r) {
         || r.mPf >= 0 || r.mPi >= 0 || r.mPe >= 0 || r.mWs >= 0 || r.mWq >= 0 || r.mFw >= 0 || r.mCs >= 0 || r.mEa >= 0;
 }
 
+/* 无槽新建并核实真的建出来了: OpenNew(-1) 在 16 窗上限时会 toast 后静默 return (一个窗都不建),
+   也可能建了上下文但 CreateWindowExW 失败 (hWnd 空) —— 不核实的话 At(n-1) 拿到的是无辜的
+   既有窗口, 随后被打 urlTransient 标记 (关窗 = 删掉用户真实档案) 或按 win= 改名 (档案名被夺)。
+   核实口径 = 计数增长 (RegisterPending 是唯一追加点, 追加必在末位); 计数不增/末位 hWnd 空 = 未建成。
+   (OpenNew 顶部会清扫历史失败残留的 hWnd 空上下文, 计数一减一增相抵时宁 可误报失败 —— 失败安全) */
+static XjsSearchWindow* UrlOpenNewVerified(std::wstring* err) {
+    int before = XjsSearchWindow::Count();
+    XjsSearchWindow::OpenNew(-1);
+    int after = XjsSearchWindow::Count();
+    XjsSearchWindow* w = after > before ? XjsSearchWindow::At(after - 1) : NULL;
+    if (!w || !w->hWnd) { if (err) *err = L"窗口创建失败 (16 顶/资源不足)"; return NULL; }
+    return w;
+}
+
 /* new/open 的目标窗解析: save=0 临时窗 / save=1 持久命名档案窗 (复用存活窗、按槽重建或新建改名)。
    返回 NULL = 未建成 (err 已给原因)。 */
 static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err) {
@@ -550,9 +564,7 @@ static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err
                 }
                 if (slot > 0) { XjsSearchWindow::OpenNew(slot); w = XjsSearchWindow::AtSlot(slot); }
                 else {                                                       /* ③ 全新: 建后改名 */
-                    XjsSearchWindow::OpenNew(-1);
-                    int n = XjsSearchWindow::Count();
-                    if (n > 0) w = XjsSearchWindow::At(n - 1);
+                    w = UrlOpenNewVerified(err);
                     if (w && w->hWnd && !XjsSearchWindow::NameInUse(req.winName.c_str(), w)) {
                         XjsUiProfile* p = XjsUiProfileAt(w->uiIndex);
                         std::wstring old = w->name;
@@ -563,15 +575,11 @@ static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err
                 }
             }
         } else {
-            XjsSearchWindow::OpenNew(-1);                                  /* 无名持久窗 (GUID) */
-            int n = XjsSearchWindow::Count();
-            if (n > 0) w = XjsSearchWindow::At(n - 1);
+            w = UrlOpenNewVerified(err);                                   /* 无名持久窗 (GUID) */
         }
     } else {
-        XjsSearchWindow::OpenNew(-1);              /* 临时窗: 走既有 slot 分配 = XjsUiProfileCount() */
-        int n = XjsSearchWindow::Count();
-        if (n > 0) w = XjsSearchWindow::At(n - 1); /* 最新入表 = 刚建 */
-        if (w && w->hWnd) w->urlTransient = true;  /* 关窗即删的底座 (方案 一.4) */
+        w = UrlOpenNewVerified(err);               /* 临时窗: 走既有 slot 分配 = XjsUiProfileCount() */
+        if (w) w->urlTransient = true;             /* 关窗即删的底座 (方案 一.4) */
     }
     if (!w || !w->hWnd) { if (err) *err = L"窗口创建失败 (16 顶/资源不足)"; return NULL; }
     return w;

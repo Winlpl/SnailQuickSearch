@@ -152,6 +152,11 @@ bool XjsEngineEnsureResultFor(XjsSearchWindow* w) {
     xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_DRAW_ICON, (const void*)Xjs_DrawIcon, NULL);
     xjs_result_SetCallback(w->result, XJS_RESULT_EVENT_ICON_ASK,  (const void*)Xjs_IconAsk, NULL);
     XjsApplyMatchSettingsFor(w);   /* 搜索匹配设置按结果对象生效: 本窗新建即按本窗档案下发 */
+    /* 档案默认排序随结果对象创建下发 (排序态事实源 = 结果对象): 主窗 WM_CREATE 时数据库未就绪,
+       ApplyCreateSetup 的下发永远轮空 (result 尚不存在, 创建被拒), 这里是"结果对象 + 档案"双全的
+       唯一时机 —— 不下发则用户设的默认排序启动即失效, 且下一次落盘被结果对象的引擎默认值覆写 */
+    if (XjsUiProfile* p = XjsUiProfileAt(w->uiIndex); p && !p->sortField.empty())
+        XjsResultSetSortField(w->result, Utf16ToUtf8(p->sortField.c_str()).c_str(), p->sortWay ? TRUE : FALSE);
     return true;
 }
 

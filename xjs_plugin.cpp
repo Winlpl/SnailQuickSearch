@@ -591,7 +591,27 @@ bool XjsPluginUninstall(int i, std::wstring* err) {
         XjsPluginOnPluginsChanged();   /* 回滚后再发一次变化信号, 订阅者重查恢复 */
         return false;
     }
-    s_plugins.erase(s_plugins.begin() + i);   /* 注册表摘除 */
+    {   /* 注册表摘除 = 排他锁下整体重建 (同 PluginScan 退役保活口径)。三件事缺一不可:
+        ① 摘除必须落在新缓冲 (vector move 只换缓冲所有权, 旧缓冲字节原样进退役表 = 已解锁
+           的插件线程持条目指针继续读也安全); 原地 erase 会移动赋值覆盖条目内存 + 无锁改
+           vector 本体 (size/数据指针撕裂读), 曾两个都不管。
+        ② 摘除点之后的 ctx->idx 必须统一重编号 —— PluginApiCheck 按 ctx->idx 取条目再与
+           ctx 指针对表, 不重编号则其后所有插件每次 API 调用都错表/越界 = 全部 ERR_ARG
+           (插件瞬间变哑, 直到重扫/重启才自愈, 且自己的界面路径按 id 走毫无察觉)。
+        ③ 退役条目保持位元不变: 从退役缓冲**拷贝**出存活条目 (不能 move, move 会掏空退役
+           侧的 wstring, 在跑的插件线程正读着它)。 */
+        AcquireSRWLockExclusive(&s_regLock);
+        std::vector<XjsPluginEntry>* retired = new std::vector<XjsPluginEntry>(std::move(s_plugins));
+        s_plugins.reserve(retired->size());
+        for (int k = 0; k < (int)retired->size(); k++) {
+            if (k == i) continue;
+            s_plugins.push_back((*retired)[k]);
+        }
+        for (int k = 0; k < (int)s_plugins.size(); k++)
+            if (s_plugins[k].ctx) s_plugins[k].ctx->idx = k;
+        s_retiredRegistries.push_back(retired);
+        ReleaseSRWLockExclusive(&s_regLock);
+    }
     XjsPluginUserStateErase(id.c_str());   /* 移除用户启用态记录 (防重装同标识残留"已禁用") */
     XjsPluginOnPluginsChanged();   /* 注册表变化信号 (plugins.list 订阅者重查) */
     XjsSaveConfig();   /* 卸载即时落盘 (原注释误以为下次保存自动清, 实则 s_user 只增不删) */

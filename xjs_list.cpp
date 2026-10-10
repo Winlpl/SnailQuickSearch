@@ -1603,7 +1603,9 @@ bool XjsListMouseMove(POINT pt) {    /* 表头调整边界悬停高亮 (源样�
             float dLogical = (pt.x - g_dragColX) / (k > 0 ? k : 1) + s_dragColRem;
             int add = (int)floorf(dLogical);
             s_dragColRem = dLogical - add;
-            V.c[target]->width = ximax(50, V.c[target]->width + add);
+            /* 上限 800 与 双击自适应 (XjsAutoFitColumn) / 装载钳制 (XjsColsApplyJson) 同口径:
+               拖动只夹下限会存进 >800 的宽度, 重启时被装载拒绝静默回落默认 (列布局丢失) */
+            V.c[target]->width = ximax(50, ximin(800, V.c[target]->width + add));
             V.c[target]->flex = false;   /* 用户拖宽即接管为固定列 (同源样式 flex 清空, 永久像素宽) */
         }
         g_dragColX = (float)pt.x;

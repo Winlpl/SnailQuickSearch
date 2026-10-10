@@ -12,6 +12,7 @@
 #define s_textScroll    (XjsSearchWindow::Cur()->previewTextScroll)
 #define s_textPending   (XjsSearchWindow::Cur()->previewTextPending)
 #define s_textHasMore   (XjsSearchWindow::Cur()->previewTextHasMore)
+#define s_textLoaded    (XjsSearchWindow::Cur()->previewTextLoaded)
 #define s_lightbox      (XjsSearchWindow::Cur()->previewLightbox)
 #define s_lbBmp         (XjsSearchWindow::Cur()->previewLbBmp)
 #define s_lbKeyFile     (XjsSearchWindow::Cur()->previewLbKeyFile)
@@ -214,7 +215,9 @@ static XjsBitmap* XjsPreviewPluginBitmap(int fileId) {
  * 统一改异步: 渲染帧发现缓存缺口 → 落键置 pending → 投作业; 单工作线程 解码+Fant缩放
  * +旋转 → PBGRA 字节 → PostMessage 回 UI 线程转本域位图入缓存。UI 线程从此零解码,
  * 装载期间垫显旧缓存 (同源) 或暗底占位, 到货即换。双槽 [0]=面板 [1]=灯箱, 新请求覆盖
- * 同槽 = 取代旧作业; 结果单槽被新结果覆盖 = 代号校验丢弃, 下一帧重投自愈。 */
+ * 同槽 = 取代旧作业; 结果单槽被新结果覆盖 = 代号校验丢弃。
+ * 重投自愈 = 渲染闸按作业账本 (排队槽 + 在跑副本) 对账, 被覆盖丢失的作业下帧重投
+ * —— 不能拿每窗 pending 布尔当闸: 作业被别的窗覆盖同槽/结果被覆盖丢弃后它永远悬真。 */
 static struct XjsImgJobCs { CRITICAL_SECTION cs; XjsImgJobCs() { InitializeCriticalSectionAndSpinCount(&cs, 100); } } s_imgJobCs;
 static HANDLE s_imgThread = NULL, s_imgWake = NULL;
 
@@ -228,6 +231,7 @@ struct XjsImgJob {
     int tw = 0, th = 0, rot = 0;
 };
 static XjsImgJob s_imgSlot[2];
+static XjsImgJob s_imgRun[2];    /* worker 在跑的作业副本 (排队槽被覆盖丢失后渲染闸对账用) */
 static long long s_imgGen = 0;   /* 作业代号 (请求递增; 结果按代号对账) */
 
 static DWORD WINAPI XjsImgThreadProc(LPVOID);
@@ -282,6 +286,18 @@ static void XjsPreviewImgAsk(int ctx, int fileId, int tw, int th, int rot) {
     if (s_imgWake) SetEvent(s_imgWake);
 }
 
+/* 本窗本槽是否真有作业在途 (排队未取 或 worker 在跑): 每窗 pending 布尔在作业被其它窗
+   覆盖同槽后就永远悬真 —— 重投闸按作业账本对账, 丢失即下帧重投。键 = (hwnd, fileId):
+   同窗同文件换尺寸/旋转的在途作业也挡一下, 旧作业交付后键带旧尺寸, 下帧 band 失配自然重投 */
+static bool XjsPreviewImgBusy(int ctx, int fileId) {
+    XjsImgJobCs lk;
+    HWND h = g_hWnd;
+    const XjsImgJob& q = s_imgSlot[ctx];
+    const XjsImgJob& r = s_imgRun[ctx];
+    return (q.pending && q.hwnd == h && q.fileId == fileId)
+        || (r.pending && r.hwnd == h && r.fileId == fileId);
+}
+
 static DWORD WINAPI XjsImgThreadProc(LPVOID) {
     CoInitializeEx(NULL, COINIT_MULTITHREADED);   /* WIC 工厂自由线程, MTA 直用 */
     for (;;) {
@@ -295,6 +311,7 @@ static DWORD WINAPI XjsImgThreadProc(LPVOID) {
                 if (ctx >= 0) {
                     job = s_imgSlot[ctx];
                     s_imgSlot[ctx].pending = false;
+                    s_imgRun[ctx] = job;   /* 在跑账本: 渲染闸按它对账 (排队槽被覆盖丢失可查) */
                 }
             }
             if (ctx < 0) break;
@@ -337,6 +354,7 @@ static DWORD WINAPI XjsImgThreadProc(LPVOID) {
             {
                 XjsImgJobCs lk;
                 s_imgDone = std::move(done);
+                s_imgRun[ctx].pending = false;   /* 作业账本完结 (结果已入 done 槽, 通知即将投出) */
             }
             PostMessage(job.hwnd, WM_PV_IMG_READY, 0, (LPARAM)job.gen);
         }
@@ -421,11 +439,13 @@ struct XjsTxtReq {
     long long gen = 0;
     HWND hwnd = NULL;
     int fileId = -1;
-    std::wstring path;      /* first 才带 */
-    long long size = 0;     /* first 才带 */
+    std::wstring path;      /* 续块也带: 会话被其它窗覆盖时按作业自带状态原地重建 (见 worker) */
+    long long size = 0;
+    long long nextOff = 0;  /* 续块起点 (= 该窗已消费字节; first 恒 0) */
     bool first = false;
 };
 static XjsTxtReq s_txtReq;
+static XjsTxtReq s_txtRun;   /* worker 在跑的作业副本 (排队槽被覆盖丢失后渲染闸对账用) */
 
 struct XjsTxtDone {
     long long gen = 0;
@@ -451,18 +471,19 @@ static XjsTxtSess s_txtSess;
 
 static DWORD WINAPI XjsTxtThreadProc(LPVOID);
 
-/* UI 线程投作业 (first=从文件头开会话; 续块只带 fileId, 路径/大小 session 自持) */
-static void XjsPreviewTextAsk(int fileId, const std::wstring& path, long long size, bool first) {
-    s_textPending = true;   /* 在途闸: 渲染帧/选中变化不重复投 (adopt 复位) */
+/* UI 线程投作业 (first=从文件头开会话; 续块自带 path/size/nextOff —— 全局单会话可能被
+   其它窗的作业覆盖, 会话只是缓存不是事实源, 作业自身信息必须完整) */
+static void XjsPreviewTextAsk(int fileId, const std::wstring& path, long long size, bool first,
+                              long long nextOff = 0) {
+    s_textPending = true;   /* 在途标记: 渲染占位/选中变化复位用 (重投闸按 XjsTxtBusy 对账) */
     XjsTxtJobCs lk;
     s_txtReq.pending = true;
     s_txtReq.gen = ++s_txtGen;
     s_txtReq.hwnd = g_hWnd;
     s_txtReq.fileId = fileId;
-    if (first) {
-        s_txtReq.path = path;
-        s_txtReq.size = size;
-    }
+    s_txtReq.path = path;
+    s_txtReq.size = size;
+    s_txtReq.nextOff = first ? 0 : nextOff;
     s_txtReq.first = first;
     if (!s_txtWake) {
         s_txtWake = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -471,32 +492,55 @@ static void XjsPreviewTextAsk(int fileId, const std::wstring& path, long long si
     if (s_txtWake) SetEvent(s_txtWake);
 }
 
-/* 块尾不完整序列 → carry (UTF-8 按前导字节应有续字节计; GBK 尾字节是双字节前导;
-   UTF-16 奇数字节)。enc==0 先按 UTF-8 形状试剥 (探测在其后, 误剥的原样随 carry 回来) */
-static void TxtStripTail(std::vector<uint8_t>& buf, int enc, std::vector<uint8_t>& carry) {
+/* 本窗本文件是否真有文本作业在途 (排队未取 或 worker 在跑): s_textPending 布尔在作业被
+   其它窗覆盖全局单槽后就永远悬真 (结果被覆盖丢弃时 adopt 的代号校验也没人复位它) ——
+   重投闸按作业账本对账, 丢失即下帧重投 (自愈) */
+static bool XjsTxtBusy(HWND h, int fileId) {
+    XjsTxtJobCs lk;
+    return (s_txtReq.pending && s_txtReq.hwnd == h && s_txtReq.fileId == fileId)
+        || (s_txtRun.pending && s_txtRun.hwnd == h && s_txtRun.fileId == fileId);
+}
+
+/* 块尾不完整 UTF-8 序列 → carry (按前导字节应有续字节计; 续字节形状无歧义, 倒扫即准) */
+static void TxtStripUtf8Tail(std::vector<uint8_t>& buf, std::vector<uint8_t>& carry) {
     size_t n = buf.size();
     if (!n) return;
     size_t keep = 0;
-    if (enc == 3 || enc == 4) {
-        if (n & 1) keep = 1;
-    } else if (enc == 2) {
-        uint8_t b = buf[n - 1];
-        if (b >= 0x81 && b <= 0xFE) keep = 1;
-    } else {
-        size_t i = n, conts = 0;
-        while (i > 0 && (buf[i - 1] & 0xC0) == 0x80) { i--; conts++; if (conts >= 4) break; }
-        if (i > 0 && conts < 4) {
-            uint8_t lead = buf[i - 1];
-            int need = (lead & 0x80) == 0 ? 0
-                     : (lead & 0xE0) == 0xC0 ? 1
-                     : (lead & 0xF0) == 0xE0 ? 2
-                     : (lead & 0xF8) == 0xF0 ? 3 : -1;
-            if (need > (int)conts) keep = conts + 1;
-        }
+    size_t i = n, conts = 0;
+    while (i > 0 && (buf[i - 1] & 0xC0) == 0x80) { i--; conts++; if (conts >= 4) break; }
+    if (i > 0 && conts < 4) {
+        uint8_t lead = buf[i - 1];
+        int need = (lead & 0x80) == 0 ? 0
+                 : (lead & 0xE0) == 0xC0 ? 1
+                 : (lead & 0xF0) == 0xE0 ? 2
+                 : (lead & 0xF8) == 0xF0 ? 3 : -1;
+        if (need > (int)conts) keep = conts + 1;
     }
     if (keep) {
         carry.assign(buf.end() - keep, buf.end());
         buf.resize(n - keep);
+    }
+}
+
+/* 块尾按 GBK 双字节定界 **正向扫描** → carry (块首即上一块定界点, 逐字节推进即可精确定界)。
+   禁止倒看猜测: GBK trail (0x40..0x7E ∪ 0x80..0xFE) 与 lead (0x81..0xFE) 区间重叠, 倒看
+   "尾字节 ∈ 0x81..0xFE = 悬挂 lead" 会把恰好落在块界的完整双字 (trail ≥ 0x81 的汉字占大半)
+   拆走 —— 本块尾成悬挂 lead, carry 又与下块首字节配对 = 定界错一位级联乱码直到文件尾 */
+static void TxtStripGbkTail(std::vector<uint8_t>& buf, std::vector<uint8_t>& carry) {
+    size_t n = buf.size();
+    size_t i = 0;
+    while (i < n) {
+        uint8_t b = buf[i];
+        if (b >= 0x81 && b <= 0xFE) {
+            if (i + 1 >= n) break;   /* 块尾悬挂 lead: 连同其后无字节一起留给 carry */
+            i += 2;                  /* 双字节整体 (trail 合法性不深究, 解码器兜底映射) */
+        } else {
+            i += 1;                  /* ASCII / 0x80 / 0xFF 单字节 */
+        }
+    }
+    if (i < n) {                     /* i = 悬挂 lead 下标 */
+        carry.assign(buf.begin() + i, buf.end());
+        buf.resize(i);
     }
 }
 
@@ -523,15 +567,24 @@ static DWORD WINAPI XjsTxtThreadProc(LPVOID) {
                 if (!s_txtReq.pending) break;
                 req = s_txtReq;
                 s_txtReq.pending = false;
+                s_txtRun = req;   /* 在跑账本: 渲染闸按它对账 (排队槽被覆盖丢失可查) */
             }
-            if (!IsWindow(req.hwnd)) continue;   /* 归属窗已没: 弃 (窗口重建自有新会话) */
-            if (req.first || s_txtSess.fileId != req.fileId) {
+            if (!IsWindow(req.hwnd)) { s_txtRun.pending = false; continue; }   /* 归属窗已没: 弃 (窗口重建自有新会话) */
+            if (req.first) {
                 s_txtSess = XjsTxtSess{};
                 s_txtSess.fileId = req.fileId;
                 s_txtSess.path = req.path;
                 s_txtSess.size = req.size;
-            } else if (s_txtSess.path.empty()) {
-                continue;   /* 续块但会话没头 (不该发生): 弃 */
+            } else if (s_txtSess.fileId != req.fileId || s_txtSess.nextOff != req.nextOff || s_txtSess.path.empty()) {
+                /* 全局单会话被其它窗的作业覆盖/错位: 会话只是缓存不是事实源, 按作业自带的
+                   (fileId, path, size, nextOff) 原地重建。残字节/残行/编码探测随之丢失 =
+                   至多一行残行的代价, 换取绝不静默截断 (旧逻辑: 会话指向别的文件时
+                   CreateFileW(L"") 失败 → hasMore=false → 半截文本被当全量展示) */
+                s_txtSess = XjsTxtSess{};
+                s_txtSess.fileId = req.fileId;
+                s_txtSess.path = req.path;
+                s_txtSess.size = req.size;
+                s_txtSess.nextOff = req.nextOff;
             }
             XjsTxtDone done;
             done.gen = req.gen;
@@ -572,13 +625,40 @@ static DWORD WINAPI XjsTxtThreadProc(LPVOID) {
                     if (binary) {
                         stop = true;   /* 二进制不预览 (信息卡兜底), 会话终止 */
                     } else {
-                        std::vector<uint8_t> tail;
-                        TxtStripTail(buf, s_txtSess.enc, tail);
-                        s_txtSess.rawCarry = std::move(tail);
-                        /* 编码探测: 严格 UTF-8 过 = UTF-8, 否则 GBK (BOM 已剥, 误剥的原样随 carry 回流) */
+                        /* 编码探测先于剥尾: 探测必须基于完整字节流, 尾部不完整序列会干扰判型。
+                           严格 UTF-8 全量过 = UTF-8 (无需剥); 不过 = 剥 UTF-8 形状尾重试, 过 = UTF-8
+                           (尾序列进 carry); 仍不过 = GBK: 先还原误剥的尾字节, 再按 GBK 正向定界剥。
+                           (旧顺序"先按 UTF-8 形状盲剥再探测"会把 GBK 双字拆走, 见 TxtStripGbkTail) */
                         if (s_txtSess.enc == 0) {
-                            int wl = buf.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)buf.data(), (int)buf.size(), NULL, 0);
-                            s_txtSess.enc = (wl > 0 || buf.empty()) ? 1 : 2;
+                            auto strictUtf8 = [&buf]() {
+                                return buf.empty() || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                    (LPCCH)buf.data(), (int)buf.size(), NULL, 0) > 0;
+                            };
+                            if (strictUtf8()) {
+                                s_txtSess.enc = 1;
+                            } else {
+                                std::vector<uint8_t> tail;
+                                TxtStripUtf8Tail(buf, tail);
+                                if (strictUtf8()) {
+                                    s_txtSess.enc = 1;
+                                    s_txtSess.rawCarry = std::move(tail);
+                                } else {
+                                    buf.insert(buf.end(), tail.begin(), tail.end());   /* 误剥还原 */
+                                    TxtStripGbkTail(buf, tail);
+                                    s_txtSess.enc = 2;
+                                    s_txtSess.rawCarry = std::move(tail);
+                                }
+                            }
+                        } else if (s_txtSess.enc == 3 || s_txtSess.enc == 4) {
+                            if (buf.size() & 1) {   /* 奇字节: 尾单字节回 carry */
+                                s_txtSess.rawCarry.assign(buf.end() - 1, buf.end());
+                                buf.pop_back();
+                            }
+                        } else {
+                            std::vector<uint8_t> tail;
+                            if (s_txtSess.enc == 2) TxtStripGbkTail(buf, tail);
+                            else TxtStripUtf8Tail(buf, tail);
+                            s_txtSess.rawCarry = std::move(tail);
                         }
                         std::wstring text;
                         if (s_txtSess.enc == 3 || s_txtSess.enc == 4) {
@@ -622,9 +702,17 @@ static DWORD WINAPI XjsTxtThreadProc(LPVOID) {
             }
             done.loaded = s_txtSess.consumed;
             done.hasMore = !stop && s_txtSess.nextOff < s_txtSess.size && s_txtSess.consumed < XJS_TEXT_LOAD_MAX;
+            /* 收尾冲刷: 块尾无 \n 结尾的残行一直留在 wcarry 等续块拼合, hasMore=false 后不再有续块
+               —— 不冲刷则文件末行 (无换行结尾的日志/配置/CSV 极常见) 整行不显示, 纯单行文件
+               更是整篇空白; 装载上限截断同理 (残行属已读内容, 随本块展示) */
+            if (!done.hasMore && !s_txtSess.wcarry.empty()) {
+                done.lines.push_back(std::move(s_txtSess.wcarry));
+                s_txtSess.wcarry.clear();
+            }
             {
                 XjsTxtJobCs lk;
                 s_txtDone = std::move(done);
+                s_txtRun.pending = false;   /* 作业账本完结 (结果已入 done 槽, 通知即将投出) */
             }
             PostMessage(req.hwnd, WM_PV_TXT_READY, 0, (LPARAM)req.gen);
         }
@@ -1339,7 +1427,9 @@ void XjsPreviewRender() {
                 bool sameSrc = s_pvScaled && s_pvKeyFile == rd->fileId && s_pvKeyRot == s_rot;
                 bool band = sameSrc && tw2 * 20 <= s_pvKeyW * 21 && tw2 * 20 >= s_pvKeyW * 19 &&
                             th2 * 20 <= s_pvKeyH * 21 && th2 * 20 >= s_pvKeyH * 19;
-                if (!band && !s_pvPending && !s_pvFailed && tw2 <= 4096 && th2 <= 4096)
+                /* 重投闸 = 作业账本对账 (排队+在跑), 非每窗 pending 布尔: 布尔在作业被别的窗
+                   覆盖同槽后永远悬真 = 图片永远停在暗底占位 (丢失无人复位) */
+                if (!band && !s_pvFailed && !XjsPreviewImgBusy(0, rd->fileId) && tw2 <= 4096 && th2 <= 4096)
                     XjsPreviewImgAsk(0, rd->fileId, tw2, th2, s_rot);
                 if (band) {
                     draw = s_pvScaled;   /* 键尺寸命中: 1:1 贴图 (零插值) */
@@ -1393,9 +1483,20 @@ void XjsPreviewRender() {
                         g_tfTiny, g_br[XTH_TEXT_DIM]);
             }
             g_rt->PopAxisAlignedClip();
-            /* 流式大文件: 快到底 (300 行内) 预取下一块 (pending 闸防重复投); 底部状态行 */
-            if (s_textHasMore && !s_textPending && g_previewFileId >= 0 && maxScroll - (int)s_textScroll < 300)
-                XjsPreviewTextAsk(g_previewFileId, std::wstring(), 0, false);
+            /* 流式大文件: 快到底 (300 行内) 预取下一块。重投闸 = 作业账本对账 (XjsTxtBusy):
+               pending 布尔在作业被别的窗覆盖全局单槽后永远悬真 = 文本永远停在"加载中";
+               续块自带 path/size/nextOff (全局单会话被覆盖时 worker 原地重建, 见 worker 侧) */
+            if (s_textHasMore && g_previewFileId >= 0 && g_engine
+                && maxScroll - (int)s_textScroll < 300 && !XjsTxtBusy(g_hWnd, g_previewFileId))
+                XjsPreviewTextAsk(g_previewFileId, Utf8ToUtf16(xjs_db_GetPath(g_engine, g_previewFileId)),
+                                  xjs_db_GetFileSize(g_engine, g_previewFileId), false, s_textLoaded);
+            /* 首块在途丢失自愈: 选中文本文件但首块结果从未抵达 (无行 + 首块代号未落
+               previewTextFileId) → 重投。空文件 (0 字节/仅 BOM) 首块正常抵达会落代号,
+               不进此闸 = 无重投循环; 一行都没有的首块残行已在 worker 收尾冲刷出行 */
+            if (!s_textHasMore && s_textLines.empty() && s_textFileId != g_previewFileId
+                && g_previewFileId >= 0 && g_engine && !XjsTxtBusy(g_hWnd, g_previewFileId))
+                XjsPreviewTextAsk(g_previewFileId, Utf8ToUtf16(xjs_db_GetPath(g_engine, g_previewFileId)),
+                                  xjs_db_GetFileSize(g_engine, g_previewFileId), true);
             {
                 const wchar_t* hint = s_textPending ? XjsT(L"预览.文本加载中")
                                      : s_textHasMore ? XjsT(L"预览.继续滚动") : NULL;
@@ -1788,8 +1889,8 @@ void XjsLightboxRender(XjsRt* rt, float w, float h) {
         bool sameSrc = s_lbBmp && s_lbKeyFile == g_previewFileId && s_lbKeyRot == s_rot;
         bool band = sameSrc && tw * 20 <= s_lbKeyW * 21 && tw * 20 >= s_lbKeyW * 19 &&
                     th * 20 <= s_lbKeyH * 21 && th * 20 >= s_lbKeyH * 19;
-        if (!band && !s_lbPending && !s_lbFailed && tw <= 4096 && th <= 4096)
-            XjsPreviewImgAsk(1, g_previewFileId, tw, th, s_rot);
+        if (!band && !s_lbFailed && !XjsPreviewImgBusy(1, g_previewFileId) && tw <= 4096 && th <= 4096)
+            XjsPreviewImgAsk(1, g_previewFileId, tw, th, s_rot);   /* 重投闸按作业账本对账 (同面板) */
         if (band) {
             draw = s_lbBmp;   /* 键尺寸命中: 1:1 贴图 (零插值) */
             dw = (float)s_lbKeyW;
