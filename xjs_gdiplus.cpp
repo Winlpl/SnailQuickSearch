@@ -1035,7 +1035,7 @@ static bool GpLayoutHitTest(XjsTextLayout* l, UINT32 idx, BOOL trailing, float* 
     if (x) *x = GdiMixedExtent(dc, L->fmt, L->text.c_str(), (int)idx);
     if (y) *y = 0;
     SelectObject(dc, of);
-    if (m) *m = { 0, 0, 0, (float)GdiLayLineHeight(L, dc), idx, 0 };
+    if (m) *m = { idx, 0, 0, 0, (float)GdiLayLineHeight(L, dc), 0 };
     return true;
 }
 static HRESULT GpLayoutHitRange(XjsTextLayout* l, UINT32 pos, UINT32 len, float ox, float oy, XjsHitTestMetrics* out, UINT32 max, UINT32* returned) {
@@ -1050,7 +1050,7 @@ static HRESULT GpLayoutHitRange(XjsTextLayout* l, UINT32 pos, UINT32 len, float 
     float p1 = GdiMixedExtent(dc, L->fmt, L->text.c_str(), (int)pos);
     float p2 = GdiMixedExtent(dc, L->fmt, L->text.c_str() + pos, (int)len);
     SelectObject(dc, of);
-    out[0] = { ox + p1, oy, p2, (float)GdiLayLineHeight(L, dc), pos, len };
+    out[0] = { pos, len, ox + p1, oy, p2, (float)GdiLayLineHeight(L, dc) };
     if (returned) *returned = 1;
     return S_OK;
 }
@@ -1068,7 +1068,7 @@ static bool GpLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, BO
         if (x < one) {
             if (trail) *trail = (x > pre + one / 2) ? TRUE : FALSE;
             if (inside) *inside = TRUE;
-            if (m) *m = { pre, 0, one, (float)GdiLayLineHeight(L, dc), i, 1 };
+            if (m) *m = { i, 1, pre, 0, one, (float)GdiLayLineHeight(L, dc) };
             SelectObject(dc, of);
             return true;
         }
@@ -1077,7 +1077,7 @@ static bool GpLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, BO
     }
     if (trail) *trail = FALSE;
     if (inside) *inside = TRUE;
-    if (m) *m = { pre, 0, 0, (float)GdiLayLineHeight(L, dc), (UINT32)L->text.size(), 0 };
+    if (m) *m = { (UINT32)L->text.size(), 0, pre, 0, 0, (float)GdiLayLineHeight(L, dc) };
     SelectObject(dc, of);
     return true;
 }

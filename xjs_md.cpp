@@ -401,13 +401,15 @@ void MdRelayout(XjsMdDoc* d, float contentW, float unit) {
             if (need > ind) ind = need;
         }
     }
-    float y = 0;
+    float y = 10 * u;   /* 文档顶部留白: 首块不顶容器上缘 (设置卡片 md 行紧贴卡片标题分隔线,
+                           2026-10-11 用户反馈; .md 文件预览同理) — H1 首块的 mt=0 不再叠加这份留白 */
     bool first = true;
     for (auto& b : d->doc) {
         switch (b.type) {
             case MD_BLOCK_H: {
                 XjsFormat* fmt = d->tfH3;
                 float mt = 14, mb = 6;
+                /* 首块 mt=0: 顶部呼吸由 MdRelayout 起步的文档留白统一提供, 不双份叠加 */
                 if (b.level == 1)      { fmt = d->tfH1; mt = first ? 0.0f : 16.0f; mb = 10.0f; }
                 else if (b.level == 2) { fmt = d->tfH2; mt = 18.0f; mb = 9.0f; }
                 y += mt * u;

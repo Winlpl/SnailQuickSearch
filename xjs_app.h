@@ -49,6 +49,7 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 #include <cwctype>
@@ -234,7 +235,18 @@ struct XjsEllipse   { XjsPoint2 point; float radiusX = 0, radiusY = 0; };
 inline XjsEllipse XjsEllipseF(XjsPoint2 c, float rx, float ry) { XjsEllipse e; e.point = c; e.radiusX = rx; e.radiusY = ry; return e; }
 struct XjsSizeU          { UINT32 width = 0, height = 0; };
 struct XjsTextMetrics    { float left = 0, top = 0, width = 0, widthIncludingTrailingWhitespace = 0, height = 0; };
-struct XjsHitTestMetrics { float left = 0, top = 0, width = 0, height = 0; UINT32 textPosition = 0, length = 0; };
+/* 字段序与大小必须与 DWRITE_HIT_TEST_METRICS 完全一致 (8 字段 32 字节, textPosition/length 在前!):
+   D2D 后端把 XjsHitTestMetrics* 零拷贝强转给 DWrite 填充 (xjs_d2d.cpp ApiLayoutHitRange),
+   曾按 {几何在前, 24 字节} 声明 → 命中结果全部错位读 + 每元素漏 8 字节
+   (2026-10-11 设置页说明链接点不中的根因, 进程内探针实锤) */
+struct XjsHitTestMetrics { UINT32 textPosition = 0, length = 0; float left = 0, top = 0, width = 0, height = 0; UINT32 bidiLevel = 0; int isText = 0, isTrimmed = 0; };
+static_assert(offsetof(XjsHitTestMetrics, textPosition) == offsetof(DWRITE_HIT_TEST_METRICS, textPosition),
+              "XjsHitTestMetrics.textPosition 偏移必须与 DWRITE_HIT_TEST_METRICS 一致");
+static_assert(offsetof(XjsHitTestMetrics, left) == offsetof(DWRITE_HIT_TEST_METRICS, left),
+              "XjsHitTestMetrics.left 偏移必须与 DWRITE_HIT_TEST_METRICS 一致");
+static_assert(offsetof(XjsHitTestMetrics, bidiLevel) == offsetof(DWRITE_HIT_TEST_METRICS, bidiLevel) &&
+              sizeof(XjsHitTestMetrics) == sizeof(DWRITE_HIT_TEST_METRICS),
+              "XjsHitTestMetrics 必须与 DWRITE_HIT_TEST_METRICS 同布局同大小 (零拷贝强转前提)");
 struct XjsTextRange      { UINT32 startPosition = 0, length = 0; };   /* 富文本范围 (字段名同 DWRITE_TEXT_RANGE) */
 
 /* ==================== 渲染句柄与后端分发 (换绘图引擎的接缝, 2026-09-17) ====================

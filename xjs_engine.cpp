@@ -1587,7 +1587,8 @@ bool XjsCustomModeAdd(const std::wstring& name, const std::wstring& desc, const 
 /* URL 协议 cfg=<JSON> 注入: 键名 = 配置文件中文主键 (与 XjsSaveConfig 写入的窗口条目同构),
    逐键写入本窗字段 + 对应生效动作 (任务栏图标/置顶/语言需主动作, 其余靠重排), 末尾统一落盘+重绘。
    只处理"专用参数未覆盖"的常规项; 皮肤/视图/缩放/预览/搜索模式/匹配由各自专用参数负责。
-   热键组合与列布局本轮不纳入。 */
+   列布局 = "显示字段" 键 (2026-10-11 开放, 键名同配置文件; XjsColsApplyJson 只动已知列、
+   宽度钳 50..800, 未知列名天然忽略 = 外部输入安全)。热键组合不在此 (走专用 hotkey= 参数)。 */
 void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8) {
     if (!w || cfgJsonUtf8.empty()) return;
     picojson::value v;
@@ -1621,6 +1622,28 @@ void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8)
     if (nget("预览音量",&n))       { w->mediaVol=(n<0?0:n>100?100:n)/100.0f; dirty=true; }
     if (sget("创建关键词",&s))     { w->createKeyword=s; dirty=true; }
     if (sget("界面语言",&s))       { int li=XjsLangIndexFromCode(s.c_str()); if(li>=0) XjsApplyUiLang(w, li); }
+    /* 列布局 (显示字段): 键名同配置文件窗口条目 — {"列表":{顺序[],宽度{},弹性{},显隐{}},"详情":{...}}。
+       XjsColsApplyJson 只匹配已知列 (未知列名忽略)、宽度钳 50..800、弹性/显隐只收 bool = 外部输入安全;
+       缺子键保持原值。两套列集都可有, 只给一套就只动那套。
+       先落到副本再验收: 全部列被显隐键隐藏 = UI 自身防呆不允许的状态 ("至少保留一列"), 整份不收 */
+    if (auto cit = o.find("显示字段"); cit != o.end() && cit->second.is<picojson::object>()) {
+        picojson::object co = cit->second.get<picojson::object>();
+        auto applyCols = [&](XjsColumnSet& cs, picojson::object& jo) -> bool {
+            XjsColumnSet tmp = cs;
+            XjsColsApplyJson(tmp, jo, K_COL_ORDER, K_COL_W, K_COL_FLEX, K_COL_V);
+            int vis = 0;
+            for (int i = 0; i < tmp.n; i++) if (tmp.arr[i].visible) vis++;
+            if (vis <= 0) return false;
+            cs = tmp;
+            return true;
+        };
+        if (auto lit = co.find(K_COL_LISTVIEW); lit != co.end() && lit->second.is<picojson::object>()) {
+            if (applyCols(w->colsList, lit->second.get<picojson::object>())) dirty = true;
+        }
+        if (auto dit = co.find(K_COL_DETVIEW); dit != co.end() && dit->second.is<picojson::object>()) {
+            if (applyCols(w->colsDetails, dit->second.get<picojson::object>())) dirty = true;
+        }
+    }
     if (dirty) { XjsSaveConfig(); w->Invalidate(); }
 }
 

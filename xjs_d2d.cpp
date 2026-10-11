@@ -989,7 +989,7 @@ static bool ApiLayoutHitTest(XjsTextLayout* l, UINT32 idx, BOOL trailing, float*
     if (FAILED(D2(l)->HitTestTextPosition(idx, trailing, &hx, &hy, &hm))) return false;
     if (x) *x = hx;
     if (y) *y = hy;
-    *m = { hm.left, hm.top, hm.width, hm.height, hm.textPosition, hm.length };
+    *m = { hm.textPosition, hm.length, hm.left, hm.top, hm.width, hm.height };
     return true;
 }
 
@@ -1016,7 +1016,7 @@ static bool ApiLayoutHitPoint(XjsTextLayout* l, float x, float y, BOOL* trail, B
     if (FAILED(D2(l)->HitTestPoint(x, y, &t, &i2, &hm))) return false;
     if (trail) *trail = t;
     if (inside) *inside = i2;
-    *m = { hm.left, hm.top, hm.width, hm.height, hm.textPosition, hm.length };
+    *m = { hm.textPosition, hm.length, hm.left, hm.top, hm.width, hm.height };
     return true;
 
 }

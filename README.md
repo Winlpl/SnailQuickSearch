@@ -114,6 +114,7 @@ snailsearch://search?reveal=C:\Tools\readme.txt               ← 在资源管�
 - **动作**:`new`(= `open`)建窗或用 `win=` 复用同名窗口档案 · `search`(= `find`)唤起已有窗口并就地应用参数 · `focus` 唤起主窗口。带参数的 `focus`/`search` 会把参数应用到那扇窗,不会偷偷新建窗口。
 - **搜索**:`q` 关键词 · `ms` 多重搜索链(JSON,每段可各自指定模式)· `mode` 搜索模式(数字 0~4、`wild`/`re`/`sql`/`lua`/`lua-exec`,或自定义模式名)· `filter` 文件分类(如 `图片、视频`)· `scope` 限定目录(JSON 或单条路径,可逐个设是否递归)。
 - **窗口**:`view`(严密/紧凑/详情/中等/大图标)· `skin` 皮肤 · `zoom` 页面缩放 5~20 · `preview` 预览开合 · `sort` + `order` 排序 · `pos` + `size` 位置尺寸 · `save` + `win` 是否留档与窗口名 · `hotkey=alt+a` 该窗口的全局快捷键(仅持久窗可设,`hotkey=none` 清除)· `cfg` 一次写入多项窗口设置(JSON)· `settings` 直达某一设置页。
+- **已存在的窗口默认不覆盖配置**:`new` 带窗口名命中已开的窗口(或已留档的窗口)时,配置项默认全部忽略 —— 窗口保持你调好的样子,只执行搜索词/文件动作这类参数;想让链接强制改某项,把参数名列进 `force=`(逗号分隔,`all` = 全部),如 `snailsearch://new?win=影音&skin=dark&force=skin`。
 - **搜索模式管理**:`addmode` + `mtype` + `tpl` + `mdesc` + `priv` 添加模式 · `delmode` 删除 · `cleartags` 清空搜索框里的模式标签。
 - **文件动作**:`run` 用关联程序打开 · `reveal` 在资源管理器定位 · `props` 打开属性框。
 - **匹配开关**:`pinyinfull` `pinyininitial` `pinyinexact` `wildstar` `wildq` `fullwidth` `casesensitive` `emptyall`(取 `1`/`0`)。

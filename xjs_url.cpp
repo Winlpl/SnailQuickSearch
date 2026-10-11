@@ -10,7 +10,7 @@
  *       动作段取到第一个 '/' 为止 (尾斜杠不改语义), '#' 之后整段丢弃 (参数值里的 # 须写 %23)。
  *       focus/search 带任何窗口或搜索参数 = 唤起后把参数应用到那扇窗 (裸 focus 仍是纯唤起, 参数不再被静默吃掉)。
  *       参数 q|ms|mode|view|skin|zoom|preview|save|win|sort|order|scope|filter|cfg|匹配开关|
- *             addmode|mdesc|mtype|tpl|priv|delmode|cleartags|hotkey|settings|pos|size|run|reveal|props
+ *             addmode|mdesc|mtype|tpl|priv|delmode|cleartags|hotkey|settings|pos|size|run|reveal|props|force
  *       q = 单一主关键词 (原样, 不再按 '|' 分段/解 wild:/re:/sql:/lua: 模式前缀 —— 旧式多重写法已废弃)。
  *       ms=<原样 JSON> = 唯一的多重搜索链入口 (引擎 XJS_KEYWORD_MULTI 链式过滤): 每段 {"q":词,"mode":..},
  *       段词可含任意字符 (含 '|'/':'); 各段做成内联托管标签显示于搜索框, q 若同时给出则作为链末节追加在最后
@@ -24,6 +24,10 @@
  *       scope=<JSON>: 搜索范围白名单, 与 ms 同口径 — [{"p":路径,"rec":bool}..] 或 ["路径"..] (rec 缺省 true=递归, false=仅本层);
  *       逐路径独立设递归, 只收绝对路径 (含: 或 \, 无通配 *?)。写每窗结构化白名单 (设置-搜索匹配"搜索范围"
  *       同一事实源, 随档案持久化)。旧式 '|' 分隔写法已废弃 (见 UrlParseScopeJson)。
+ *       force=<项[,项..]|all> (2026-10-11): new 命中"已存在"窗口 (同名存活窗复用 / 同名档案按槽重建) 时,
+ *       全部配置项默认忽略 — 只执行 搜索词/文件动作/模式管理 类参数; force= 名单内 (URL 参数名本身:
+ *       mode/view/preview/zoom/skin/pos/size/cfg/scope/sort|order/filter|cat/hotkey/八个匹配开关名, 或 all)
+ *       才覆写。全新创建 (含临时窗) 不受此闸, 参数照常初始化; focus/search 语义就是"应用到已有窗", 同样不受闸。
  *
  * 校验: 一律按"不可信输入"处理 — 枚举 clamp, 未知键忽略, 载荷 >32KB 拒, scheme 不匹配丢。
  *       总口径 = 协议能搜、能改界面, 但**不能让本机运行它递来的程序**:
@@ -361,7 +365,39 @@ struct XjsUrlReq {
     std::vector<std::pair<int, std::wstring>> msStages;
     /* 匹配开关三态 (-1 未指定 / 0 关 / 1 开), 对齐 XjsMatchSettings 8 字段 */
     int mPf = -1, mPi = -1, mPe = -1, mWs = -1, mWq = -1, mFw = -1, mCs = -1, mEa = -1;
+    /* force=<项[,项..]|all>: 窗口已存在时逐项放行配置覆写 (位见 URF_*); forceUnknown = 无法识别的项名 (回执提示) */
+    unsigned forceMask = 0;
+    bool forceAll = false;
+    std::wstring forceUnknown;
 };
+
+/* force= 逐项强制覆盖位 (2026-10-11 用户口径): new 命中已存在窗口 (同名存活窗复用 / 同名档案重建) 时,
+ * 全部配置项默认忽略 (只执行搜索词/文件动作类参数); 列入 force= 名单的才覆写。项名 = URL 参数名本身
+ * (sort/order 同指默认排序一位, pos/size 各一位), "all" = 全部。focus/search 语义就是"应用到已有窗", 不受此闸 */
+enum XjsUrlForce {
+    URF_MODE = 1 << 0, URF_VIEW = 1 << 1, URF_PREVIEW = 1 << 2, URF_ZOOM = 1 << 3,
+    URF_SKIN = 1 << 4, URF_POS = 1 << 5, URF_SIZE = 1 << 6, URF_CFG = 1 << 7,
+    URF_SCOPE = 1 << 8, URF_SORT = 1 << 9, URF_FILTER = 1 << 10, URF_HOTKEY = 1 << 11,
+    URF_PF = 1 << 12, URF_PI = 1 << 13, URF_PE = 1 << 14, URF_WS = 1 << 15,
+    URF_WQ = 1 << 16, URF_FW = 1 << 17, URF_CS = 1 << 18, URF_EA = 1 << 19
+};
+
+/* force= 项名 → 位 (小写已归一); 名单外返回 false (调用方收集进回执)。sort/order 同一位, filter/cat 同一位 */
+static bool UrlForceItem(const std::wstring& name, unsigned* mask, bool* all) {
+    if (name == L"all") { *all = true; return true; }
+    static const struct { const wchar_t* name; unsigned bit; } kMap[] = {
+        { L"mode", URF_MODE },          { L"view", URF_VIEW },        { L"preview", URF_PREVIEW },
+        { L"zoom", URF_ZOOM },          { L"skin", URF_SKIN },        { L"pos", URF_POS },
+        { L"size", URF_SIZE },          { L"cfg", URF_CFG },          { L"scope", URF_SCOPE },
+        { L"sort", URF_SORT },          { L"order", URF_SORT },       { L"filter", URF_FILTER },
+        { L"cat", URF_FILTER },         { L"hotkey", URF_HOTKEY },
+        { L"pinyinfull", URF_PF },      { L"pinyininitial", URF_PI }, { L"pinyinexact", URF_PE },
+        { L"wildstar", URF_WS },        { L"wildq", URF_WQ },         { L"fullwidth", URF_FW },
+        { L"casesensitive", URF_CS },   { L"emptyall", URF_EA },
+    };
+    for (auto& m : kMap) if (name == m.name) { *mask |= m.bit; return true; }
+    return false;
+}
 
 static bool UrlParse(const std::wstring& rawIn, XjsUrlReq* out) {
     /* 片段 (#...) 先整段剥掉 (RFC 3986): 参数值里的 '#' 必须写成 %23, 裸 '#' 之后不属于载荷 */
@@ -497,6 +533,22 @@ static bool UrlParse(const std::wstring& rawIn, XjsUrlReq* out) {
             } else if (keyL == L"hotkey")       {
                 out->hkRaw = UrlClean(val, 32);
                 UrlHotkey(val, &out->hkAct, &out->hkMod, &out->hkVk);
+            } else if (keyL == L"force")        {
+                /* force=<项[,项..]|all>: 窗口已存在时逐项放行配置覆写 (缺省全部忽略, 见 URF_* 注) */
+                auto addForce = [out](const std::wstring& rawItem) {
+                    if (rawItem.empty()) return;
+                    std::wstring lo; for (wchar_t t : rawItem) lo += (t >= L'A' && t <= L'Z') ? (wchar_t)(t + 32) : t;
+                    if (!UrlForceItem(lo, &out->forceMask, &out->forceAll)) {
+                        if (!out->forceUnknown.empty()) out->forceUnknown += L", ";
+                        out->forceUnknown += rawItem;
+                    }
+                };
+                std::wstring item;
+                for (wchar_t c : val) {
+                    if (c == L',' || c == L';' || c == L'、' || c == L'|') { addForce(item); item.clear(); }
+                    else if (c > L' ') item += c;
+                }
+                addForce(item);
             }
             /* 未知键: 忽略 (方案 四.4) */
         }
@@ -533,8 +585,10 @@ static XjsSearchWindow* UrlOpenNewVerified(std::wstring* err) {
 }
 
 /* new/open 的目标窗解析: save=0 临时窗 / save=1 持久命名档案窗 (复用存活窗、按槽重建或新建改名)。
-   返回 NULL = 未建成 (err 已给原因)。 */
-static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err) {
+   existed (可空) = 目标"已存在" — 同名存活窗复用 / 同名档案按槽重建两种命中 (2026-10-11 force= 闸:
+   已存在窗口的配置项默认不覆写, 全新创建的才按 URL 参数初始化)。返回 NULL = 未建成 (err 已给原因)。 */
+static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err, bool* existed) {
+    if (existed) *existed = false;
     if (g_isScanning) { if (err) *err = L"扫描中禁止新建窗口"; return NULL; }
     XjsSearchWindow* w = NULL;
     if (req.save == 1) {
@@ -543,7 +597,7 @@ static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err
         if (!req.winName.empty()) {
             for (int i = 0; i < XjsSearchWindow::Count(); i++) {           /* ① 存活窗同名 */
                 XjsSearchWindow* c = XjsSearchWindow::At(i);
-                if (c && c->hWnd && c->name == req.winName) { w = c; XjsSummonActivate(c->hWnd); break; }
+                if (c && c->hWnd && c->name == req.winName) { w = c; XjsSummonActivate(c->hWnd); if (existed) *existed = true; break; }
             }
             if (!w) {
                 int slot = -1;
@@ -551,7 +605,7 @@ static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err
                     XjsUiProfile* p = XjsUiProfileAt(i);
                     if (p && p->name == req.winName) { slot = i; break; }
                 }
-                if (slot > 0) { XjsSearchWindow::OpenNew(slot); w = XjsSearchWindow::AtSlot(slot); }
+                if (slot > 0) { XjsSearchWindow::OpenNew(slot); w = XjsSearchWindow::AtSlot(slot); if (existed) *existed = true; }
                 else {                                                       /* ③ 全新: 建后改名 */
                     w = UrlOpenNewVerified(err);
                     if (w && w->hWnd && !XjsSearchWindow::NameInUse(req.winName.c_str(), w)) {
@@ -668,14 +722,18 @@ static bool UrlConfirm(XjsSearchWindow* w, const wchar_t* titleKey, const std::w
     return false;
 }
 
-/* 把 req 携带的窗口覆写 + 搜索执行落到目标窗 (new/open 新建或复用的窗、focus 的主窗共用同一段) */
-static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w) {
+/* 把 req 携带的窗口覆写 + 搜索执行落到目标窗 (new/open 新建或复用的窗、focus 的主窗共用同一段)。
+   existed = 目标窗已存在 (URL 复用存活窗/重建档案): 配置项默认忽略, force= 名单内的才覆写
+   (2026-10-11 用户口径); 搜索词/文件动作/模式管理类参数不是配置, 照常执行。focus/search 传 false (语义即应用) */
+static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w, bool existed) {
     if (!w || !w->hWnd) return;
 
     /* 字段覆写 (每窗): mode / view / preview / zoom; 皮肤走 XjsApplySkinToWindow 唯一入口 */
     XjsWindowScope scope(w);                   /* Cur() 切到 w, 后续 g_* 宏落到本窗 */
-    if (req.mode >= 0) w->mode = req.mode;
-    if (!req.view.empty()) {
+    auto allow = [&](unsigned bit) { return !existed || req.forceAll || (req.forceMask & bit) != 0; };
+    const bool modeApplied = req.mode >= 0 && allow(URF_MODE);
+    if (modeApplied) w->mode = req.mode;
+    if (!req.view.empty() && allow(URF_VIEW)) {
         int vm = (int)w->viewMode;
         if      (req.view == L"dense")   vm = VM_DENSE;
         else if (req.view == L"list")    vm = VM_LIST;
@@ -688,15 +746,15 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
        关面板要顺带收灯箱/停媒体/结束插件接管会话 + XjsClampScroll 重排 + 落盘 + 全窗重绘,
        否则面板视觉残留 (表象 = "preview=0 关无效")。本函数已在 XjsWindowScope(w) 内, Cur()==w,
        XjsPreviewToggle 经 g_previewVisible 宏落到本窗。 */
-    if (req.preview >= 0) {
+    if (req.preview >= 0 && allow(URF_PREVIEW)) {
         bool wantPrev = (req.preview != 0);
         if (w->previewVisible != wantPrev) XjsPreviewToggle();
     }
-    if (req.zoom >= 5 && req.zoom <= 20 && req.zoom != w->uiZoom) {
+    if (req.zoom >= 5 && req.zoom <= 20 && req.zoom != w->uiZoom && allow(URF_ZOOM)) {
         w->uiZoom = req.zoom;
         XjsRecreateTextFormats();              /* 缩放变化 = 文本格式按新倍率重建 (与设置页同口径) */
     }
-    if (!req.skin.empty() && req.skin != w->skinName) {
+    if (!req.skin.empty() && req.skin != w->skinName && allow(URF_SKIN)) {
         /* 未知名不应用: XjsSkinLoad 只是视觉回落默认, 名字却会落进本窗档案持久化
            (与插件 settings.set "皮肤" 的未知名 ERR_NOTFOUND 同一严格度, 校验口径取自 XjsSkinEnumerate) */
         bool known = false;
@@ -704,17 +762,20 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         if (known) XjsApplySkinToWindow(w, req.skin);   /* 内部含 XjsSaveConfig (方案 一.4: 关窗即删仍会短暂污染, 已 P1 折中) */
         else if (err && err->empty()) *err = L"皮肤名不存在: " + req.skin;
     }
-    /* 窗口初始几何: pos=x,y / size=w,h (任一给定即 SetWindowPos, 未给项沿用当前矩形) */
-    if (req.winX != kNoCoord || req.winY != kNoCoord || req.winW > 0 || req.winH > 0) {
+    /* 窗口初始几何: pos=x,y / size=w,h (任一给定即 SetWindowPos, 未给项沿用当前矩形)。
+       已存在窗口按位放行: force=pos 只解位坐标、force=size 只解尺寸, 未列的分量沿用现值 */
+    const bool fPos = allow(URF_POS), fSize = allow(URF_SIZE);
+    if ((fPos && (req.winX != kNoCoord || req.winY != kNoCoord)) ||
+        (fSize && (req.winW > 0 || req.winH > 0))) {
         RECT rc; GetWindowRect(w->hWnd, &rc);
-        int x  = req.winX != kNoCoord ? req.winX : rc.left;
-        int y  = req.winY != kNoCoord ? req.winY : rc.top;
-        int ww = req.winW > 0  ? req.winW : (int)(rc.right - rc.left);
-        int hh = req.winH > 0  ? req.winH : (int)(rc.bottom - rc.top);
+        int x  = fPos && req.winX != kNoCoord ? req.winX : rc.left;
+        int y  = fPos && req.winY != kNoCoord ? req.winY : rc.top;
+        int ww = fSize && req.winW > 0  ? req.winW : (int)(rc.right - rc.left);
+        int hh = fSize && req.winH > 0  ? req.winH : (int)(rc.bottom - rc.top);
         SetWindowPos(w->hWnd, NULL, x, y, ww, hh, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     /* cfg=<JSON>: 常规窗口设置项写入本窗档案并即时生效 (在几何应用后、搜索执行前) */
-    if (!req.cfgJson.empty()) XjsUrlApplyWindowConfig(w, req.cfgJson);
+    if (!req.cfgJson.empty() && allow(URF_CFG)) XjsUrlApplyWindowConfig(w, req.cfgJson);
     /* cfg 可能改写了 appearPos(出现位置), 但建窗时的 WM_ACTIVATE 早于此步、已按旧档(=0)定过位 ——
        未显式给 pos= 时按新档立即重定位一次 (等价于"关闭→回托盘→再唤起"才生效的那步, 提前到 URL 应用当下;
        appearPos 无效/为 0 时 ApplyAppearPos 内部自会 return; 与 WM_ACTIVATE 侧同口径跳过最大化/最小化) */
@@ -727,16 +788,16 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         UrlNote(err, L"hotkey 写法无法识别 (要 修饰键+主键, 如 alt+a / ctrl+alt+f12): " + req.hkRaw);
     } else if (req.hkAct && w->urlTransient) {
         UrlNote(err, L"临时窗口不保存快捷键, 已忽略 hotkey=" + req.hkRaw + L" (要持久请用 save=1&win=窗口名)");
-    } else if (req.hkAct == 2) {
+    } else if (req.hkAct == 2 && allow(URF_HOTKEY)) {
         if (!XjsHotkeyApplyToWindow(w, 0, 0)) UrlNote(err, L"快捷键清除失败 (窗口或主窗不可用)");
-    } else if (req.hkAct == 1) {
+    } else if (req.hkAct == 1 && allow(URF_HOTKEY)) {
         if (XjsHotkeyApplyToWindow(w, req.hkMod, req.hkVk)) { /* 成功: 窗口出现本身就是回执 */ }
         else UrlNote(err, L"快捷键注册失败 (已被其它程序占用): " + XjsHotkeyText(req.hkMod, req.hkVk));
     }
     /* 初始排序 (sort=字段 & order=asc/desc): 写入本窗档案默认排序 + 立即对结果对象套用。
        sortField 用引擎口径 UTF-8 串 (文件名/文件大小/修改时间/创建时间/访问时间/文件评分/别名/文件夹/文件属性);
        order 缺省 (-1) 按降序 (与新建窗口档案默认档一致)。须在下方 SetText 触发搜索前设好, 使首搜即按此序出结果。 */
-    if (!req.sortField.empty()) {
+    if (!req.sortField.empty() && allow(URF_SORT)) {
         bool asc = (req.sortAsc >= 0) ? (req.sortAsc == 1) : false;
         XjsUiProfile* sp = XjsUiProfileAt(w->uiIndex);
         if (sp) { sp->sortField = req.sortField; sp->sortWay = asc; }   /* 落档: ☰启动器按槽重建时沿用 */
@@ -746,28 +807,29 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
     }
     /* 搜索范围: 路径列表 → 每窗结构化白名单 (与设置页"搜索范围"同一事实源, 随档案持久化),
        重建派生 JSON 并落盘; 必须在下方 SetText 触发搜索前设好, 使首搜即带上范围 */
-    if (!req.scopePaths.empty()) {
+    if (!req.scopePaths.empty() && allow(URF_SCOPE)) {
         w->scopePaths = req.scopePaths;
         w->scopeOn = true;
         XjsScopeSyncFor(w);
         XjsSaveConfig();
     }
-    /* 匹配开关: 三态命中才覆写, 有变更则下推引擎 (XjsApplyMatchSettingsFor 直传 w, 不依赖 Cur) */
+    /* 匹配开关: 三态命中才覆写, 有变更则下推引擎 (XjsApplyMatchSettingsFor 直传 w, 不依赖 Cur);
+       已存在窗口逐项按 force= 放行 (8 个开关各自一位) */
     {
         XjsMatchSettings& mt = w->match; bool dirty = false;
-        if (req.mPf >= 0) { mt.pinyinFull       = req.mPf != 0; dirty = true; }
-        if (req.mPi >= 0) { mt.pinyinInitial    = req.mPi != 0; dirty = true; }
-        if (req.mPe >= 0) { mt.pinyinExact      = req.mPe != 0; dirty = true; }
-        if (req.mWs >= 0) { mt.wildcardStar     = req.mWs != 0; dirty = true; }
-        if (req.mWq >= 0) { mt.wildcardQuestion = req.mWq != 0; dirty = true; }
-        if (req.mFw >= 0) { mt.matchFullWidth   = req.mFw != 0; dirty = true; }
-        if (req.mCs >= 0) { mt.caseSensitive    = req.mCs != 0; dirty = true; }
-        if (req.mEa >= 0) { mt.emptyShowsAll    = req.mEa != 0; dirty = true; }
+        if (req.mPf >= 0 && allow(URF_PF)) { mt.pinyinFull       = req.mPf != 0; dirty = true; }
+        if (req.mPi >= 0 && allow(URF_PI)) { mt.pinyinInitial    = req.mPi != 0; dirty = true; }
+        if (req.mPe >= 0 && allow(URF_PE)) { mt.pinyinExact      = req.mPe != 0; dirty = true; }
+        if (req.mWs >= 0 && allow(URF_WS)) { mt.wildcardStar     = req.mWs != 0; dirty = true; }
+        if (req.mWq >= 0 && allow(URF_WQ)) { mt.wildcardQuestion = req.mWq != 0; dirty = true; }
+        if (req.mFw >= 0 && allow(URF_FW)) { mt.matchFullWidth   = req.mFw != 0; dirty = true; }
+        if (req.mCs >= 0 && allow(URF_CS)) { mt.caseSensitive    = req.mCs != 0; dirty = true; }
+        if (req.mEa >= 0 && allow(URF_EA)) { mt.emptyShowsAll    = req.mEa != 0; dirty = true; }
         if (dirty) XjsApplyMatchSettingsFor(w);
     }
     /* 筛选分类 (filter=): 名称经引擎分类表校验后多选下发 (XjsApplyFilterNames 与筛选下拉同一落点, 自带重搜)。
        须在下方搜索执行之前 — 首搜即带上分类; 结果对象未就绪时静默跳过 (库未加载, 分类表也还没填)。 */
-    if (!req.filterNames.empty()) {
+    if (!req.filterNames.empty() && allow(URF_FILTER)) {
         XjsEngineEnsureResult();
         if (XjsApplyFilterNames(req.filterNames) == 0 && err && err->empty())
             *err = L"筛选分类名未识别 (取自设置/下拉的分类表, 或传 \"全部\")";
@@ -839,8 +901,8 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         XjsUrlRunMultiMs(req.msStages, req.q, defMode, defMode);
     } else if (!req.q.empty()) {
         XjsSearchSetText(req.q);                   /* 单主词普通搜索 (本窗模式), 即搜并记历史 */
-    } else if (req.mode >= 0) {
-        XjsSearchNow(false);                       /* 只切模式: 按新模式重搜现词 */
+    } else if (modeApplied) {
+        XjsSearchNow(false);                       /* 只切模式: 按新模式重搜现词 (模式被 force 闸拦下时不空转) */
     }
     /* 只清标签、没给任何搜索内容 = 按现词重搜一次 (XjsHostedClearTags 本身静默不触发搜索,
        不清这一下结果集还停在被清掉的链上) */
@@ -888,7 +950,7 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
 static void UrlApplyToExisting(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w) {
     if (!w || !w->hWnd) { if (err) *err = L"没有可用窗口"; return; }
     XjsSummonActivate(w->hWnd);
-    if (UrlHasPayload(req)) UrlApply(req, err, w);
+    if (UrlHasPayload(req)) UrlApply(req, err, w, false);   /* focus/search 语义 = 应用到已有窗, force 闸不参与 */
 }
 
 /* search/find 的目标窗: win=<档案名> 命中存活窗, 未给或未命中回落主窗 (不建窗: 建窗是 new 的语义) */
@@ -933,9 +995,14 @@ bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err) {
         if (err) *err = L"URL 格式非法";
         return false;
     }
+    if (!req.forceUnknown.empty())
+        UrlNote(err, L"force 含未知项 (已忽略): " + req.forceUnknown +
+                     L" (可用: mode/view/preview/zoom/skin/pos/size/cfg/scope/sort/order/filter/cat/hotkey/"
+                     L"pinyinfull/pinyininitial/pinyinexact/wildstar/wildq/fullwidth/casesensitive/emptyall/all)");
     if (req.action == L"focus") { UrlApplyToExisting(req, err, XjsSearchWindow::Main()); return true; }
     if (req.action == L"search") { UrlApplyToExisting(req, err, UrlPickLiveWindow(req.winName)); return true; }
-    UrlApply(req, err, UrlResolveWindow(req, err));
+    bool existed = false;
+    UrlApply(req, err, UrlResolveWindow(req, err, &existed), existed);
     return true;
 }
 
