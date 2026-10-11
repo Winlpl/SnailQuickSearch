@@ -567,7 +567,11 @@ void XjsOnPopupResult(int id) {
             case 52: XjsMarketShow(); break;   /* 插件商城 (独立顶层窗, xjs_market.cpp) */
         }
     }
-    XjsSearchWindow::Cur()->Invalidate();
+    /* 菜单项可能已同步销毁发起窗 (极简 `...` 溢出菜单"关闭窗口" = 子窗真销毁; 插件菜单项
+       window.cmd(dismiss) 同径): DestroyAndFree 会把 Cur 置 NULL, 直接 Cur()->Invalidate()
+       = 空指针崩溃 (2026-10-11 实锤, 极简模式新建窗口经 `...` 关闭必崩) */
+    XjsSearchWindow* cur = XjsSearchWindow::Cur();
+    if (cur) cur->Invalidate();
 }
 
 /* ==================== 状态文本 ==================== */
