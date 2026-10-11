@@ -280,6 +280,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         lang = p->lang;   /* 界面语言 (每窗) */
         defaultSel = p->defaultSel;
         timeStyle = p->timeStyle;   /* 时间显示方式 (每窗) */
+        quickLaunch = p->quickLaunch;   /* 快速启动窗标记随档案 (URL ql=1 目标识别不按名字) */
         createFill = p->createFill;
         createKeyword = p->createKeyword;
         topmost = p->topmost;

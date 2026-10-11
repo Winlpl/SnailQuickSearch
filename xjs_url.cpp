@@ -9,7 +9,7 @@
  *            focus = 唤起主窗; search/find = 唤起并就地应用到已有窗 (win= 指名, 未给/未命中回落主窗, 绝不建窗)。
  *       动作段取到第一个 '/' 为止 (尾斜杠不改语义), '#' 之后整段丢弃 (参数值里的 # 须写 %23)。
  *       focus/search 带任何窗口或搜索参数 = 唤起后把参数应用到那扇窗 (裸 focus 仍是纯唤起, 参数不再被静默吃掉)。
- *       参数 q|ms|mode|view|skin|zoom|preview|save|win|sort|order|scope|filter|cfg|匹配开关|
+ *       参数 q|ms|mode|view|skin|zoom|preview|save|win|ql|sort|order|scope|filter|cfg|匹配开关|
  *             addmode|mdesc|mtype|tpl|priv|delmode|cleartags|hotkey|settings|pos|size|run|reveal|props|force
  *       q = 单一主关键词 (原样, 不再按 '|' 分段/解 wild:/re:/sql:/lua: 模式前缀 —— 旧式多重写法已废弃)。
  *       ms=<原样 JSON> = 唯一的多重搜索链入口 (引擎 XJS_KEYWORD_MULTI 链式过滤): 每段 {"q":词,"mode":..},
@@ -28,12 +28,18 @@
  *       全部配置项默认忽略 — 只执行 搜索词/文件动作/模式管理 类参数; force= 名单内 (URL 参数名本身:
  *       mode/view/preview/zoom/skin/pos/size/cfg/scope/sort|order/filter|cat/hotkey/八个匹配开关名, 或 all)
  *       才覆写。全新创建 (含临时窗) 不受此闸, 参数照常初始化; focus/search 语义就是"应用到已有窗", 同样不受闸。
- *       资源管理器右键 (2026-10-11): 设置-通用开关写 HKCU 三处动词 (Directory / Directory\Background /
+ *       资源管理器右键 (2026-10-11; 2026-10-12 改持久快速启动窗): 设置-通用开关写 HKCU 三处动词 (Directory / Directory\Background /
  *       Drive 的 shell\SnailQuickSearch), command = "<exe>" /dir "%V" —— 路径作为独立参数进命令行,
  *       不拼进 URL (文件夹名里的 & # % 会撕碎 query, 注册表命令也做不了百分号编码); 命令行侧由
- *       XjsUrlExtractFromCmdLine 捕获 /dir <路径> 就地合成 new?ms=<JSON> 走既有解析/闸门/开窗:
+ *       XjsUrlExtractFromCmdLine 捕获 /dir <路径> 就地合成 new?ms=<JSON>&ql=1&size=&cfg= 走既有解析/闸门/开窗:
  *       单段通配符字面量标签 (路径+\*, 含空格包双引号), 临时标签不落任何配置
- *       (2026-10-11 用户口径: 不用搜索范围, 用搜索框标签)。
+ *       (2026-10-11 用户口径: 不用搜索范围, 用搜索框标签)。快速启动窗 = 按"快速启动"标记认窗
+ *       (ql=1: 不存在才新建一扇持久窗 (指定名"快速搜索", 占用时 GUID 兜底), 存在就复用 —
+ *       存活窗激活/未打开档案按槽重建; 标记随档案持久化, 用户改名改样式不影响识别),
+ *       初始样式 小尺寸+详情视图+失焦即关+主屏居中 只在全新创建时生效, 之后用户改过的
+ *       样式经 force 闸不被覆盖、设置-窗口设置 随时可改。路径标签显示与执行分离
+ *       (2026-10-12 用户口径"标签就显示文件夹的名称"): ms 段 name= 文件夹名作标签显示词,
+ *       执行词恒为完整路径通配符 (XjsHostedTag.litWord)。
  *
  * 校验: 一律按"不可信输入"处理 — 枚举 clamp, 未知键忽略, 载荷 >32KB 拒, scheme 不匹配丢。
  *       总口径 = 协议能搜、能改界面, 但**不能让本机运行它递来的程序**:
@@ -154,9 +160,10 @@ static const XjsCustomMode* UrlFindCustomMode(const std::wstring& name, const st
    载荷 = percent-decode 后的 UTF-8 JSON, 顶层可为数组 (逐元素) 或 {"stages":[..]} 包裹, 每元素:
      - 字符串                → 该段搜索词, 模式回落本窗当前 (mode=-1);
      - {"q":"词","mode":..}  → 词取 q|word|kw|搜索词 首个命中; mode 取 mode|m|搜索模式,
-                               可为整数 0..4 或别名 wild/wildcard|re/regex|sql|lua|lua-exec (缺省/非法=-1)。
+                               可为整数 0..4 或别名 wild/wildcard|re/regex|sql|lua|lua-exec (缺省/非法=-1);
+                               name|title|显示名 = 标签显示名 (空=用词; 右键路径标签给文件夹名, 显示与执行分离)。
    解析失败 / 非上述结构 / 无有效段 → 返回 false, 调用方(ms)忽略该值(不再回落 '|' 分段, 旧式分段入口已删)。 */
-static bool UrlParseStagesJson(const std::string& utf8, std::vector<std::pair<int, std::wstring>>* out) {
+static bool UrlParseStagesJson(const std::string& utf8, std::vector<XjsMsStage>* out) {
     picojson::value v;
     if (!picojson::parse(v, utf8).empty()) return false;
     const picojson::array* arrp = NULL;
@@ -184,9 +191,9 @@ static bool UrlParseStagesJson(const std::string& utf8, std::vector<std::pair<in
         }
         return -1;
     };
-    std::vector<std::pair<int, std::wstring>> stages;
+    std::vector<XjsMsStage> stages;
     for (auto& e : *arrp) {
-        std::string wordUtf8; int mode = -1;
+        std::string wordUtf8, nameUtf8; int mode = -1;
         if (e.is<std::string>()) wordUtf8 = e.get<std::string>();
         else if (e.is<picojson::object>()) {
             const picojson::object& o = e.get<picojson::object>();
@@ -198,9 +205,17 @@ static bool UrlParseStagesJson(const std::string& utf8, std::vector<std::pair<in
                 auto it = o.find(mk);
                 if (it != o.end()) { mode = resolveMode(it->second); break; }
             }
+            for (const char* nk : { "name", "title", "\u663e\u793a\u540d" }) {     /* name/title/显示名 */
+                auto it = o.find(nk);
+                if (it != o.end() && it->second.is<std::string>()) { nameUtf8 = it->second.get<std::string>(); break; }
+            }
         }
         if (wordUtf8.empty()) continue;
-        stages.emplace_back(mode, Utf8ToUtf16(wordUtf8.c_str()));
+        XjsMsStage st;
+        st.mode = mode;
+        st.word = Utf8ToUtf16(wordUtf8.c_str());
+        st.name = Utf8ToUtf16(nameUtf8.c_str());
+        stages.push_back(std::move(st));
     }
     if (stages.empty()) return false;
     *out = std::move(stages);
@@ -364,6 +379,8 @@ struct XjsUrlReq {
     int zoom = -1;                    /* -1 = 未指定; 5..20 */
     int preview = -1;                 /* -1 = 未指定; 0/1 */
     int save = 0;                     /* 0=临时窗 (缺省, 关窗即删), 1=持久命名档案窗 (win= 指定名, 关窗档案保留) */
+    int ql = 0;                       /* 1=快速启动窗 (右键动词): 按"快速启动"标记找存活窗/未打开档案复用,
+                                         都没有才新建 (GUID 名 + 打标记 + 落盘), 不按窗口名 — 用户可自由改名 */
     std::vector<std::pair<std::wstring,bool>> scopePaths;   /* 搜索范围 (scope= JSON): 每项 = (路径, 是否递归子目录 rec 缺省 true) */
     /* URL 添加自定义搜索模式 (addmode/mtype/tpl/mdesc/priv): addMode 非空即触发新增 */
     std::wstring addMode, addDesc, addType, addTpl;
@@ -386,8 +403,8 @@ struct XjsUrlReq {
     /* hotkey=<组合>: 本窗全局快捷键。hkAct 0=未给 1=设 2=清除 3=写法非法/缺修饰键 (必须告知用户);
        只有持久窗能设 —— 临时窗关窗即删, 见 UrlApply 里的 urlTransient 判定 */
     int hkAct = 0; UINT hkMod = 0, hkVk = 0; std::wstring hkRaw;
-    /* ms=<多重搜索链, 独立于 q>: 链先执行, UrlApply 把 q 作末段追加; 每段 = (模式 0..4 或 -1=本窗默认, 搜索词) */
-    std::vector<std::pair<int, std::wstring>> msStages;
+    /* ms=<多重搜索链, 独立于 q>: 链先执行, UrlApply 把 q 作末段追加; 每段 = 模式 + 执行词 + 可选显示名 (XjsMsStage) */
+    std::vector<XjsMsStage> msStages;
     /* 匹配开关三态 (-1 未指定 / 0 关 / 1 开), 对齐 XjsMatchSettings 8 字段 */
     int mPf = -1, mPi = -1, mPe = -1, mWs = -1, mWq = -1, mFw = -1, mCs = -1, mEa = -1;
     /* force=<项[,项..]|all>: 窗口已存在时逐项放行配置覆写 (位见 URF_*); forceUnknown = 无法识别的项名 (回执提示) */
@@ -514,6 +531,9 @@ static bool UrlParse(const std::wstring& rawIn, XjsUrlReq* out) {
             } else if (keyL == L"save") {
                 if (val == L"1" || val == L"true") out->save = 1;
                 else if (val == L"0" || val == L"false") out->save = 0;
+            } else if (keyL == L"ql") {
+                /* 快速启动窗 (右键动词专用): 目标解析走标记 (UrlResolveWindow 的 ql 分支), 与 save/win= 互不依赖 */
+                if (val == L"1" || val == L"true") out->ql = 1;
             } else if (keyL == L"scope") {
                 /* scope = JSON (与 ms 同口径): [{"p":路径,"rec":bool}..] 或 ["路径"..], 顶层可 {"搜索范围":[..]} 包裹;
                    每路径独立"递归子目录"(rec 缺省 true)。旧式 '|' 分隔 + '!' 前缀已废弃。 */
@@ -609,14 +629,91 @@ static XjsSearchWindow* UrlOpenNewVerified(std::wstring* err) {
     return w;
 }
 
-/* new/open 的目标窗解析: save=0 临时窗 / save=1 持久命名档案窗 (复用存活窗、按槽重建或新建改名)。
-   existed (可空) = 目标"已存在" — 同名存活窗复用 / 同名档案按槽重建两种命中 (2026-10-11 force= 闸:
-   已存在窗口的配置项默认不覆写, 全新创建的才按 URL 参数初始化)。返回 NULL = 未建成 (err 已给原因)。 */
+/* 快速启动窗新建时的指定窗口名 (2026-10-12 用户口径: 不要 GUID)。仅用于命名显示 —
+   复用识别一律按"快速启动"标记 (用户改名不影响); 名字被占用 (存活窗或未打开档案同名) 时
+   新窗保留 GUID, 标记照打。数据串不包 XjsT, 同主窗 XJS_MAIN_WIN_NAME 先例。 */
+static const wchar_t* const XJS_QUICKSEARCH_WIN_NAME = L"快速搜索";
+
+/* GUID 默认窗口名形态判定 (XjsGenerateWindowName 的 8-4-4-4-12 大写十六进制): 真 = 用户从未指定过名 */
+static bool UrlIsGeneratedName(const std::wstring& n) {
+    if (n.size() != 36) return false;
+    for (int i = 0; i < 36; i++) {
+        wchar_t c = n[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != L'-') return false; }
+        else if (!((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F'))) return false;
+    }
+    return true;
+}
+
+/* 快速启动窗定名 (2026-10-12 用户口径"你没有定义窗口名称啊"): 标记窗 (复用/重建/新建 三条路统一调)
+   名字仍是 GUID 默认形态时定名"快速搜索"; 用户改过名一律尊重。"快速搜索"被占用时分让:
+   占用者 = 未打开且无标记的档案 (旧版 win= 命名残留的孤儿, 2026-10-12 实锤它挡住命名让标记窗
+   一直叫 GUID) → 改名"快速搜索 (旧)"让位 (用户可在设置删); 占用者 = 存活窗/标记档案 → 不抢,
+   标记窗保持 GUID (识别按标记, 名字只是显示)。改名含私有模式归属链迁移 + 落盘。 */
+static void UrlQuickNameFix(XjsSearchWindow* w) {
+    if (!w || !w->hWnd) return;
+    if (!UrlIsGeneratedName(w->name) || w->name == XJS_QUICKSEARCH_WIN_NAME) return;
+    XjsUiProfile* p = XjsUiProfileAt(w->uiIndex);
+    bool taken = XjsSearchWindow::NameInUse(XJS_QUICKSEARCH_WIN_NAME, w) != 0;
+    int orphan = -1;
+    if (!taken) {
+        for (int i = 1; i < XjsUiProfileCount(); i++) {
+            XjsUiProfile* q = XjsUiProfileAt(i);
+            if (q && q != p && q->name == XJS_QUICKSEARCH_WIN_NAME) {
+                if (!q->quickLaunch && XjsSearchWindow::AtSlot(i) == NULL) orphan = i;   /* 残留孤儿: 让位 */
+                else { taken = true; }                                                   /* 在用档案: 不抢 */
+                break;
+            }
+        }
+    }
+    if (taken) return;
+    if (orphan >= 0) XjsUiProfileAt(orphan)->name = std::wstring(XJS_QUICKSEARCH_WIN_NAME) + L" (旧)";
+    std::wstring old = w->name;
+    w->name = XJS_QUICKSEARCH_WIN_NAME;
+    if (p) p->name = XJS_QUICKSEARCH_WIN_NAME;
+    XjsCmRenameWindow(old, XJS_QUICKSEARCH_WIN_NAME);   /* 私有模式归属链随名迁移 */
+    XjsSaveConfig();
+}
+
+/* new/open 的目标窗解析: ql=1 快速启动窗 (按"快速启动"标记找, 不按名) / save=1 持久命名档案窗
+   (复用存活窗、按槽重建或新建改名) / save=0 临时窗。
+   existed (可空) = 目标"已存在" — 同名存活窗复用 / 同名档案按槽重建 / 快速启动标记命中 三种命中
+   (2026-10-11 force= 闸: 已存在窗口的配置项默认不覆写, 全新创建的才按 URL 参数初始化)。
+   返回 NULL = 未建成 (err 已给原因)。 */
 static XjsSearchWindow* UrlResolveWindow(const XjsUrlReq& req, std::wstring* err, bool* existed) {
     if (existed) *existed = false;
     if (g_isScanning) { if (err) *err = L"扫描中禁止新建窗口"; return NULL; }
     XjsSearchWindow* w = NULL;
-    if (req.save == 1) {
+    if (req.ql) {
+        /* 快速启动窗 (2026-10-12 用户口径: 新建一个窗口, 如果不存在): 按"快速启动"标记三态 —
+           存活标记窗复用 (激活+填新搜索) → 未打开标记档案按槽重建 (样式=档案记忆, 用户改过的都保留) →
+           都没有才新建。三条路终点统一 UrlQuickNameFix 定名"快速搜索" (只修 GUID 默认名);
+           档案只有一份不堆积, 改名不影响识别。 */
+        for (int i = 0; i < XjsSearchWindow::Count(); i++) {
+            XjsSearchWindow* c = XjsSearchWindow::At(i);
+            if (c && c->hWnd && c->quickLaunch) { w = c; XjsSummonActivate(c->hWnd); if (existed) *existed = true; break; }
+        }
+        if (!w) {
+            for (int i = 1; i < XjsUiProfileCount(); i++) {          /* 主窗槽 0 恒无标记, 从 1 起 */
+                XjsUiProfile* p = XjsUiProfileAt(i);
+                if (p && p->quickLaunch) {
+                    XjsSearchWindow::OpenNew(i);
+                    w = XjsSearchWindow::AtSlot(i);
+                    if (w) { if (existed) *existed = true; break; }
+                }
+            }
+        }
+        if (!w) {
+            w = UrlOpenNewVerified(err);
+            if (w && w->hWnd) {
+                w->quickLaunch = true;
+                XjsUiProfile* p = XjsUiProfileAt(w->uiIndex);
+                if (p) p->quickLaunch = true;
+                XjsSaveConfig();   /* 标记即时落盘: 关窗后按槽重建 / 重启后仍可被识别 */
+            }
+        }
+        UrlQuickNameFix(w);
+    } else if (req.save == 1) {
         /* 持久命名档案窗: 同名存活窗复用(提到前台) → 同名未打开档案按槽重建 → 否则新建并按 win= 改名。
            不设 urlTransient (关窗档案保留, ☰启动器可按槽重建)。 */
         if (!req.winName.empty()) {
@@ -1033,7 +1130,11 @@ bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err) {
     if (req.action == L"focus") { UrlApplyToExisting(req, err, XjsSearchWindow::Main()); return true; }
     if (req.action == L"search") { UrlApplyToExisting(req, err, UrlPickLiveWindow(req.winName)); return true; }
     bool existed = false;
-    UrlApply(req, err, UrlResolveWindow(req, err, &existed), existed);
+    /* 两步分开写: 实参内联 (UrlResolveWindow(req, err, &existed), existed) 的求值顺序未指定 —
+       MSVC 从右向左, existed 先以初值 false 被读走, UrlResolveWindow 写回的"已存在"传不进
+       UrlApply → 按档案重建被当成全新创建, size/cfg 每次重打 = 用户调过的尺寸打回原形 (实锤) */
+    XjsSearchWindow* w = UrlResolveWindow(req, err, &existed);
+    UrlApply(req, err, w, existed);
     return true;
 }
 
@@ -1079,16 +1180,48 @@ static std::wstring UrlFolderTagWord(const std::wstring& dir) {
     return w;
 }
 
-/* 合成右键搜索 URL: new 临时窗 + ms 单段通配符字面量标签 (XjsUrlRunMultiMs 做成内联标签执行,
-   临时标签不落任何配置; JSON 一律 picojson 拼装, 整段百分号编码后进 query)。 */
+/* 合成右键搜索 URL: 持久"快速启动"窗 (2026-10-12 用户口径: 参考快速启动器样式 — 小窗、失焦即关、
+   主屏居中弹出; ql=1 = 不存在才新建一扇 (指定名"快速搜索"), 存在就复用 — 存活窗激活 / 未打开
+   档案按槽重建, 档案保留不堆积, 识别按"快速启动"标记与窗口名无关, 用户可自由改名)。
+   ms = 单段通配符字面量标签: **执行词 = 完整路径通配符** (路径+\*, 含空格包双引号),
+   **显示名 = 文件夹名称** (2026-10-12 用户口径"标签就显示文件夹的名称": 标签胶囊只显示最后一段,
+   短且好认, 不再显示全路径/省略号 — ms 段 name= 键, 显示与执行分离, XjsHostedTag.litWord)。
+   临时标签不落任何配置; JSON 一律 picojson 拼装, 整段百分号编码后进 query。
+   快速启动样式 (view/size/cfg) 只在全新创建时生效: 标记命中走 2026-10-11 force 闸, 配置项默认
+   不覆写 = 用户改过的尺寸/失焦行为/出现位置/皮肤等样式原样保留 (样式在设置-窗口设置改;
+   cfg 键 = 配置文件中文主键, XjsUrlApplyWindowConfig 白名单)。 */
+static std::wstring UrlFolderLeafName(const std::wstring& dir) {
+    std::wstring leaf = dir;
+    while (!leaf.empty() && leaf.back() == L'\\') leaf.pop_back();   /* 剥尾斜杠: "C:\...\oCam\" → "C:\...\oCam" */
+    size_t bs = leaf.find_last_of(L'\\');
+    if (bs != std::wstring::npos) leaf = leaf.substr(bs + 1);        /* 取最后一段: "C:\...\oCam" → "oCam" */
+    if (leaf.empty()) leaf = dir;                                    /* 全剥光兜底 (UrlAbsPath 保证绝对路径, 到不了) */
+    return leaf;
+}
 static std::wstring UrlFolderTagUrl(const std::wstring& dir) {
     picojson::object st;
     st["q"] = picojson::value(Utf16ToUtf8(UrlFolderTagWord(dir).c_str()));
     st["mode"] = picojson::value(std::string("wild"));
+    st["name"] = picojson::value(Utf16ToUtf8(UrlFolderLeafName(dir).c_str()));   /* 标签只显示文件夹名 */
     picojson::array arr;
     arr.push_back(picojson::value(st));
     std::string json = picojson::value(arr).serialize();
-    return L"snailsearch://new?ms=" + UrlPctEncodeUtf8(Utf8ToUtf16(json.c_str()));
+    /* 初始样式: 小尺寸按本机 DPI 折算 + 失焦行为=关闭窗口 + 出现位置=主屏居中档 (launcher
+       语义: 每次唤起都落主屏中央; 想记住拖放位置去设置改"之前的位置") + 默认详情视图
+       (2026-10-12 用户口径: 列表默认详情模式; view= 与 size/cfg 同受 force 闸 — 只在全新
+       创建时生效, 用户之后切过的视图随档案保留, 复用/重建一律不覆盖)。 */
+    UINT dpi = XjsWindowDpi(NULL);
+    int w = 680 * (int)dpi / 96, h = 460 * (int)dpi / 96;
+    picojson::object cfg;
+    cfg["失焦行为"] = picojson::value(double(1));
+    cfg["出现位置"] = picojson::value(double(
+        XJS_APPEAR_SCREEN_BASE + XJS_SCR_PRIMARY * XJS_SPOT_COUNT + XJS_SPOT_CENTER));
+    std::string cfgJson = picojson::value(cfg).serialize();
+    return L"snailsearch://new?ms=" + UrlPctEncodeUtf8(Utf8ToUtf16(json.c_str())) +
+           L"&ql=1" +
+           L"&view=details" +
+           L"&size=" + std::to_wstring(w) + L"," + std::to_wstring(h) +
+           L"&cfg=" + UrlPctEncodeUtf8(Utf8ToUtf16(cfgJson.c_str()));
 }
 
 /* 从命令行里剥出 snailsearch:// URL (scheme 大小写不敏感)。
@@ -1096,7 +1229,8 @@ static std::wstring UrlFolderTagUrl(const std::wstring& dir) {
    (批处理 start "" "snailsearch://new?q=a b" / 运行对话框手打) 按"第一个空格"截会丢后半参数。
    故: scheme 前紧邻 '"' = 引号段, 收在闭合引号 (空格照收); 否则收在第一个空白或引号。
    剥不到 URL 但带 /dir <路径> (资源管理器右键菜单) 时就地合成标签搜索 URL 返回:
-   snailsearch://new?ms=<JSON> —— 开临时窗 + 路径转通配符字面量标签 (路径+\*, 含空格包双引号),
+   snailsearch://new?ms=<JSON>&ql=1&view=&size=&cfg= —— 持久快速启动窗 (不存在才新建, 按"快速启动"
+   标记复用; 小窗/详情视图/失焦即关/主屏居中, 样式只在全新创建时生效) + 路径转通配符字面量标签,
    之后走既有解析/闸门/开窗全链路, 协议本身零新语法。 */
 std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd) {
     if (!cmd || !*cmd) return std::wstring();

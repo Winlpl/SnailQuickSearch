@@ -901,17 +901,28 @@ struct XjsHostedTag {
     std::wstring word;              /* 显示词 (= 命中的模式名, 链内忽略大小写唯一) */
     std::vector<std::wstring> srcIds;   /* 同名来源 (customSearchModes 的 id, ≥1) */
     int active = 0;                 /* 当前生效来源下标 */
-    /* 字面量段 (URL 协议 q|.. / ms=[..] 建的标签): 无模式来源 (srcIds 空), word 即搜索词,
-       litMode = 已解析的模式号 (0..4)。编辑框文字后 XjsHostedExecChain 需据此复现整链,
-       否则无来源标签会被当失效跳过 → 一改字整条链被清空 (2026-10-09 实锤) */
+    /* 字面量段 (URL 协议 q|.. / ms=[..] 建的标签): 无模式来源 (srcIds 空), litMode = 已解析的
+       模式号 (0..4)。编辑框文字后 XjsHostedExecChain 需据此复现整链, 否则无来源标签会被当
+       失效跳过 → 一改字整条链被清空 (2026-10-09 实锤) */
     bool lit = false;
     int litMode = 0;
+    /* 字面量段执行词 (空 = 用 word): 显示与执行分离 — 右键路径标签 word=文件夹名 (短, 好认),
+       执行仍用完整路径通配符词 (2026-10-12 用户口径); name 缺省的旧式段 word 即执行词 */
+    std::wstring litWord;
+};
+
+/* ms= 多重链单段 (URL 协议 → XjsUrlRunMultiMs): word = 执行词 (引擎链的"搜索词"),
+   name = 显示名 (空 = 用 word; 右键路径标签给文件夹名, 标签胶囊短) */
+struct XjsMsStage {
+    int mode = -1;                  /* 0..4 或 -1 = defMode */
+    std::wstring word;
+    std::wstring name;
 };
 void XjsHostedExecChain(const std::wstring& tailKw);   /* 标签链(+尾阶段)执行; 无标签时清标签回普通搜索 */
 bool XjsHostedTrySearch(const std::wstring& keyword);  /* 输入词命中模式名 → 转标签接管 (真=已接管) */
 bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput); /* 词转标签 (输入命中/模式菜单点击共用) */
 void XjsHostedRemoveTag(int idx);                      /* 移除标签并重搜剩余链 (无标签回普通搜索) */
-void XjsUrlRunMultiMs(const std::vector<std::pair<int, std::wstring>>& msStages, const std::wstring& tailQ, int tailMode, int defMode); /* URL ms 多重链 (唯一多重入口, JSON): msStages 先执行(各成内联标签), q(=tailQ)作链末节兼搜索框主词; 引擎 JSON=[ms...,q]。段 -1=defMode, tailMode<0=defMode */
+void XjsUrlRunMultiMs(const std::vector<XjsMsStage>& msStages, const std::wstring& tailQ, int tailMode, int defMode); /* URL ms 多重链 (唯一多重入口, JSON): msStages 先执行(各成内联标签, word=执行词/name=显示名), q(=tailQ)作链末节兼搜索框主词; 引擎 JSON=[ms...,q]。段 mode -1=defMode, tailMode<0=defMode */
 void XjsHostedClearTags();                             /* 静默清空标签 (不触发搜索) */
 void XjsHostedPurgeMode(const std::wstring& modeId);   /* 模式删除: 剔除其来源并重搜 (源样式 purgeHostedSources) */
 void XjsHostedPickSource(int srcIdx);                  /* 来源切换菜单命令: 换当前来源并重搜整链 */
@@ -1044,6 +1055,8 @@ struct XjsUiProfile {
     int timeStyle = 0;                    /* 时间显示方式: 0=徽章 1=日期 2=日期和时间 (修改/创建/访问列共用) */
     int uiZoom = 10;                      /* 页面缩放 (十分位: 5..20 = 50%..200%) */
     int lang = XLANG_AUTO;                /* 界面语言 (每窗, 2026-09-19 每窗化; 条目键 "语言"; auto=按系统) */
+    bool quickLaunch = false;             /* 快速启动窗标记 (条目键 "快速启动"): 右键动词建窗时打上, URL ql=1
+                                             按标记复用/重建目标, 不按窗口名 (用户可自由改名改样式) */
     int createFill = 0;                   /* 创建窗口填入搜索框: 0=清空 1=用户指定关键词 2=上一次输入的搜索词 */
     std::wstring createKeyword;           /* createFill=1 的用户指定关键词 */
     std::wstring lastSearch;              /* 上一次输入的搜索词 (关窗时随档案记忆, createFill=2 用) */
@@ -1070,6 +1083,8 @@ class XjsSearchWindow {
 public:
     bool isMain = false;         /* 主窗: 托盘/热键/引擎生命周期/配置归属 */
     bool urlTransient = false;   /* snailsearch:// URL 建的临时窗: 关窗时从 s_uiProfiles 同步移除该档案槽 (方案 一.4 关窗即删) */
+    bool quickLaunch = false;    /* 右键动词"快速启动窗"标记 (随档案持久化, 键 "快速启动"): URL ql=1 按
+                                    此标记找存活窗/未打开档案来复用, 不按名字 (用户可自由改名改样式) */
     int uiIndex = 0;             /* 绑定的 uiWindows 档案槽 (持久: 关窗档案保留, 菜单可按槽位重建窗口;
                                     主窗恒槽 0; 不再是存活序号, 窗口无编号只有名称) */
     std::wstring name;           /* 窗口名称 (显示用身份; 主窗固定 XJS_MAIN_WIN_NAME, 其余默认 GUID, 可重命名) */

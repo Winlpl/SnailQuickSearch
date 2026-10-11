@@ -640,6 +640,7 @@ static const char* const K_TOPMOST = "置顶";
 static const char* const K_MOUSEOPEN = "鼠标打开";         /* 0=双击打开 1=单击打开 */
 static const char* const K_DEFSEL = "默认选中";            /* 0=不选 1=结果刷新后选中第一个 */
 static const char* const K_TIMESTYLE = "时间显示方式";      /* 0=徽章 1=日期 2=日期和时间 (修改/创建/访问列共用) */
+static const char* const K_QUICKLAUNCH = "快速启动";        /* 右键动词快速启动窗标记 (URL ql=1 按标记找窗/档案) */
 static const char* const K_CREATEFILL = "创建填入搜索框";  /* 0=清空 1=用户指定关键词 2=上一次搜索词 */
 static const char* const K_CREATEKEYWORD = "创建关键词";   /* createFill=1 的内容 */
 static const char* const K_LASTSEARCH = "上次搜索词";      /* 关窗时的搜索框内容 (createFill=2 用) */
@@ -1826,8 +1827,8 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
     bool tplConsumesBox = false;              /* 链中任一模板含 <keyword> = 输入文字已由模板消费 */
     for (int i = 0; i < (int)g_hostedTags.size(); i++) {
         const XjsHostedTag& t = g_hostedTags[i];
-        if (t.lit) {                       /* 字面量段 (URL): word 即搜索词, 不消费框内文字 */
-            stageQueries.push_back(t.word);
+        if (t.lit) {                       /* 字面量段 (URL): 执行词 = litWord (显示名/执行词分离, 空=word), 不消费框内文字 */
+            stageQueries.push_back(t.litWord.empty() ? t.word : t.litWord);
             tagStages.push_back(i);
             continue;
         }
@@ -1901,7 +1902,7 @@ void XjsHostedExecChain(const std::wstring& tailKw) {
 /* URL ms 多重搜索: msStages 各段做成内联托管标签(先执行), q(=tailQ)作为搜索框主词兼链末节 —— "先多重、q 放最后"。
    引擎 JSON = [msStages..., {tailQ}] (tailQ 空则只 ms 链)。段 first = 模式号 0..4 或 -1(=defMode); tailMode<0 → 用 defMode。
    须在 UI 线程、XjsWindowScope(目标窗) 内调用。 */
-void XjsUrlRunMultiMs(const std::vector<std::pair<int, std::wstring>>& msStages, const std::wstring& tailQ, int tailMode, int defMode) {
+void XjsUrlRunMultiMs(const std::vector<XjsMsStage>& msStages, const std::wstring& tailQ, int tailMode, int defMode) {
     if (!g_engine || g_isScanning || msStages.empty()) return;
     if (!XjsEngineEnsureResult()) return;
     int tm = (tailMode >= 0) ? tailMode : defMode;
@@ -1910,16 +1911,17 @@ void XjsUrlRunMultiMs(const std::vector<std::pair<int, std::wstring>>& msStages,
     XjsSearchSetTextQuiet(tailQ);   /* q = 链末节, 填搜索框普通文字(不标签化), 显示在标签之后 */
     picojson::array arr;
     for (size_t i = 0; i < msStages.size(); i++) {
-        const auto& st = msStages[i];
-        int m = (st.first >= 0) ? st.first : defMode;
+        const XjsMsStage& st = msStages[i];
+        int m = (st.mode >= 0) ? st.mode : defMode;
         if (m < 0 || m > 4) m = 0;
         XjsHostedTag t;               /* ms 段 → 内联托管标签 (srcIds 空 → 渲染只读 word, 不弹来源菜单) */
-        t.word = st.second;
+        t.word = st.name.empty() ? st.word : st.name;   /* 显示名 (name 缺省 = 执行词原样) */
         t.lit = true; t.litMode = m;   /* 字面量段: 编辑框文字后仍可复现整链 */
+        t.litWord = st.word;           /* 执行词 (显示与执行分离: 右键路径标签显示文件夹名) */
         g_hostedTags.push_back(t);
         picojson::object o;
         o["搜索模式"] = picojson::value(Utf16ToUtf8(XjsCmStageModeByG(m)));
-        o["搜索词"] = picojson::value(Utf16ToUtf8(st.second.c_str()));
+        o["搜索词"] = picojson::value(Utf16ToUtf8(st.word.c_str()));   /* 引擎链恒用执行词 */
         arr.push_back(picojson::value(o));
     }
     if (!tailQ.empty()) {             /* q 追加为链末节 */
@@ -2245,6 +2247,7 @@ void XjsLoadConfig() {
             if (p.defaultSel < 0 || p.defaultSel > 1) p.defaultSel = 0;
             p.timeStyle = XjsConfig::Int(o, K_TIMESTYLE, 0);
             if (p.timeStyle < 0 || p.timeStyle > 2) p.timeStyle = 0;
+            p.quickLaunch = XjsConfig::Bool(o, K_QUICKLAUNCH, false);
             p.uiZoom = XjsConfig::Int(o, K_ZOOM, legacyZoom);
             if (p.uiZoom < 5 || p.uiZoom > 20) p.uiZoom = legacyZoom;
             p.lang = XjsLangFromCode(XjsConfig::Str(o, K_LANG, legacyLang.c_str()).c_str());   /* 界面语言 (每窗; 缺键沿用顶层迁移种子) */
@@ -2487,6 +2490,7 @@ void XjsSaveConfig() {
         o[K_MOUSEOPEN] = picojson::value((double)p->mouseOpen);
         o[K_DEFSEL] = picojson::value((double)p->defaultSel);
         o[K_TIMESTYLE] = picojson::value((double)p->timeStyle);
+        o[K_QUICKLAUNCH] = picojson::value(p->quickLaunch);
         o[K_ZOOM] = picojson::value((double)p->uiZoom);
         o[K_LANG] = picojson::value(XjsLangToCode(p->lang));   /* 界面语言 (每窗) */
         o[K_CREATEFILL] = picojson::value((double)p->createFill);

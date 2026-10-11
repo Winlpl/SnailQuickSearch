@@ -486,7 +486,7 @@ void XjsHostedRender() {
            底若是全饱和 accent 就是蓝底蓝字 (首版翻车点) */
         g_rt->FillRoundedRectangle(XjsRoundedRectF(a, XSF(10), XSF(10)), XjsTempBrush(soft));
         if (hov) g_rt->DrawRoundedRectangle(XjsRoundedRectF(a, XSF(10), XSF(10)), XjsTempBrush(accent), 1.0f);
-        /* 词 */
+        /* 词 (右键路径标签 word=文件夹名 — 显示与执行分离, 不会再有全路径长词) */
         float tx = a.left + XSF(8);
         XjsDrawTextC(t.word.c_str(), (UINT32)t.word.length(), g_tfTag,
             XjsRectF(tx, a.top, a.right - XSF(3), a.bottom), XjsTempBrush(accent), D2D1_DRAW_TEXT_OPTIONS_CLIP);
