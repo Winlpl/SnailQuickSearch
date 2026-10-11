@@ -41,10 +41,13 @@ void XjsChromeLayout() {
     L.listHead = XjsRectF(0, XSF(40), listRight, XSF(40) + XSF(headH));
     L.statusbar = XjsRectF(0, L.h - sbH, L.w, L.h);
     L.list = XjsRectF(0, L.listHead.bottom, listRight, L.statusbar.top);
-    /* 纵向滚动条带: 左缘 -14 (带宽 11), thumb 恒贴带右缘(右缩 3) 宽 8 → 带内 thumb 左侧余量 3px。
+    /* 纵向滚动条带: 带宽 11, thumb 恒贴带右缘(右缩 3) 宽 8 → 带内 thumb 左侧余量 3px。
        原左缘 -17(带宽 14) 时内容裁剪边(带左缘)到 thumb 左缘有 6px 空带, 视觉偏宽 → 收紧 3px
-       (2026-10-07)。带右缘维持 -3: thumb 右缘距窗口边仍 3px, 与横条右端同一对齐口径 */
-    L.vtrack = XjsRectF(listRight - XSF(14), L.list.top + XSF(2), listRight - XSF(3), L.list.bottom - XSF(6));
+       (2026-10-07)。带右缘: 无预览 -3 (thumb 右缘距窗口边 3px); 有预览贴 listRight
+       (thumb 右缘距预览分隔线 3px, 2026-10-11 用户反馈预览打开时滚动条右侧空白偏多;
+       让出的 3px 经列让位 (xjs_list.cpp rightPad 10→7) 归还给末列) */
+    L.vtrack = XjsRectF(listRight - XSF(g_previewVisible ? 11 : 14), L.list.top + XSF(2),
+                        listRight - XSF(g_previewVisible ? 0 : 3), L.list.bottom - XSF(6));
 
     /* 标题栏: 图标 + ☰菜单 + 搜索框 + 筛选下拉 + 窗口按钮 */
     float iconSize = XSF(22);

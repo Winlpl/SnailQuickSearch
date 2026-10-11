@@ -184,7 +184,7 @@ struct XjsSetCard {
    2026-10-06 精简合并: 新建窗口→窗口页第二张卡, 别名→文件分类页第二张卡,
    内存→性能与内存页第一张卡, 开源许可→关于页尾部 md 卡 (旧 SC_* 下标废弃) */
 enum { SC_GENERAL = 0,  /* 通用 = 全局设置 (缩放/双击Ctrl/自启) */
-       SC_WIN,          /* ─ 窗口设置·窗口 (快捷键/名称/失焦动作/激活位置/标题栏与状态栏可见性 + 新建窗口卡, 每窗) */
+       SC_WIN,          /* ─ 窗口设置·窗口 (窗口身份/窗口行为/界面元素/新建窗口 四卡, 2026-10-11 拆卡归类, 每窗) */
        SC_APPEAR,       /* ─ 窗口设置·外观 (皮肤, 每窗) */
        SC_LIST,         /* ─ 窗口设置·列表框 (每窗) */
        SC_MATCH,        /* ─ 窗口设置·搜索匹配 (每窗, 2026-09-17 起移出通用) */
@@ -825,10 +825,11 @@ static bool XjsSetBuildRows() {
             XjsSetAppendMdPage(2, XjsT(L"设置.通用.URL协议"), L"URL协议简介.md");
             break;
         }
-        case SC_WIN: {  /* 窗口 (每窗: 快捷键+名称+窗口行为; 主窗固定"默认窗口"不可改) */
-            newCard(XjsT(L"设置分类.窗口"));
+        case SC_WIN: {  /* 窗口 (每窗: 身份/行为/界面元素 三卡 + 新建窗口卡; 主窗固定"默认窗口"不可改) */
             XjsSearchWindow* ow = XjsSetOwner();
             bool fixedName = ow && ow->isMain;
+            /* ─ 卡1 窗口: 本窗身份与呼出 (2026-10-11 拆卡归类, 命名仍放最前) */
+            newCard(XjsT(L"设置分类.窗口"));
             /* 窗口名称第一项 (2026-09-17 用户口径): 命名是本窗身份, 放最前 */
             addRow(ACT_WINNAME, CT_BUTTON, g_name.c_str(),
                    fixedName ? XjsT(L"设置.窗口.主窗名说明")
@@ -844,7 +845,8 @@ static bool XjsSetBuildRows() {
                    s_set.recHotkey ? XjsHotkeyLiveText()
                                    : (hkText + (hkBad ? XjsT(L"通用词.未生效") : L"")),
                    false, false);
-            /* 窗口行为: 失焦动作 / 激活与创建位置 (菜单选择), 标题栏·状态栏可见性 (开关) */
+            /* ─ 卡2 窗口行为: 失焦动作 / 激活与创建位置 / 任务栏图标 (菜单选择 + 开关) */
+            newCard(XjsT(L"设置分类.窗口行为"));
             const wchar_t* const BLUR_T[2] = { XjsT(L"通用词.无"), XjsT(L"通用词.关闭窗口") };
             addRow(ACT_BLUR, CT_BUTTON, XjsT(L"设置.窗口.失焦行为"),
                    XjsT(L"设置.窗口.失焦行为.说明"),
@@ -852,6 +854,11 @@ static bool XjsSetBuildRows() {
             addRow(ACT_APPEAR, CT_BUTTON, XjsT(L"设置.窗口.出现位置"),
                    XjsT(L"设置.窗口.出现位置.说明"),
                    XjsAppearPosLabel(g_appearPos), false, false);
+            addRow(ACT_TASKBAR, CT_SWITCH, XjsT(L"设置.窗口.任务栏图标"),
+                   XjsT(L"设置.窗口.任务栏图标.说明"),
+                   L"", g_taskbarIcon, false);
+            /* ─ 卡3 界面元素: 标题栏·状态栏可见性 (开关) */
+            newCard(XjsT(L"设置分类.界面元素"));
             addRow(ACT_CTRLBTN, CT_SWITCH, XjsT(L"设置.窗口.显示控制按钮"),
                    XjsT(L"设置.窗口.显示控制按钮.说明"),
                    L"", g_showCtrlBtns, false);
@@ -864,9 +871,6 @@ static bool XjsSetBuildRows() {
             addRow(ACT_STATUSBAR, CT_SWITCH, XjsT(L"设置.窗口.显示状态栏"),
                    XjsT(L"设置.窗口.显示状态栏.说明"),
                    L"", g_showStatusbar, false);
-            addRow(ACT_TASKBAR, CT_SWITCH, XjsT(L"设置.窗口.任务栏图标"),
-                   XjsT(L"设置.窗口.任务栏图标.说明"),
-                   L"", g_taskbarIcon, false);
             /* 新建窗口卡 (2026-10-06 并入窗口页): 本窗档案创建新窗口时的初始搜索状态 */
             newCard(XjsT(L"设置分类.新建窗口"));
             const wchar_t* const FILL_T[3] = { XjsT(L"通用词.清空"), XjsT(L"通用词.指定关键词"), XjsT(L"通用词.上一次搜索的词") };

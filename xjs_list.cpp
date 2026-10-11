@@ -229,7 +229,9 @@ void XjsGetColumnRects(float listWidth, bool listView, float* xs, float* ws) {
        让位量随 vtrack 带宽(11)同步收紧 (2026-10-07, 原 14): 末列右缘距命中区左缘留 8px,
        视觉空带不再偏宽 */
     double rightPad = pad;
-    if (XjsVScrollVisible()) rightPad += XSF(10);
+    /* 让位量 = (listRight→带左缘距离) - 8 (末列右缘距命中区左缘恒 8px): 带左缘随预览开关移位
+       (无预览 -14 / 有预览 -11, 几何唯一来源 xjs_chrome.cpp vtrack), 有预览档 2026-10-11 同步 10→7 */
+    if (XjsVScrollVisible()) rightPad += XSF(g_previewVisible ? 7 : 10);
     double avail = (double)listWidth - pad - rightPad;
     double fixedSum = 0, frSum = 0, flexNeed = 0;
     for (int i = 0; i < V.n; i++) {
@@ -568,12 +570,13 @@ static void XjsDrawDriveBar(const XjsRect& row, const XjsRowData& rd, bool listV
     }
 }
 
-/* 横向滚动条几何 (同源样式 htrack: 左起列表左缘, 右缩 3px(有预览)/5px(无), 底部 3px, 高 8px)。
+/* 横向滚动条几何 (同源样式 htrack: 左起列表左缘, 右缩 0px(有预览)/5px(无), 底部 3px, 高 8px)。
+   有预览档右端贴 listRight 与纵条带右缘同对齐 (2026-10-11, 纵条带贴 listRight 见 xjs_chrome.cpp)。
    行视口扣减 (XjsListViewHeight) 与渲染裁剪 (XjsRowsClipRect) 的带顶都由此取 — 改这里两处自动跟随 */
 static void XjsHTrackGeom(float* trackL, float* trackW, float* trackY, float* trackH) {
     XjsLayout& L = g_layout;
     *trackL = L.list.left;
-    *trackW = (L.list.right - XSF(g_previewVisible ? 3.0f : 5.0f)) - *trackL;
+    *trackW = (L.list.right - XSF(g_previewVisible ? 0.0f : 5.0f)) - *trackL;
     *trackH = XSF(8);
     *trackY = L.list.bottom - XSF(3) - *trackH;
 }
@@ -627,7 +630,8 @@ static void XjsRenderListTail() {
     float thumbY = 0, thumbH = 0;
     double maxScroll = 0;
     if (XjsVThumbGeom(&thumbY, &thumbH, &maxScroll)) {
-        /* thumb 右缘贴 track 右缘 (距列表右缘 3px): 与横向滚动条右端对齐, 原先右缩 6 间距过大 */
+        /* thumb 右缘贴 track 右缘: 与横向滚动条右端对齐 (带右缘位置见 xjs_chrome.cpp vtrack —
+           无预览距窗口边 3px, 有预览距预览分隔线 3px) */
         XjsRect th = XjsRectF(L.vtrack.right - XSF(8), thumbY, L.vtrack.right, thumbY + thumbH);
         g_rt->FillRoundedRectangle(XjsRoundedRectF(th, XSF(4), XSF(4)),
             (g_dragScroll || g_sbHover == 1) ? (XjsBrush*)g_br[XTH_TEXT_FAINT] : (XjsBrush*)g_br[XTH_BORDER_STRONG]);
