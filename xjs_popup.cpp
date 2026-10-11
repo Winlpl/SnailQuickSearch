@@ -379,6 +379,10 @@ static void XjsMenuIconDraw(XjsRt* rt, int icon, float cx, float cy,
             }
             break;
         }
+        case XMI_SEARCH:   /* 搜索此文件夹: 放大镜 (源样式 ctx-ic 无此图标, 按同族线段风格自绘) */
+            rt->DrawEllipse(XjsEllipseF(P(6.8f, 6.8f), XSF(3.8f), XSF(3.8f)), br, wN, ss);
+            seg(9.8f, 9.8f, 13.4f, 13.4f, wN);
+            break;
         case XMI_RESTORE: {   /* 托盘-恢复窗口: 窗口框+顶栏 (源样式 Tray.Restore) */
             XjsRoundedRect rr = XjsRoundedRectF(
                 XjsRectF(cx - XSF(8) + XSF(2.5f), cy - XSF(8) + XSF(2.5f), cx - XSF(8) + XSF(13.5f), cy - XSF(8) + XSF(13.5f)),

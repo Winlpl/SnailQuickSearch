@@ -1169,16 +1169,8 @@ static std::wstring UrlDirArgFromCmdLine(const std::wstring& s) {
     return std::wstring();
 }
 
-/* 资源管理器右键的标签词 (2026-10-11 用户口径: 不用搜索范围, 用搜索框临时标签):
-   路径尾补 \* 列出该目录内容 (根路径已带 \ 不重复补); 引擎口径 = 通配符词含 '\' 按完整路径匹配、
-   含 '*' 不自动加星; 含空格必须包双引号 (引擎按空格分"且", 引号内为一段), 如 "D:\Program Files (x86)\*"。 */
-static std::wstring UrlFolderTagWord(const std::wstring& dir) {
-    std::wstring w = dir;
-    if (!w.empty() && w.back() == L'\\') w += L'*';
-    else w += L"\\*";
-    if (dir.find(L' ') != std::wstring::npos) w = L"\"" + w + L"\"";
-    return w;
-}
+/* 资源管理器右键的标签词/显示名 = XjsFolderTagWord / XjsFolderLeafName (xjs_engine.cpp 单一事实源,
+   与列表行右键"搜索此文件夹"共用; 2026-10-11 用户口径: 不用搜索范围, 用搜索框临时标签) */
 
 /* 合成右键搜索 URL: 持久"快速启动"窗 (2026-10-12 用户口径: 参考快速启动器样式 — 小窗、失焦即关、
    主屏居中弹出; ql=1 = 不存在才新建一扇 (指定名"快速搜索"), 存在就复用 — 存活窗激活 / 未打开
@@ -1190,19 +1182,11 @@ static std::wstring UrlFolderTagWord(const std::wstring& dir) {
    快速启动样式 (view/size/cfg) 只在全新创建时生效: 标记命中走 2026-10-11 force 闸, 配置项默认
    不覆写 = 用户改过的尺寸/失焦行为/出现位置/皮肤等样式原样保留 (样式在设置-窗口设置改;
    cfg 键 = 配置文件中文主键, XjsUrlApplyWindowConfig 白名单)。 */
-static std::wstring UrlFolderLeafName(const std::wstring& dir) {
-    std::wstring leaf = dir;
-    while (!leaf.empty() && leaf.back() == L'\\') leaf.pop_back();   /* 剥尾斜杠: "C:\...\oCam\" → "C:\...\oCam" */
-    size_t bs = leaf.find_last_of(L'\\');
-    if (bs != std::wstring::npos) leaf = leaf.substr(bs + 1);        /* 取最后一段: "C:\...\oCam" → "oCam" */
-    if (leaf.empty()) leaf = dir;                                    /* 全剥光兜底 (UrlAbsPath 保证绝对路径, 到不了) */
-    return leaf;
-}
 static std::wstring UrlFolderTagUrl(const std::wstring& dir) {
     picojson::object st;
-    st["q"] = picojson::value(Utf16ToUtf8(UrlFolderTagWord(dir).c_str()));
+    st["q"] = picojson::value(Utf16ToUtf8(XjsFolderTagWord(dir).c_str()));
     st["mode"] = picojson::value(std::string("wild"));
-    st["name"] = picojson::value(Utf16ToUtf8(UrlFolderLeafName(dir).c_str()));   /* 标签只显示文件夹名 */
+    st["name"] = picojson::value(Utf16ToUtf8(XjsFolderLeafName(dir).c_str()));   /* 标签只显示文件夹名 */
     picojson::array arr;
     arr.push_back(picojson::value(st));
     std::string json = picojson::value(arr).serialize();

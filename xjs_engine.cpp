@@ -1938,6 +1938,65 @@ void XjsUrlRunMultiMs(const std::vector<XjsMsStage>& msStages, const std::wstrin
     XjsSearchWindow::Cur()->Invalidate();
 }
 
+/* ==================== 文件夹路径标签词 (单一事实源) ====================
+ * URL 协议文件夹标签与列表行右键"搜索此文件夹"共用同款词法:
+ * 执行词 = 完整路径通配符 (路径+\*, 根路径已带 \ 不重复补; 引擎口径 = 通配符词含 '\' 按
+ * 完整路径匹配、含 '*' 不自动加星; 含空格必须包双引号 —— 引擎按空格分"且", 引号内为一段);
+ * 显示名 = 目录末段 (标签胶囊短且好认, 显示与执行分离走 XjsHostedTag.litWord)。 */
+
+std::wstring XjsFolderTagWord(const std::wstring& dir) {
+    std::wstring w = dir;
+    if (!w.empty() && w.back() == L'\\') w += L'*';
+    else w += L"\\*";
+    if (dir.find(L' ') != std::wstring::npos) w = L"\"" + w + L"\"";
+    return w;
+}
+
+std::wstring XjsFolderLeafName(const std::wstring& dir) {
+    std::wstring leaf = dir;
+    while (!leaf.empty() && leaf.back() == L'\\') leaf.pop_back();   /* 剥尾斜杠: "C:\...\oCam\" → "C:\...\oCam" */
+    size_t bs = leaf.find_last_of(L'\\');
+    if (bs != std::wstring::npos) leaf = leaf.substr(bs + 1);        /* 取最后一段: "C:\...\oCam" → "oCam" */
+    if (leaf.empty()) leaf = dir;                                    /* 全剥光兜底 (盘根到不了这里, 入口已保证绝对路径) */
+    return leaf;
+}
+
+/* 目录归一: 剥多余尾斜杠 (盘根 "C:\" 保留) — 去重与建词前的统一定式 */
+static std::wstring XjsFolderNormDir(std::wstring d) {
+    while (d.size() > 3 && d.back() == L'\\') d.pop_back();
+    return d;
+}
+
+/* 行右键"搜索此文件夹": 目录集逐个追加字面量路径标签并执行链 (链尾=框内现词)。
+ * 去重两道: ① 选中集内部 (同一目录多行 / 目录+其下文件同行选中) ② 对链中已有标签
+ * (同执行词 = 同目录, 重复点击菜单不叠加)。多标签 = 引擎多重搜索链式过滤 (AND 语义)。 */
+void XjsHostedTagFolders(const std::vector<std::wstring>& dirs) {
+    int added = 0;
+    for (size_t i = 0; i < dirs.size(); i++) {
+        std::wstring d = XjsFolderNormDir(dirs[i]);
+        if (d.empty()) continue;
+        std::wstring word = XjsFolderTagWord(d);
+        bool dup = false;
+        for (size_t k = 0; k < g_hostedTags.size() && !dup; k++) {
+            if (!g_hostedTags[k].lit) continue;
+            std::wstring ex = g_hostedTags[k].litWord.empty() ? g_hostedTags[k].word : g_hostedTags[k].litWord;
+            if (_wcsicmp(ex.c_str(), word.c_str()) == 0) dup = true;
+        }
+        if (dup) continue;
+        XjsHostedTag t;
+        t.word = XjsFolderLeafName(d);
+        t.lit = true;
+        t.litMode = XMODE_WILDCARD;
+        t.litWord = word;
+        g_hostedTags.push_back(t);
+        added++;
+    }
+    if (added <= 0) return;   /* 全部已入链: 不动链不重搜 */
+    g_hostedCaret = (int)g_hostedTags.size();
+    XjsSearchWindow::Cur()->Invalidate();
+    XjsHostedExecChain(XjsSearchGetText());   /* 药丸菜单同语义: 输入词保留作链尾 */
+}
+
 /* 输入词命中托管显示词 → 转标签接管 (源样式 tryHostedSearch): 词已是链中标签 (忽略大小写) 时放行,
    按纯文本作尾阶段 (再次输入同词 = 标签 AND 该词) */
 bool XjsHostedTrySearch(const std::wstring& keyword) {

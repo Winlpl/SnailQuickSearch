@@ -640,6 +640,7 @@ enum XjsMenuIcon {
     XMI_HEART,               /* 托盘菜单: 捐赠 (心形; 源样式无此项, 按同族线段风格自绘) */
     XMI_PLUGIN,              /* 插件贡献的菜单项 (拼图块; 无此项时缩进按"无图标"退到 26,
                                  与带图标的内置项差 10px → 插件项文字整行左移不成列, 2026-10-07 用户截图实锤) */
+    XMI_SEARCH,              /* 右键菜单"搜索此文件夹": 放大镜 (源样式无此项, 按同族线段风格自绘) */
 };
 
 struct XjsPopupItem {
@@ -901,7 +902,8 @@ struct XjsHostedTag {
     std::wstring word;              /* 显示词 (= 命中的模式名, 链内忽略大小写唯一) */
     std::vector<std::wstring> srcIds;   /* 同名来源 (customSearchModes 的 id, ≥1) */
     int active = 0;                 /* 当前生效来源下标 */
-    /* 字面量段 (URL 协议 q|.. / ms=[..] 建的标签): 无模式来源 (srcIds 空), litMode = 已解析的
+    /* 字面量段 (URL 协议 q|.. / ms=[..] / 行右键"搜索此文件夹" 建的标签): 无模式来源 (srcIds 空),
+       litMode = 已解析的
        模式号 (0..4)。编辑框文字后 XjsHostedExecChain 需据此复现整链, 否则无来源标签会被当
        失效跳过 → 一改字整条链被清空 (2026-10-09 实锤) */
     bool lit = false;
@@ -923,6 +925,14 @@ bool XjsHostedTrySearch(const std::wstring& keyword);  /* 输入词命中模式�
 bool XjsHostedWordAsTag(const std::wstring& word, bool clearInput); /* 词转标签 (输入命中/模式菜单点击共用) */
 void XjsHostedRemoveTag(int idx);                      /* 移除标签并重搜剩余链 (无标签回普通搜索) */
 void XjsUrlRunMultiMs(const std::vector<XjsMsStage>& msStages, const std::wstring& tailQ, int tailMode, int defMode); /* URL ms 多重链 (唯一多重入口, JSON): msStages 先执行(各成内联标签, word=执行词/name=显示名), q(=tailQ)作链末节兼搜索框主词; 引擎 JSON=[ms...,q]。段 mode -1=defMode, tailMode<0=defMode */
+/* 文件夹路径标签词/显示名 (xjs_engine.cpp 单一事实源; URL 协议文件夹标签与行右键"搜索此文件夹"共用):
+   word = 完整路径通配符执行词 (路径+\*, 含空格包双引号); leaf = 末段显示名 (标签胶囊短) */
+std::wstring XjsFolderTagWord(const std::wstring& dir);
+std::wstring XjsFolderLeafName(const std::wstring& dir);
+/* 行右键"搜索此文件夹": 目录集 (目录行=自身 / 文件行=父目录, 调用方已归一) → 逐个追加字面量
+   路径标签 (显示=文件夹名, 执行=XjsFolderTagWord; 与链中已有同执行词标签去重) 并执行链,
+   链尾 = 框内现词 (药丸菜单同语义, 输入不被消费)。须在 UI 线程、所属窗作用域内调用。 */
+void XjsHostedTagFolders(const std::vector<std::wstring>& dirs);
 void XjsHostedClearTags();                             /* 静默清空标签 (不触发搜索) */
 void XjsHostedPurgeMode(const std::wstring& modeId);   /* 模式删除: 剔除其来源并重搜 (源样式 purgeHostedSources) */
 void XjsHostedPickSource(int srcIdx);                  /* 来源切换菜单命令: 换当前来源并重搜整链 */

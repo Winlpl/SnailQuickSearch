@@ -405,11 +405,6 @@ bool XjsSearchImeResult(HWND hwnd, LPARAM lParam) {
  * 标签画在搜索框输入区左段 (源样式 #searchTags flex 在 input 前), 输入区随之右移; 标题栏紧凑档规格:
  * 高 20 胶囊 (accent-soft 底 + accent 字 11.5px 中字重, 悬停描边 accent), × 钮 14 圆, 多来源带 ˅;
  * 标签光标条 2×18 accent (← 进入标签区, 输入框光标同时隐藏, 源样式 .hosted-caret 1.1s 闪烁) */
-static const XjsCustomMode* XjsHostedCmById(const std::wstring& id) {
-    for (auto& cm : g_customModes)
-        if (cm.id == id) return &cm;
-    return NULL;
-}
 static const wchar_t* XjsHostedTypeName(const std::wstring& type) {
     if (type == L"regex") return XjsT(L"搜索模式.正则表达式");
     if (type == L"sql") return L"SQL";
@@ -611,11 +606,14 @@ void XjsHostedHoverTimer(HWND hwnd) {
     std::vector<XjsPopupItem> items;
     items.push_back({ 0, XjsT(L"菜单.切换搜索来源"), L"", false, false, true, false });   /* 源样式 .src-menu-title */
     for (int s = 0; s < (int)t.srcIds.size(); s++) {
-        const XjsCustomMode* cm = XjsHostedCmById(t.srcIds[s]);
-        std::wstring label = cm ? cm->name : XjsT(L"菜单.已删除自定义模式");
+        XjsCustomMode v;
+        /* 统一视图解析: 用户模式与插件模板模式 (p:<id>:<序>) 都经 XjsModeViewById —
+           旧 XjsHostedCmById 只查用户模式表, 插件来源在菜单里曾显示"已删除自定义模式" */
+        const bool ok = XjsModeViewById(t.srcIds[s], &v);
+        std::wstring label = ok ? v.name : XjsT(L"菜单.已删除自定义模式");
         label += L" (";
-        label += XjsHostedTypeName(cm ? cm->type : L"");
-        std::wstring desc = cm ? XjsTrimWs(cm->desc) : L"";
+        label += XjsHostedTypeName(ok ? v.type : L"");
+        std::wstring desc = ok ? XjsTrimWs(v.desc) : L"";
         label += desc.empty() ? L")" : (L": " + desc + L")");
         items.push_back({ IDM_HOSTED_SRC_BASE + s, label, L"", s == t.active, false, false, false });
     }
@@ -1462,6 +1460,7 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
         /* 项序/文案/图标 = 源样式 buildFileCtxMenu: 打开/打开路径/重命名/设置别名/剪切/复制/复制路径/复制名称/删除/属性 */
         items.push_back({ IDM_CTX_BASE + 1, XjsT(L"通用词.打开"), L"", false, false, false, false, false, XMI_OPEN });
         items.push_back({ IDM_CTX_BASE + 2, XjsT(L"右键菜单.打开路径"), L"", false, false, false, false, false, XMI_FOLDER });
+        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"", false, false, false, false, false, XMI_SEARCH });
         items.push_back({ IDM_CTX_BASE + 9, XjsT(L"右键菜单.重命名"), L"F2", false, false, false, false, isDrive, XMI_RENAME });
         items.push_back({ IDM_CTX_BASE + 10, XjsT(L"右键菜单.设置别名"), L"", false, false, false, false, !aliasOn, XMI_ALIAS });
         items.push_back({ 0, L"", L"", false, true });
@@ -1476,6 +1475,7 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
     } else {
         items.push_back({ IDM_CTX_BASE + 11, XjsT(L"通用词.打开"), L"", false, false, false, false, false, XMI_OPEN });
         items.push_back({ IDM_CTX_BASE + 12, XjsT(L"右键菜单.打开路径"), L"", false, false, false, false, false, XMI_FOLDER });
+        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"", false, false, false, false, false, XMI_SEARCH });
         items.push_back({ 0, L"", L"", false, true });
         items.push_back({ IDM_CTX_BASE + 7, XjsT(L"编辑菜单.剪切"), L"Ctrl+X", false, false, false, false, false, XMI_CUT });
         items.push_back({ IDM_CTX_BASE + 8, XjsT(L"通用词.复制"), L"Ctrl+C", false, false, false, false, false, XMI_COPY });
