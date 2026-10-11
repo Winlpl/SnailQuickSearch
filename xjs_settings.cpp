@@ -35,6 +35,7 @@ enum XjsSetAct {
     ACT_ENGINE = 321,      /* 绘制引擎 D2D/GDI+ (进程共享, 重启生效; 菜单回传 901/902) */
     ACT_LANG = 322,        /* 界面语言 (每窗 = owner, 即时生效; 菜单回传 919=自动 920..925=zh/zh-TW/en/ko/th/ms) */
     ACT_URLPROTO = 323,    /* snailsearch:// URL 协议 HKCU 挂钩开关 (全局, 设置-通用新增) */
+    ACT_URLMENU = 324,     /* 资源管理器右键菜单动词 HKCU 挂钩开关 (全局, 设置-通用新增) */
     ACT_DRIVEPROG = 312,   /* 绘制驱动器占用进度条 (每窗) */
     ACT_ROWHOVER = 313,    /* 高亮鼠标经过行 (每窗) */
     ACT_HOVERFADE = 314,   /* 鼠标经过残影 (每窗, 依赖 ACT_ROWHOVER) */
@@ -822,6 +823,7 @@ static bool XjsSetBuildRows() {
             /* 说明里的协议名 = 内嵌链接 → 演示页 (语法/示例/各语言译文都原样含 "snailsearch://" 字面量) */
             s_set.cards.back().rows.back().linkText = L"snailsearch://";
             s_set.cards.back().rows.back().linkUrl  = L"https://www.xunjieso.com/url_demo.html";
+            addRow(ACT_URLMENU, CT_SWITCH, XjsT(L"设置.通用.右键菜单"), XjsT(L"设置.通用.右键菜单.说明"), L"", g_explorerMenuEnabled, false);
             /* 页尾文档卡 = snailsearch:// 语法与示例 (main.rc RCDATA 206, xjs_md 排版):
                开关只说"能干什么",这一卡回答"怎么写这条链接" —— 外部集成不必离开程序查文档 */
             XjsSetAppendMdPage(2, XjsT(L"设置.通用.URL协议"), L"URL协议简介.md");
@@ -2586,6 +2588,14 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             /* snailsearch:// HKCU 挂钩开关: 翻转 → 注册/摘钩 → 落盘 → 重画设置窗行 (开关回显新态) */
             g_urlProtocolEnabled = !g_urlProtocolEnabled;
             XjsUrlRegisterScheme(g_urlProtocolEnabled);
+            XjsSaveConfig();
+            InvalidateRect(s_set.hwnd, NULL, FALSE);
+            break;
+        }
+        case ACT_URLMENU: {
+            /* 资源管理器右键动词开关: 翻转 → 注册/摘钩 → 落盘 → 重画设置窗行 (同 ACT_URLPROTO 口径) */
+            g_explorerMenuEnabled = !g_explorerMenuEnabled;
+            XjsUrlRegisterExplorerMenu(g_explorerMenuEnabled);
             XjsSaveConfig();
             InvalidateRect(s_set.hwnd, NULL, FALSE);
             break;

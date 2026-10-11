@@ -1349,8 +1349,8 @@ public:
     void ApplyAppearPos();                            /* 激活/创建位置策略 (appearPos): main.cpp 实现 */
     void ApplyTaskbarIcon();                          /* 任务栏图标开关 (taskbarIcon): 装卸 WS_EX_TOOLWINDOW */
     void ApplyCreateSetup();                          /* 创建套用 (WM_CREATE 内, 显示前): 默认排序+填入搜索词+首搜 */
-    void MigrateMainRole();                           /* 主窗真关闭前: 托盘/热键/isMain 迁往最老存留窗 */
-    bool CloseRequest();                              /* 关闭请求: 最后窗口=藏托盘(返回true); 否则真关闭(返回false) */
+    /* 关闭请求: 主窗=藏托盘永不销毁 (isMain/托盘/热键不迁移), 末窗=藏托盘 (均返回true); 其余子窗=真关闭(返回false) */
+    bool CloseRequest();
     void DestroyAndFree();                            /* 窗口销毁后: 注册表摘除并释放 */
     void ClearDebounceSnapshot() {                    /* 防抖快照清理唯一入口 (完成/失败回调/渲染缓存作废/重采样前) */
         debounceIds.clear(); debounceSel.clear(); debounceFirst = 0; debounceCount = 0;
@@ -1556,6 +1556,7 @@ extern std::atomic<bool> g_doubleCtrl;          /* 双击 Ctrl 当前激活态 (
 extern std::wstring g_doubleCtrlTarget;         /* 双击 Ctrl 触发目标窗口名 ("默认窗口"/档案名; 空=禁用; UI 线程) */
 extern std::wstring g_startupUrl;               /* 冷启动时从命令行捕获的 snailsearch:// URL (提权后首窗建立之后应用一次即清空) */
 extern bool g_urlProtocolEnabled;               /* 配置顶层 "URL协议启用": 决定是否在启动与开关切换时同步 HKCU 挂钩 */
+extern bool g_explorerMenuEnabled;              /* 配置顶层 "资源管理器右键启用": 资源管理器右键菜单动词 (xjs_url.cpp) */
 extern std::atomic<bool> g_dbReady;             /* 数据库就绪 (加载/首扫完成): 结果对象只允许就绪后创建 (早建=被定死文件名序) */
 extern int g_fileCount;
 extern std::wstring g_scanDrive;
@@ -1738,8 +1739,9 @@ void XjsElevateAndRestart();
  *       (带参数时同时在主窗就地应用)。片段 #... 整段丢弃,动作段的尾斜杠不参与判定。 */
 bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err);   /* 解析+分发, 返回否=丢弃 (不弹窗) */
 bool XjsUrlPopupResult(int id);   /* IDM_URL_BASE 段菜单结果 (确认框上选"添加到别的窗口"的落地); 非本段返回 false */
-std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd);         /* 命令行剥 URL (引号段优先, 空格不必编码) */
+std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd);         /* 命令行剥 URL (引号段优先, 空格不必编码); 剥不到但带 /dir <路径> (资源管理器右键) 时就地合成通配符标签搜索 URL */
 void XjsUrlRegisterScheme(bool enable);                             /* HKCU 挂钩/摘钩 (幂等) */
+void XjsUrlRegisterExplorerMenu(bool enable);                       /* 资源管理器右键菜单动词 HKCU 挂钩/摘钩 (幂等, 菜单文案按当前语言) */
 bool XjsUrlIsRegisteredScheme();                                    /* 当前 HKCU 挂钩态 (UI 开关显示) */
 bool XjsUrlSendCopyData(HWND target, const wchar_t* url);           /* 中 IL 侧发送入口: TRUE=送达 */
 std::vector<std::wstring> XjsSplitLines(const std::wstring& text);     /* 文本预览分行 */

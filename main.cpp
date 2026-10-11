@@ -132,7 +132,7 @@ static void XjsAppCloseWindow(HWND hwnd, XjsCloseHow how) {
     if (!w) { DestroyWindow(hwnd); return; }
     XjsWindowScope scope(w);
     if (how == XCLOSE_EXIT || !w->CloseRequest()) DestroyWindow(hwnd);
-    /* CloseRequest 返回真 = 末窗藏托盘 (源样式 closeAction=hide), 窗口保留 */
+    /* CloseRequest 返回真 = 主窗/末窗藏托盘 (源样式 closeAction=hide), 窗口保留 */
 }
 
 /* ==================== 窗口消失统一策略入口 ====================
@@ -1688,7 +1688,7 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_CLOSE:
-            /* 统一关闭入口: 末窗=藏托盘, 其余=真关 (主窗先迁移托盘角色);
+            /* 统一关闭入口: 主窗/末窗=藏托盘, 其余子窗=真关;
                外部进程 PostMessage/SendMessage 0x0010 与点关闭按钮同路, 不再有第二套撕毁逻辑 */
             XjsAppCloseWindow(hwnd, XCLOSE_DEFAULT);
             return 0;
@@ -1727,7 +1727,8 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             XjsWindowComponentsDetach(hwnd);
             RemoveClipboardFormatListener(hwnd);
             if (w->isMain) {
-                /* 主窗销毁 = 退出: 先关其余搜索窗口 (各自同步清理), 再走完整收尾 */
+                /* 主窗销毁 = 退出 (唯一到达路径 = 托盘菜单"退出" XCLOSE_EXIT; 普通关闭
+                   一律藏托盘不撕毁): 先关其余搜索窗口 (各自同步清理), 再走完整收尾 */
                 XjsSearchWindow::DestroyOthers(w);
                 XjsHotkeysUnregisterAll();   /* 主窗销毁随窗卸载全部档案槽快捷键 */
                 XjsTrayRemove();
@@ -1962,6 +1963,12 @@ static int XjsAppMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, in
     XjsLoadConfig();
     XjsSetPhase(L"i18n-init");
     XjsI18nInit();   /* 语言表装载 (配置 "语言" 键已读; 之后所有 UI 文案经 XjsT) */
+    XjsSetPhase(L"shell-hooks");
+    /* HKCU 外壳挂钩自愈 (仅配置为开的才写): exe 挪位/改名后注册表里的旧路径会失效,
+       每次启动按当前 exe 路径幂等重写; 右键菜单文案同时按本次启动的语言刷新。
+       配置为关 = 用户明确不要, 不写。须在 XjsI18nInit 之后 (XjsT 才有真文案)。 */
+    if (g_urlProtocolEnabled) XjsUrlRegisterScheme(true);
+    if (g_explorerMenuEnabled) XjsUrlRegisterExplorerMenu(true);
     XjsSetPhase(L"com-init");
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);

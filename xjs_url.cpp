@@ -28,6 +28,12 @@
  *       全部配置项默认忽略 — 只执行 搜索词/文件动作/模式管理 类参数; force= 名单内 (URL 参数名本身:
  *       mode/view/preview/zoom/skin/pos/size/cfg/scope/sort|order/filter|cat/hotkey/八个匹配开关名, 或 all)
  *       才覆写。全新创建 (含临时窗) 不受此闸, 参数照常初始化; focus/search 语义就是"应用到已有窗", 同样不受闸。
+ *       资源管理器右键 (2026-10-11): 设置-通用开关写 HKCU 三处动词 (Directory / Directory\Background /
+ *       Drive 的 shell\SnailQuickSearch), command = "<exe>" /dir "%V" —— 路径作为独立参数进命令行,
+ *       不拼进 URL (文件夹名里的 & # % 会撕碎 query, 注册表命令也做不了百分号编码); 命令行侧由
+ *       XjsUrlExtractFromCmdLine 捕获 /dir <路径> 就地合成 new?ms=<JSON> 走既有解析/闸门/开窗:
+ *       单段通配符字面量标签 (路径+\*, 含空格包双引号), 临时标签不落任何配置
+ *       (2026-10-11 用户口径: 不用搜索范围, 用搜索框标签)。
  *
  * 校验: 一律按"不可信输入"处理 — 枚举 clamp, 未知键忽略, 载荷 >32KB 拒, scheme 不匹配丢。
  *       总口径 = 协议能搜、能改界面, 但**不能让本机运行它递来的程序**:
@@ -51,6 +57,7 @@
 /* 进程共享 (方案 五.xjs_app.h): 冷启动 URL 暂存 + 顶层开关 */
 std::wstring g_startupUrl;
 bool g_urlProtocolEnabled = false;
+bool g_explorerMenuEnabled = false;   /* 资源管理器右键菜单动词开关 (顶层配置键 "资源管理器右键启用", 设置-通用) */
 
 /* ============== 内部工具 ============== */
 
@@ -74,6 +81,24 @@ static void UrlPctDecode(const std::string& in, std::string* out) {
         }
         *out += in[i];
     }
+}
+
+/* 百分号编码 (RFC 3986 unreserved 之外的字节全部转义): /dir 合成 URL 用 —— 路径里的
+   & # % = 空格 中文 等都要能原样往返 (对端 UrlPctDecode 解回)。 */
+static std::wstring UrlPctEncodeUtf8(const std::wstring& s) {
+    std::string u8 = Utf16ToUtf8(s.c_str());
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(u8.size() * 3);
+    for (unsigned char c : u8) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '.' || c == '_' || c == '~') {
+            out += (char)c;
+        } else {
+            out += '%'; out += kHex[c >> 4]; out += kHex[c & 15];
+        }
+    }
+    return Utf8ToUtf16(out.c_str());
 }
 
 /* 拆 k=v 对 (v 内可含 %, 不含裸 '&' — 上游 split 已按 '&' 断开) */
@@ -806,12 +831,16 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         XjsResultSetSortField(g_result, sf.c_str(), asc ? TRUE : FALSE);
     }
     /* 搜索范围: 路径列表 → 每窗结构化白名单 (与设置页"搜索范围"同一事实源, 随档案持久化),
-       重建派生 JSON 并落盘; 必须在下方 SetText 触发搜索前设好, 使首搜即带上范围 */
+       重建派生 JSON 并落盘; 必须在下方 SetText 触发搜索前设好, 使首搜即带上范围。
+       scopeApplied: 范围是查询时参数 (xjs_result_Query 直读派生缓存), 只设范围不给搜索内容时
+       结果集不会自己跟上 —— 链尾没有别的搜索触发时补一次现词重搜 (见搜索执行 else-if 链) */
+    bool scopeApplied = false;
     if (!req.scopePaths.empty() && allow(URF_SCOPE)) {
         w->scopePaths = req.scopePaths;
         w->scopeOn = true;
         XjsScopeSyncFor(w);
         XjsSaveConfig();
+        scopeApplied = true;
     }
     /* 匹配开关: 三态命中才覆写, 有变更则下推引擎 (XjsApplyMatchSettingsFor 直传 w, 不依赖 Cur);
        已存在窗口逐项按 force= 放行 (8 个开关各自一位) */
@@ -903,6 +932,8 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         XjsSearchSetText(req.q);                   /* 单主词普通搜索 (本窗模式), 即搜并记历史 */
     } else if (modeApplied) {
         XjsSearchNow(false);                       /* 只切模式: 按新模式重搜现词 (模式被 force 闸拦下时不空转) */
+    } else if (scopeApplied) {
+        XjsSearchNow(false);                       /* 只设搜索范围: 现词重搜一次让结果集跟上新范围 (空词 = 列目录内容) */
     }
     /* 只清标签、没给任何搜索内容 = 按现词重搜一次 (XjsHostedClearTags 本身静默不触发搜索,
        不清这一下结果集还停在被清掉的链上) */
@@ -1008,10 +1039,65 @@ bool XjsUrlApplyFromText(const wchar_t* url, std::wstring* err) {
 
 /* ============== 送达入口 (中 IL 侧调用) ============== */
 
+/* 命令行 /dir <路径> 标记 (资源管理器右键菜单 command = "<exe>" /dir "%V"): 取 /dir 之后的
+   独立参数 (引号段优先, 同 URL 剥取口径), 经 UrlAbsPath 校验归一 (只收绝对路径、剥控制字符、拒通配)。
+   无标记 / 路径不合法 = 空串。仅在命令行里剥不到 snailsearch:// URL 时才检查 (URL 优先, 免得
+   链接参数值里恰好出现 "/dir " 被误捕获)。 */
+static std::wstring UrlDirArgFromCmdLine(const std::wstring& s) {
+    const wchar_t* kTok = L"/dir";
+    const size_t kTokLen = 4;
+    for (size_t i = 0; i + kTokLen <= s.size(); i++) {
+        if (_wcsnicmp(s.c_str() + i, kTok, kTokLen) != 0) continue;
+        wchar_t before = (i > 0) ? s[i - 1] : L' ';
+        wchar_t after = (i + kTokLen < s.size()) ? s[i + kTokLen] : L' ';
+        if (before != L' ' && before != L'\t' && before != L'"') continue;
+        if (after != L' ' && after != L'\t' && after != L'"') continue;
+        size_t j = i + kTokLen;
+        while (j < s.size() && (s[j] == L' ' || s[j] == L'\t')) j++;
+        if (j >= s.size()) return std::wstring();
+        std::wstring arg;
+        if (s[j] == L'"') {
+            size_t end = s.find(L'"', j + 1);
+            arg = s.substr(j + 1, (end == std::wstring::npos) ? std::wstring::npos : end - j - 1);
+        } else {
+            size_t end = s.find_first_of(L" \t", j);
+            arg = s.substr(j, (end == std::wstring::npos) ? std::wstring::npos : end - j);
+        }
+        return UrlAbsPath(arg);
+    }
+    return std::wstring();
+}
+
+/* 资源管理器右键的标签词 (2026-10-11 用户口径: 不用搜索范围, 用搜索框临时标签):
+   路径尾补 \* 列出该目录内容 (根路径已带 \ 不重复补); 引擎口径 = 通配符词含 '\' 按完整路径匹配、
+   含 '*' 不自动加星; 含空格必须包双引号 (引擎按空格分"且", 引号内为一段), 如 "D:\Program Files (x86)\*"。 */
+static std::wstring UrlFolderTagWord(const std::wstring& dir) {
+    std::wstring w = dir;
+    if (!w.empty() && w.back() == L'\\') w += L'*';
+    else w += L"\\*";
+    if (dir.find(L' ') != std::wstring::npos) w = L"\"" + w + L"\"";
+    return w;
+}
+
+/* 合成右键搜索 URL: new 临时窗 + ms 单段通配符字面量标签 (XjsUrlRunMultiMs 做成内联标签执行,
+   临时标签不落任何配置; JSON 一律 picojson 拼装, 整段百分号编码后进 query)。 */
+static std::wstring UrlFolderTagUrl(const std::wstring& dir) {
+    picojson::object st;
+    st["q"] = picojson::value(Utf16ToUtf8(UrlFolderTagWord(dir).c_str()));
+    st["mode"] = picojson::value(std::string("wild"));
+    picojson::array arr;
+    arr.push_back(picojson::value(st));
+    std::string json = picojson::value(arr).serialize();
+    return L"snailsearch://new?ms=" + UrlPctEncodeUtf8(Utf8ToUtf16(json.c_str()));
+}
+
 /* 从命令行里剥出 snailsearch:// URL (scheme 大小写不敏感)。
    截断口径 = 引号优先: 注册表 command 形如 "%1", URL 常整段被双引号包住, 内含未编码空格时
    (批处理 start "" "snailsearch://new?q=a b" / 运行对话框手打) 按"第一个空格"截会丢后半参数。
-   故: scheme 前紧邻 '"' = 引号段, 收在闭合引号 (空格照收); 否则收在第一个空白或引号。 */
+   故: scheme 前紧邻 '"' = 引号段, 收在闭合引号 (空格照收); 否则收在第一个空白或引号。
+   剥不到 URL 但带 /dir <路径> (资源管理器右键菜单) 时就地合成标签搜索 URL 返回:
+   snailsearch://new?ms=<JSON> —— 开临时窗 + 路径转通配符字面量标签 (路径+\*, 含空格包双引号),
+   之后走既有解析/闸门/开窗全链路, 协议本身零新语法。 */
 std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd) {
     if (!cmd || !*cmd) return std::wstring();
     std::wstring s = cmd;
@@ -1021,7 +1107,11 @@ std::wstring XjsUrlExtractFromCmdLine(const wchar_t* cmd) {
     for (size_t i = 0; i + kLen <= s.size(); i++) {
         if (_wcsnicmp(s.c_str() + i, kScheme, kLen) == 0) { at = i; break; }
     }
-    if (at == std::wstring::npos) return std::wstring();
+    if (at == std::wstring::npos) {
+        std::wstring dir = UrlDirArgFromCmdLine(s);
+        if (dir.empty()) return std::wstring();
+        return UrlFolderTagUrl(dir);
+    }
     bool quoted = at > 0 && s[at - 1] == L'"';
     size_t end = s.size();
     for (size_t i = at; i < s.size(); i++) {
@@ -1081,4 +1171,39 @@ void XjsUrlRegisterScheme(bool enable) {
     if (hOpen) RegCloseKey(hOpen);
     if (hShell) RegCloseKey(hShell);
     if (hRoot) RegCloseKey(hRoot);
+}
+
+/* ============== 资源管理器右键菜单动词 (HKCU, 2026-10-11) ============== */
+/* 三处动词: 右键文件夹 / 文件夹内空白处 / 驱动器。command 把路径作为独立参数 /dir 递给本 exe
+   (不拼进 URL: 文件夹名里的 & # % 会撕碎 query, 注册表命令也做不了百分号编码),
+   应用侧 XjsUrlExtractFromCmdLine 合成 snailsearch://new?scope=<编码路径> 走既有链路。
+   文案按调用时当前窗语言解析 (启动自愈每次重写 = 跟随本次启动语言; 设置页切换即按 owner 语言写)。 */
+static const wchar_t* const kExplorerMenuVerbs[] = {
+    L"Software\\Classes\\Directory\\shell\\SnailQuickSearch",
+    L"Software\\Classes\\Directory\\Background\\shell\\SnailQuickSearch",
+    L"Software\\Classes\\Drive\\shell\\SnailQuickSearch",
+};
+
+void XjsUrlRegisterExplorerMenu(bool enable) {
+    if (!enable) {
+        for (const wchar_t* k : kExplorerMenuVerbs) RegDeleteTreeW(HKEY_CURRENT_USER, k);   /* 幂等删除 (键不存在也无害) */
+        return;
+    }
+    wchar_t exe[MAX_PATH * 2] = {0};
+    if (!GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(wchar_t)))) return;
+    std::wstring text = XjsT(L"设置.通用.右键菜单项");
+    if (text.empty() || text.find(L"设置.") == 0) text = L"使用 蜗牛快搜 搜索";   /* i18n 未初始化时兜底, 不让主键名进注册表 */
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" /dir \"%V\"";
+    for (const wchar_t* k : kExplorerMenuVerbs) {
+        HKEY h = NULL;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, k, 0, NULL, 0, KEY_WRITE, NULL, &h, NULL) != ERROR_SUCCESS) continue;
+        RegSetValueExW(h, NULL, 0, REG_SZ, (const BYTE*)text.c_str(), (DWORD)((text.size() + 1) * sizeof(wchar_t)));
+        RegSetValueExW(h, L"Icon", 0, REG_SZ, (const BYTE*)exe, (DWORD)((wcslen(exe) + 1) * sizeof(wchar_t)));
+        HKEY hCmd = NULL;
+        if (RegCreateKeyExW(h, L"command", 0, NULL, 0, KEY_WRITE, NULL, &hCmd, NULL) == ERROR_SUCCESS) {
+            RegSetValueExW(hCmd, NULL, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(hCmd);
+        }
+        RegCloseKey(h);
+    }
 }

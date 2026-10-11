@@ -54,9 +54,8 @@ static HWND s_hWndMain = NULL;
 static DWORD s_uiThreadId = 0;   /* UI 线程 id (wWinMain 登记): Cur() 线程断言用, 0=未登记不检查 */
 /* 主窗指针 (isMain 持有者的镜像): Main() 唯一被引擎回调线程调用 (UI 线程也用),
    禁止像旧实现那样在引擎线程遍历 s_wins — 与 UI 线程 DestroyAndFree 的
-   尾槽清 NULL/对象 delete 直接竞态 (NULL 槽解引用 / UAF)。UI 线程在 isMain
-   全部两个赋值点 (RegisterPending / MigrateMainRole) 同步维护, 引擎线程只读;
-   x64 对齐指针读写原子。 */
+   尾槽清 NULL/对象 delete 直接竞态 (NULL 槽解引用 / UAF)。UI 线程在唯一赋值点
+   (RegisterPending, 主窗只建一次) 同步维护, 引擎线程只读; x64 对齐指针读写原子。 */
 static XjsSearchWindow* volatile s_mainWin = NULL;
 
 XjsSearchWindow::XjsSearchWindow() {
@@ -337,32 +336,15 @@ void XjsSearchWindow::ApplyUiProfile() {
     XjsHotkeysRegisterAll();
 }
 
-/* 主窗"真关闭"(非最后一个窗口)时: 托盘/热键/isMain 迁往最早创建的存留窗口 —
- * 窗口彼此对等, 应用角色跟着最老窗口走; 关闭窗自身降级为普通窗口走普通清理 */
-void XjsSearchWindow::MigrateMainRole() {
-    if (!isMain) return;
-    XjsSearchWindow* succ = NULL;
-    for (int i = 0; i < s_winCount; i++) {
-        if (s_wins[i] != this && s_wins[i]->hWnd) { succ = s_wins[i]; break; }
-    }
-    if (!succ) return;   // 没有别的窗口 → 保持主窗身份 (走藏托盘)
-    isMain = false;
-    succ->isMain = true;
-    s_mainWin = succ;   /* 镜像同步 (引擎回调线程可能正持旧指针发消息) */
-    s_hWndMain = succ->hWnd;
-    XjsTrayRemove();
-    XjsTrayAdd(succ->hWnd);
-    XjsHotkeysRegisterAll();   /* 快捷键每窗: 全部槽重登记到新主窗 (旧主窗销毁时随窗卸载) */
-}
-
-/* 关闭请求 (WM_CLOSE): 最后一个窗口 = 藏托盘 (返回 true, 源样式 closeAction=hide);
-   非最后窗口 = 真关闭 (返回 false, 调用方 DestroyWindow; 主窗先迁移托盘角色) */
+/* 关闭请求 (WM_CLOSE): 主窗 = 藏托盘永不销毁 (与 XjsDismissWindow 同口径 — 默认窗口是
+   恒定的主窗身份, isMain/托盘/热键不迁给子窗, 否则 Alt+F4/任务栏关闭会把主窗真销毁、
+   GUID 子窗接管主窗, 且槽 0 "默认窗口"档案悬空后被普通窗顶名); 末窗 = 藏托盘
+   (返回 true, 源样式 closeAction=hide); 其余子窗 = 真关闭 (返回 false, 调用方 DestroyWindow) */
 bool XjsSearchWindow::CloseRequest() {
-    if (s_winCount <= 1) {
+    if (isMain || s_winCount <= 1) {
         if (hWnd) ShowWindow(hWnd, SW_HIDE);
         return true;
     }
-    MigrateMainRole();
     return false;
 }
 
