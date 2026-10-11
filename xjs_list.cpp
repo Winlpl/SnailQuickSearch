@@ -1759,6 +1759,29 @@ void XjsShowProperties(int idx) {
     XjsShowPropertiesPath(XjsItemPath(idx));   /* 路径版收口在 xjs_util (URL 协议 props= 同入口) */
 }
 
+/* 搜索此文件夹 (右键菜单 / Shift+Enter / 中键 三处共一入口):
+ * 选中集 → 目录(目录行=自身, 文件行=父目录) 去重 → 追加路径标签执行链 (XjsHostedTagFolders;
+ * 多标签 = 多重搜索链式 AND, 引擎侧再对链中已有同执行词标签去重)。
+ * 目录判定 = xjs_db_IsDir 专用 API (无效ID返回 FALSE) — 禁止用 GetFileAttributes 按位测试:
+ * 那是"文件属性"索引字段的值, 字段未开启时恒返 0, 所有目录都会被误判成文件取了父目录。 */
+void XjsTagFoldersForSelection() {
+    std::vector<std::wstring> dirs;
+    for (int ridx : XjsSelIndices()) {
+        std::wstring p = XjsItemPath(ridx);
+        if (p.empty()) continue;
+        int fid = g_result ? xjs_result_GetFileId(g_result, ridx) : -1;
+        bool isDir = XjsIsDriveRow(ridx) ||
+                     (fid >= 0 && g_engine && xjs_db_IsDir(g_engine, fid) != FALSE);
+        if (isDir) {
+            dirs.push_back(p);
+        } else {
+            size_t bs = p.find_last_of(L'\\');
+            if (bs != std::wstring::npos) dirs.push_back(p.substr(0, bs + 1));   /* 父目录含尾 \ (盘根文件 "F:\a" → "F:\") */
+        }
+    }
+    XjsHostedTagFolders(dirs);
+}
+
 bool XjsListKey(WPARAM vk) {
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1817,6 +1840,7 @@ bool XjsListKey(WPARAM vk) {
             }
             if (ctrl) { XjsOpenFolderAndSelect(XjsItemPath(sel[0])); return true; }      /* Ctrl+Enter 定位 */
             if (GetKeyState(VK_MENU) & 0x8000) { XjsShowProperties(sel[0]); return true; } /* Alt+Enter 属性 */
+            if (shift) { XjsTagFoldersForSelection(); return true; }                     /* Shift+Enter 搜索此文件夹 (标签限定范围) */
             XjsOpenFile(XjsItemPath(sel[0]));
             return true;
         }

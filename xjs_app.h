@@ -1699,6 +1699,9 @@ std::wstring XjsNumText(long long n);               // 千分位
 std::wstring XjsWanText(long long n);               // 4,483,452 (448.3万)
 void XjsCopyClipboard(const std::wstring& text);
 std::wstring XjsItemPath(int idx);
+/* 搜索此文件夹 (右键菜单/Shift+Enter/中键共一入口, xjs_list.cpp): 选中集 → 目录(文件=父目录)
+   去重 → 追加路径标签执行链 (XjsHostedTagFolders) */
+void XjsTagFoldersForSelection();
 void XjsOpenFile(const std::wstring& path);
 bool XjsOpenFolderAndSelect(const std::wstring& path);   /* 真=已把定位请求交给 shell (反斜杠归一内含); 忽略返回值的调用点照旧 */
 void XjsShowProperties(int idx);                    // 系统"属性"对话框 (ShellExecuteEx verb=properties)

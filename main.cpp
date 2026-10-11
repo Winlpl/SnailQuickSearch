@@ -515,28 +515,7 @@ void XjsOnPopupResult(int id) {
                 for (int idx : sel) XjsOpenFolderAndSelect(XjsItemPath(idx));
                 break;
             }
-            case 13: {   /* 搜索此文件夹: 目录行=自身 / 文件行=父目录 → 去重 → 追加路径标签执行
-                            (多标签 = 多重搜索链式 AND; 引擎侧再对链中已有同执行词标签去重) */
-                std::vector<std::wstring> dirs;
-                for (int ridx : sel) {
-                    std::wstring p = XjsItemPath(ridx);
-                    if (p.empty()) continue;
-                    bool isDir = XjsIsDriveRow(ridx);
-                    if (!isDir && g_result) {
-                        int fid = xjs_result_GetFileId(g_result, ridx);
-                        DWORD at = (fid >= 0 && g_engine) ? xjs_db_GetFileAttributes(g_engine, fid) : INVALID_FILE_ATTRIBUTES;
-                        isDir = (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY));
-                    }
-                    if (isDir) {
-                        dirs.push_back(p);
-                    } else {
-                        size_t bs = p.find_last_of(L'\\');
-                        if (bs != std::wstring::npos) dirs.push_back(p.substr(0, bs + 1));   /* 父目录含尾 \ (盘根文件 "F:\a" → "F:\") */
-                    }
-                }
-                XjsHostedTagFolders(dirs);
-                break;
-            }
+            case 13: XjsTagFoldersForSelection(); break;   /* 搜索此文件夹 (右键菜单/Shift+Enter/中键 共口) */
         }
     } else if (id >= IDM_TRAY_BASE && id < IDM_TRAY_BASE + 8) {
         /* 托盘右键菜单 (自绘弹窗, 结果经 WM_POPUP_RESULT 回托盘归属窗; 隐藏窗消息照常投递) */
@@ -1139,6 +1118,23 @@ LRESULT CALLBACK Xjs_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             if (XjsPreviewMouseDown(pt)) return 0;
             if (XjsListMouseDown(pt, wParam)) return 0;
+            return 0;
+        }
+        case WM_MBUTTONDOWN: {
+            /* 中键于结果行 = 搜索此文件夹 (与右键菜单/Shift+Enter 同一动作; 行不在选中集先单选,
+               同右键菜单口径)。面板接管/重命名编辑框不抢 (插件面板协议无中键事件, 吞掉不落列表) */
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            XjsSyncViewport(hwnd);
+            if (XjsPreviewPanelWantsPt(pt)) return 0;
+            if (XjsRenameActive() && XjsPtIn(XjsRenameEditRect(), pt)) return 0;
+            if (pt.y >= g_layout.list.top && pt.y < g_layout.list.bottom && pt.x < g_layout.list.right &&
+                !XjsListScrollRegionHit(pt)) {
+                int idx = XjsItemAtPoint(pt);
+                if (idx >= 0) {
+                    if (!XjsSelIsSelected(idx)) XjsSelectOnly(idx);
+                    XjsTagFoldersForSelection();
+                }
+            }
             return 0;
         }
         case WM_LBUTTONDBLCLK: {

@@ -276,6 +276,12 @@ bool XjsSearchKey(WPARAM vk) {
                回车改为直接打开选中项 (列表回车同口径: 回车打开 / Ctrl+回车定位 / Alt+回车属性);
                搜索未结束 (选中项还属上一结果集) 时不打开, 回落下方"选中首项并聚焦列表"口径 */
             if (g_defaultSel == 1 && !g_searching.load() && XjsSelCount() > 0) {
+                if (GetKeyState(VK_SHIFT) & 0x8000) {
+                    /* Shift+Enter = 搜索此文件夹 (列表同键同义, 作用于当前选中行 — 默认选中=1
+                       时即首条结果所在目录): XjsHostedTagFolders 已带链尾执行, 不再 XjsSearchNow 重搜 */
+                    XjsListKey(VK_RETURN);
+                    return true;
+                }
                 XjsListKey(VK_RETURN);
                 XjsSearchNow(true);   /* 回车照常提交搜索历史 (排在打开之后: 提交会换血结果集/清选中) */
                 return true;
@@ -1460,7 +1466,7 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
         /* 项序/文案/图标 = 源样式 buildFileCtxMenu: 打开/打开路径/重命名/设置别名/剪切/复制/复制路径/复制名称/删除/属性 */
         items.push_back({ IDM_CTX_BASE + 1, XjsT(L"通用词.打开"), L"", false, false, false, false, false, XMI_OPEN });
         items.push_back({ IDM_CTX_BASE + 2, XjsT(L"右键菜单.打开路径"), L"", false, false, false, false, false, XMI_FOLDER });
-        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"", false, false, false, false, false, XMI_SEARCH });
+        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"Shift+Enter", false, false, false, false, false, XMI_SEARCH });
         items.push_back({ IDM_CTX_BASE + 9, XjsT(L"右键菜单.重命名"), L"F2", false, false, false, false, isDrive, XMI_RENAME });
         items.push_back({ IDM_CTX_BASE + 10, XjsT(L"右键菜单.设置别名"), L"", false, false, false, false, !aliasOn, XMI_ALIAS });
         items.push_back({ 0, L"", L"", false, true });
@@ -1475,7 +1481,7 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
     } else {
         items.push_back({ IDM_CTX_BASE + 11, XjsT(L"通用词.打开"), L"", false, false, false, false, false, XMI_OPEN });
         items.push_back({ IDM_CTX_BASE + 12, XjsT(L"右键菜单.打开路径"), L"", false, false, false, false, false, XMI_FOLDER });
-        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"", false, false, false, false, false, XMI_SEARCH });
+        items.push_back({ IDM_CTX_BASE + 13, XjsT(L"右键菜单.搜索此文件夹"), L"Shift+Enter", false, false, false, false, false, XMI_SEARCH });
         items.push_back({ 0, L"", L"", false, true });
         items.push_back({ IDM_CTX_BASE + 7, XjsT(L"编辑菜单.剪切"), L"Ctrl+X", false, false, false, false, false, XMI_CUT });
         items.push_back({ IDM_CTX_BASE + 8, XjsT(L"通用词.复制"), L"Ctrl+C", false, false, false, false, false, XMI_COPY });
@@ -1497,12 +1503,11 @@ void XjsShowContextMenu(POINT screenPt, int targetIdx) {
             int fid = xjs_result_GetFileId(g_result, idx);
             if (fid >= 0) pids.push_back(fid);
         }
-        /* fid<0 不下传引擎 (结果过渡态可返回负值); 引擎对无效 id 返回 INVALID(-1) 时按位
-         * 测试会误判为目录 — 与上方两处取 fid 的 >=0 拦截同口径 */
+        /* 目录判定 = xjs_db_IsDir 专用 API (无效ID返回 FALSE, fid<0 不下传引擎 — 结果过渡态
+           可返回负值): 禁止 GetFileAttributes 按位测试 — 那是"文件属性"索引字段的值, 字段未
+           开启时恒返 0, 所有目录会被误判成文件 (插件 dir 时机项在目录行不出现的隐患) */
         int dirFid = (idx >= 0 && g_result) ? xjs_result_GetFileId(g_result, idx) : -1;
-        DWORD dirAttr = (dirFid >= 0 && g_engine) ? xjs_db_GetFileAttributes(g_engine, dirFid) : 0;
-        bool isDirRow = isDrive || (dirAttr != INVALID_FILE_ATTRIBUTES &&
-                                    (dirAttr & FILE_ATTRIBUTE_DIRECTORY));
+        bool isDirRow = isDrive || (dirFid >= 0 && g_engine && xjs_db_IsDir(g_engine, dirFid) != FALSE);
         XjsPluginAppendFileMenuItems(items, pids, isDirRow, isDrive);
     }
     XjsShowPopupMenu(g_hWnd, screenPt, items, XSF(230));
