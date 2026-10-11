@@ -280,6 +280,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         uiZoom = p->uiZoom;
         lang = p->lang;   /* 界面语言 (每窗) */
         defaultSel = p->defaultSel;
+        timeStyle = p->timeStyle;   /* 时间显示方式 (每窗) */
         createFill = p->createFill;
         createKeyword = p->createKeyword;
         topmost = p->topmost;
@@ -323,6 +324,7 @@ void XjsSearchWindow::ApplyUiProfile() {
         uiZoom = m->uiZoom;
         lang = m->lang;   /* 界面语言: 无档案新窗跟随主窗, 之后各自独立 */
         defaultSel = m->defaultSel;
+        timeStyle = m->timeStyle;   /* 时间显示方式 (每窗) */
         createFill = m->createFill;
         createKeyword = m->createKeyword;
         topmost = false;

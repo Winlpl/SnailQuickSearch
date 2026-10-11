@@ -1041,6 +1041,7 @@ struct XjsUiProfile {
     bool taskbarIcon = true;              /* 任务栏图标 (关 = WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示) */
     int mouseOpen = 0;                    /* 鼠标打开文件: 0=双击 1=单击 */
     int defaultSel = 0;                   /* 默认选中表项: 0=不选 1=结果刷新后自动选中第一个 */
+    int timeStyle = 0;                    /* 时间显示方式: 0=徽章 1=日期 2=日期和时间 (修改/创建/访问列共用) */
     int uiZoom = 10;                      /* 页面缩放 (十分位: 5..20 = 50%..200%) */
     int lang = XLANG_AUTO;                /* 界面语言 (每窗, 2026-09-19 每窗化; 条目键 "语言"; auto=按系统) */
     int createFill = 0;                   /* 创建窗口填入搜索框: 0=清空 1=用户指定关键词 2=上一次输入的搜索词 */
@@ -1089,6 +1090,7 @@ public:
     bool taskbarIcon = true;     /* 任务栏图标 (关 = WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示) */
     int mouseOpen = 0;           /* 鼠标打开文件: 0=双击 1=单击 (单击模式 Ctrl/Shift+点击仍为多选) */
     int defaultSel = 0;          /* 默认选中表项: 0=不选 1=结果刷新后自动选中第一个 */
+    int timeStyle = 0;           /* 时间显示方式: 0=徽章 1=日期 2=日期和时间 (修改/创建/访问列共用) */
     bool selFirstPending = false; /* 选中首项待落地 (运行期瞬态, 不入档案): 搜索框回车/↓提交了新查询, 新结果集就绪时选中首项 */
     int rowNullLast = -1;        /* 行数据空行数收敛重试的记忆值 (运行期瞬态): 空行数变化才择机重绘, 每窗私有防互抑 */
     int uiZoom = 10;             /* 页面缩放 (十分位: 5..20 = 50%..200%; 每窗私有, 文本格式随窗重建) */
@@ -1399,6 +1401,7 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_taskbarIcon     (XjsSearchWindow::Cur()->taskbarIcon)      /* 任务栏图标 (每窗) */
 #define g_mouseOpen       (XjsSearchWindow::Cur()->mouseOpen)        /* 鼠标打开: 0=双击 1=单击 (每窗) */
 #define g_defaultSel      (XjsSearchWindow::Cur()->defaultSel)       /* 默认选中表项 (每窗) */
+#define g_timeStyle       (XjsSearchWindow::Cur()->timeStyle)        /* 时间显示方式 0=徽章 1=日期 2=日期和时间 (每窗) */
 #define g_createFill      (XjsSearchWindow::Cur()->createFill)       /* 创建填入搜索框方式 (每窗) */
 #define g_createKeyword   (XjsSearchWindow::Cur()->createKeyword)    /* 创建指定关键词 (每窗) */
 #define g_uiZoomTenths    (XjsSearchWindow::Cur()->uiZoom)           /* 页面缩放 (每窗, 十分位 5..20; 曾为进程共享) */
@@ -1665,6 +1668,7 @@ std::wstring XjsFmt(const wchar_t* tpl, const std::wstring& a0 = L"",
                     const std::wstring& a3 = L"");  // {0}{1}{2}{3} 占位替换 (XjsT 模板键搭配用)
 std::wstring XjsTrimWs(const std::wstring& s, const wchar_t* set = L" \t\r\n");  // 去首尾空白 (默认 \r\n\t 空格; set 可换字符集)
 std::wstring XjsTimeText(long long ms);             // 完整时间文本
+std::wstring XjsTimeDate(long long ms);             // 日期文本 2026-01-11 (时间显示方式=日期档)
 std::wstring XjsNumText(long long n);               // 千分位
 std::wstring XjsWanText(long long n);               // 4,483,452 (448.3万)
 void XjsCopyClipboard(const std::wstring& text);

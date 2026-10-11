@@ -828,12 +828,23 @@ void XjsColDrawSize(const XjsRect& cell, XjsRowData* rd, int idx, bool listView)
     }
 }
 
-/* 时间列共通 (修改/创建/访问): 驱动器行与字段未开启 (ms=0) 显 '-', 文件行画相对时间徽章 */
+/* 时间列文本 (渲染与自适应列宽测量同源; 按每窗 时间显示方式取徽章/日期/日期时间) */
+static std::wstring XjsColTimeTextOf(long long ms) {
+    if (ms <= 0) return L"-";
+    if (g_timeStyle == 1) return XjsTimeDate(ms);
+    if (g_timeStyle == 2) return XjsTimeText(ms);
+    return XjsTimeBadge(ms);
+}
+
+/* 时间列共通 (修改/创建/访问): 驱动器行与字段未开启 (ms=0) 显 '-';
+   文件行按 时间显示方式 (每窗): 徽章=相对时间胶囊, 日期/日期和时间=纯文本 */
 static void XjsColDrawTimeCell(const XjsRect& cell, long long ms) {
     XjsRect cr = XjsRectF(cell.left + XSF(8), cell.top, cell.right - XSF(8), cell.bottom);
     if (ms <= 0) {
         g_rt->DrawText(L"-", 1, g_tfTiny,
             XjsRectF(cr.left, cell.top, cr.right + XSF(8), cell.bottom), g_br[XTH_TEXT_FAINT]);
+    } else if (g_timeStyle == 1 || g_timeStyle == 2) {
+        XjsDrawEllText(XjsColTimeTextOf(ms), cr, g_tfTiny, g_br[XTH_TEXT_DIM]);
     } else {
         XjsDrawTimeBadge(XjsTimeBadge(ms), cr, ms);
     }
@@ -1070,15 +1081,15 @@ static std::wstring XjsColTextOf(const char* field, XjsRowData* rd) {
     }
     if (!strcmp(field, "修改时间")) {
         if (rd->isDrive) return L"-";
-        return XjsTimeBadge(rd->mtime);
+        return XjsColTimeTextOf(rd->mtime);
     }
     if (!strcmp(field, "创建时间")) {
         if (rd->isDrive) return L"-";
-        return XjsTimeBadge(rd->ctime);
+        return XjsColTimeTextOf(rd->ctime);
     }
     if (!strcmp(field, "访问时间")) {
         if (rd->isDrive) return L"-";
-        return XjsTimeBadge(rd->atime);
+        return XjsColTimeTextOf(rd->atime);
     }
     if (!strcmp(field, "文件属性")) {
         if (rd->isDrive) return L"-";

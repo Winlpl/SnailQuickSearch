@@ -149,6 +149,7 @@ static int ApiSettingsGet(XjsPluginCtx* ctx, XjsWindowToken window, char* buf, i
     j += ",\"任务栏图标\":" + JBool(w->taskbarIcon);
     j += ",\"鼠标打开\":" + JNum(w->mouseOpen);
     j += ",\"默认选中\":" + JNum(w->defaultSel);
+    j += ",\"时间显示方式\":" + JNum(w->timeStyle);
     j += ",\"语言\":\"" + std::string(XjsLangCodeUtf8(w->lang)) + "\"";
     j += ",\"搜索模式\":\"" + KeyModeNameUtf8(w->mode) + "\"";
     j += "}";
@@ -203,6 +204,7 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
         }
         else if (m.key == L"任务栏图标") { if (!MemberBool(m, &b)) return XJS_PLUGIN_ERR_ARG; }
         else if (m.key == L"鼠标打开" || m.key == L"默认选中") { if (!MemberInt(m, &n) || n < 0 || n > 1) return XJS_PLUGIN_ERR_ARG; }
+        else if (m.key == L"时间显示方式") { if (!MemberInt(m, &n) || n < 0 || n > 2) return XJS_PLUGIN_ERR_ARG; }
         else if (m.key == L"语言") {
             if (!MemberStr(m, &s)) return XJS_PLUGIN_ERR_ARG;
             if (s != L"auto" && XjsLangIndexFromCode(s.c_str()) == XLANG_AUTO)
@@ -259,6 +261,8 @@ static int ApiSettingsSet(XjsPluginCtx* ctx, XjsWindowToken window, const char* 
             MemberInt(m, &n); w->mouseOpen = n; XjsSaveConfig();
         } else if (m.key == L"默认选中") {
             MemberInt(m, &n); w->defaultSel = n; XjsSaveConfig();
+        } else if (m.key == L"时间显示方式") {
+            MemberInt(m, &n); w->timeStyle = n; XjsSaveConfig(); w->InvalidateList();
         } else if (m.key == L"语言") {
             MemberStr(m, &s);
             XjsApplyUiLang(w, (s == L"auto") ? XLANG_AUTO : XjsLangIndexFromCode(s.c_str()));

@@ -115,6 +115,19 @@ std::wstring XjsTimeText(long long ms) {
     return buf;
 }
 
+/* 日期文本 (列表时间列 "时间显示方式=日期" 档; 本地时区, 与完整时间同口径) */
+std::wstring XjsTimeDate(long long ms) {
+    if (ms <= 0) return L"-";
+    long long ftVal = ms * 10000LL + 116444736000000000LL;
+    FILETIME ft = { (DWORD)ftVal, (DWORD)(ftVal >> 32) };
+    SYSTEMTIME st, local;
+    FileTimeToSystemTime(&ft, &st);
+    SystemTimeToTzSpecificLocalTime(NULL, &st, &local);
+    wchar_t buf[64];
+    _snwprintf(buf, 64, L"%04d-%02d-%02d", local.wYear, local.wMonth, local.wDay);
+    return buf;
+}
+
 std::wstring XjsNumText(long long n) {
     wchar_t buf[32], out[48] = {0};
     _snwprintf(buf, 32, L"%lld", n);

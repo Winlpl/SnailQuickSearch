@@ -63,6 +63,8 @@ enum XjsSetAct {
     ACT_CREATEKW = 362,    /* 创建关键词: 点击弹输入对话框 (每窗) */
     ACT_SORT = 363,        /* +0..6 默认排序预设 (每窗, 菜单回传) */
     ACT_DEFSEL = 370,      /* +0 默认不选 / +1 第一个表项 (每窗, 菜单回传) */
+    ACT_TIMESTYLE = 373,   /* +0 徽章 / +1 日期 / +2 日期和时间 (每窗, 菜单回传; 修改/创建/访问列共用).
+                              371 落在 DEFSEL 的 2 档段 [370,372) 内不可用, 372=MINMENU, 取 373 */
     ACT_MINMENU = 372,     /* 极简控制菜单模式 (每窗开关: 开=标题栏恒用 `...` 收纳; 关=窗口过窄时自适应) */
     ACT_APPEAR = 380,      /* +档位序 0..11 出现位置 (序见 xjs_app.h XJS_APPEAR_*; 菜单回传)。
                               基址不能挪回 333: 段宽 12 会盖住 341..356 的 ACT_ZOOM 回传值 (下拉结果
@@ -964,6 +966,14 @@ static bool XjsSetBuildRows() {
             addRow(ACT_DEFSEL, CT_BUTTON, XjsT(L"设置.列表.默认选中"),
                    XjsT(L"设置.列表.默认选中.说明"),
                    g_defaultSel == 1 ? XjsT(L"通用词.自动选中") : XjsT(L"通用词.不自动选中"), false, false);
+            {
+                /* 时间显示方式 (每窗): 修改/创建/访问三个时间列共用的显示样式, 下拉选择。
+                   两个日期档文案直接给格式字面量 = 所见即所得, 无需 i18n */
+                const wchar_t* const TT[3] = { XjsT(L"通用词.时间徽章"), L"2026-01-11", L"2026-01-11 21:06" };
+                int ts = (g_timeStyle >= 0 && g_timeStyle <= 2) ? g_timeStyle : 0;
+                addRow(ACT_TIMESTYLE, CT_BUTTON, XjsT(L"设置.列表.时间显示方式"),
+                       XjsT(L"设置.列表.时间显示方式.说明"), TT[ts], false, false);
+            }
             addRow(ACT_PREVIEW, CT_SWITCH, XjsT(L"菜单.预览面板"), XjsT(L"设置.列表.预览面板.说明"), L"", g_previewVisible, false);
             addRow(ACT_DRIVEPROG, CT_SWITCH, XjsT(L"设置.列表.驱动器容量条"),
                    XjsT(L"设置.列表.驱动器容量条.说明"), L"", g_driveProgress, false);
@@ -2502,6 +2512,12 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             XjsSetShowChoiceMenu(r, ACT_DEFSEL, T, 2, g_defaultSel, XSF(180));
             break;
         }
+        case ACT_TIMESTYLE: {
+            /* 时间显示方式 (每窗): 菜单选择 (档位序 = 配置值 0/1/2, 修改/创建/访问列共用) */
+            const wchar_t* const T[3] = { XjsT(L"通用词.时间徽章"), L"2026-01-11", L"2026-01-11 21:06" };
+            XjsSetShowChoiceMenu(r, ACT_TIMESTYLE, T, 3, g_timeStyle, XSF(200));
+            break;
+        }
         case ACT_BLUR: {
             /* 窗口失去焦点动作: 自绘菜单选择 (owner=设置窗, 结果回 WM_POPUP_RESULT) */
             const wchar_t* const T[2] = { XjsT(L"通用词.无"), XjsT(L"通用词.关闭窗口") };
@@ -3057,6 +3073,7 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     { ACT_MOUSEOPEN,  2,                &XjsSearchWindow::mouseOpen   },
                     { ACT_CREATEFILL, 3,                &XjsSearchWindow::createFill  },
                     { ACT_DEFSEL,     2,                &XjsSearchWindow::defaultSel  },
+                    { ACT_TIMESTYLE,  3,                &XjsSearchWindow::timeStyle   },
                 };
                 for (const auto& cr : kChoiceRows) {
                     if (id < cr.base || id >= cr.base + cr.count) continue;
@@ -3064,6 +3081,7 @@ static LRESULT CALLBACK Xjs_SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     XjsSearchWindow::Cur()->*(cr.mem) = id - cr.base;
                     XjsSaveConfig();
                     s_set.rowsDirty = true;
+                    XjsSearchWindow::Cur()->InvalidateList();   /* 值可见于 owner 列表 (时间显示方式) 的随改随显 */
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }

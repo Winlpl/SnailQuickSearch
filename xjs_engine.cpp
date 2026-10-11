@@ -639,6 +639,7 @@ static const char* const K_TASKBAR = "任务栏图标";
 static const char* const K_TOPMOST = "置顶";
 static const char* const K_MOUSEOPEN = "鼠标打开";         /* 0=双击打开 1=单击打开 */
 static const char* const K_DEFSEL = "默认选中";            /* 0=不选 1=结果刷新后选中第一个 */
+static const char* const K_TIMESTYLE = "时间显示方式";      /* 0=徽章 1=日期 2=日期和时间 (修改/创建/访问列共用) */
 static const char* const K_CREATEFILL = "创建填入搜索框";  /* 0=清空 1=用户指定关键词 2=上一次搜索词 */
 static const char* const K_CREATEKEYWORD = "创建关键词";   /* createFill=1 的内容 */
 static const char* const K_LASTSEARCH = "上次搜索词";      /* 关窗时的搜索框内容 (createFill=2 用) */
@@ -1453,6 +1454,7 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.uiZoom = w->uiZoom;
     p.lang = w->lang;   /* 界面语言 (每窗) */
     p.defaultSel = w->defaultSel;
+    p.timeStyle = w->timeStyle;
     p.createFill = w->createFill;
     p.createKeyword = w->createKeyword;
     p.lastSearch = w->searchEd.text;   /* 上一次输入的搜索词 (createFill=2 的记忆源) */
@@ -1617,6 +1619,7 @@ void XjsUrlApplyWindowConfig(XjsSearchWindow* w, const std::string& cfgJsonUtf8)
     if (nget("出现位置",&n))       { w->appearPos=n; dirty=true; }
     if (nget("鼠标打开",&n))       { w->mouseOpen=n; dirty=true; }
     if (nget("默认选中",&n))       { w->defaultSel=n; dirty=true; }
+    if (nget("时间显示方式",&n))   { w->timeStyle=(n<0||n>2)?0:n; dirty=true; }
     if (nget("创建填入搜索框",&n)) { w->createFill=n; dirty=true; }
     if (nget("预览宽度",&n))       { if(n>=0) w->previewWidth=n; dirty=true; }
     if (nget("预览音量",&n))       { w->mediaVol=(n<0?0:n>100?100:n)/100.0f; dirty=true; }
@@ -2235,6 +2238,8 @@ void XjsLoadConfig() {
             if (p.mouseOpen < 0 || p.mouseOpen > 1) p.mouseOpen = 0;
             p.defaultSel = XjsConfig::Int(o, K_DEFSEL, 0);
             if (p.defaultSel < 0 || p.defaultSel > 1) p.defaultSel = 0;
+            p.timeStyle = XjsConfig::Int(o, K_TIMESTYLE, 0);
+            if (p.timeStyle < 0 || p.timeStyle > 2) p.timeStyle = 0;
             p.uiZoom = XjsConfig::Int(o, K_ZOOM, legacyZoom);
             if (p.uiZoom < 5 || p.uiZoom > 20) p.uiZoom = legacyZoom;
             p.lang = XjsLangFromCode(XjsConfig::Str(o, K_LANG, legacyLang.c_str()).c_str());   /* 界面语言 (每窗; 缺键沿用顶层迁移种子) */
@@ -2363,6 +2368,7 @@ void XjsLoadConfig() {
         XjsSearchWindow::Cur()->topmost = p0->topmost;
         XjsSearchWindow::Cur()->mouseOpen = p0->mouseOpen;
         XjsSearchWindow::Cur()->defaultSel = p0->defaultSel;
+        XjsSearchWindow::Cur()->timeStyle = p0->timeStyle;
         XjsSearchWindow::Cur()->uiZoom = p0->uiZoom;
         XjsSearchWindow::Cur()->createFill = p0->createFill;
         XjsSearchWindow::Cur()->createKeyword = p0->createKeyword;
@@ -2475,6 +2481,7 @@ void XjsSaveConfig() {
         o[K_TOPMOST] = picojson::value(p->topmost);
         o[K_MOUSEOPEN] = picojson::value((double)p->mouseOpen);
         o[K_DEFSEL] = picojson::value((double)p->defaultSel);
+        o[K_TIMESTYLE] = picojson::value((double)p->timeStyle);
         o[K_ZOOM] = picojson::value((double)p->uiZoom);
         o[K_LANG] = picojson::value(XjsLangToCode(p->lang));   /* 界面语言 (每窗) */
         o[K_CREATEFILL] = picojson::value((double)p->createFill);
