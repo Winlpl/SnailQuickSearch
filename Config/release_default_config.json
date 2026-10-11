@@ -12,6 +12,10 @@
     {
       "标识": "sql-generator",
       "启用": true
+    },
+    {
+      "标识": "open-folders",
+      "启用": true
     }
   ]
 }
