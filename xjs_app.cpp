@@ -261,6 +261,9 @@ void XjsSearchWindow::ApplyUiProfile() {
         hotkeyMod = p->hotkeyMod;
         hotkeyVk = p->hotkeyVk;
         match = p->match;
+        scopeOn = p->scopeOn;              /* 搜索范围 (每窗): 随档案套用并重建派生 JSON */
+        scopePaths = p->scopePaths;
+        XjsScopeSyncFor(this);
         for (int m = 0; m < XMODE_COUNT; m++) history[m] = p->history[m];   /* 搜索历史 (每窗, 按模式分档) */
         driveProgress = p->driveProgress;
         rowHover = p->rowHover;
@@ -297,6 +300,9 @@ void XjsSearchWindow::ApplyUiProfile() {
         openAsync = m->openAsync;
         openHideWindow = m->openHideWindow;
         match = m->match;
+        scopeOn = m->scopeOn;   /* 搜索范围跟随主窗 (每窗设置, 无档案新窗同 match 口径) */
+        scopePaths = m->scopePaths;
+        XjsScopeSyncFor(this);
         mode = m->mode;    /* 搜索模式 (每窗): 无档案新窗跟随主窗, 之后各自独立 */
         for (auto& h : history) h.clear();   /* 跟随主窗不含历史: 新窗搜索历史从空开始 */
         driveProgress = m->driveProgress;

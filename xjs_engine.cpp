@@ -305,7 +305,8 @@ void XjsSearchNow(bool commitHistory) {
     int fingerprint = -1;
     /* g_modeToKeyword 直接映射: Lua 过滤档=-3 谓词 / Lua 执行档=-4 执行 (引擎已移除专用入口,
        两种 Lua 均经 Query 以类型提交);
-       SearchFilterConfig: 宿主搜索框无 UI 入口, 但 URL 协议可注入每窗 scope (g_searchScope, 空=NULL 不下推) */
+       SearchFilterConfig: 每窗搜索范围白名单 (设置-搜索匹配"搜索范围"卡 / URL 协议 scope= 共同写入,
+       经 XjsScopeSyncFor 派生, 空=NULL 不下推) */
     fingerprint = xjs_result_Query(g_result, kw.c_str(), g_modeToKeyword[g_mode], g_searchScope.empty() ? NULL : g_searchScope.c_str(), FALSE);
     if (fingerprint != -1) {
         g_searching.store(true);   /* 重绘转用快照画, 完成/失败回调解除 */
@@ -615,6 +616,8 @@ static const char* const K_OPENASY = "异步打开";
 static const char* const K_OPENHIDE = "打开后隐藏";
 static const char* const K_HOTKEY = "快捷键";          /* {"修饰键":..,"虚拟键":..} (录制才有值, 无内置默认) */
 static const char* const K_MATCH = "搜索设置";         /* 内键同 DLL SetSearchSettings (中文) */
+static const char* const K_SCOPEON = "搜索范围启用";   /* 搜索范围总开关 (每窗; 关=不限定, 条目保留) */
+static const char* const K_SCOPE = "搜索范围";         /* 搜索范围白名单 [{"路径","递归子目录"}] (内键同引擎 SearchFilterConfig) */
 static const char* const K_COLS = "显示字段";          /* {列表:{顺序,宽度,弹性,显隐}, 详情:{...}} */
 static const char* const K_COL_LISTVIEW = "列表";
 static const char* const K_COL_DETVIEW = "详情";
@@ -1431,6 +1434,8 @@ static void XjsCollectUiProfileInto(XjsSearchWindow* w, XjsUiProfile& p) {
     p.hotkeyMod = w->hotkeyMod;
     p.hotkeyVk = w->hotkeyVk;
     p.match = w->match;
+    p.scopeOn = w->scopeOn;                /* 搜索范围 (每窗, 2026-10-11 设置页入口) */
+    p.scopePaths = w->scopePaths;
     for (int m = 0; m < XMODE_COUNT; m++) p.history[m] = w->history[m];   /* 搜索历史 (每窗, 按模式分档) */
     p.driveProgress = w->driveProgress;
     p.rowHover = w->rowHover;
@@ -1490,6 +1495,30 @@ void XjsApplyMatchSettingsFor(XjsSearchWindow* w) {
         std::string json = picojson::value(o).serialize();
         xjs_result_SetSearchSettings(w->result, json.c_str());
     }
+}
+
+/* ==================== 搜索范围 (每窗白名单, 2026-10-11 设置页入口) ====================
+ * 事实源 = 窗口 scopeOn + scopePaths (设置页/URL 协议 scope= 共同写, 随 uiWindows 档案持久化);
+ * searchScope 只是派生缓存 (xjs_result_Query 的 SearchFilterConfig 直读), 任何一处改完调
+ * XjsScopeSyncFor 重建 —— 禁止绕过直写 searchScope。序列化内键同引擎 SearchFilterConfig
+ * (xunjieso.h {"搜索范围":[{"路径","递归子目录"}]}), 全库收口 XjsScopeFilterJson 一处。 */
+std::string XjsScopeFilterJson(const std::vector<std::pair<std::wstring, bool>>& paths) {
+    if (paths.empty()) return std::string();
+    picojson::array arr;
+    for (auto& pr : paths) {
+        picojson::object o;
+        o["路径"] = picojson::value(Utf16ToUtf8(pr.first.c_str()));
+        o["递归子目录"] = picojson::value(pr.second);
+        arr.push_back(picojson::value(o));
+    }
+    picojson::object root;
+    root["搜索范围"] = picojson::value(arr);
+    return picojson::value(root).serialize();
+}
+
+void XjsScopeSyncFor(XjsSearchWindow* w) {
+    if (!w) return;
+    w->searchScope = (w->scopeOn && !w->scopePaths.empty()) ? XjsScopeFilterJson(w->scopePaths) : std::string();
 }
 
 /* ==================== 用户自定义搜索模式 (源样式 11-search-modes.js 同构) ====================
@@ -2215,6 +2244,16 @@ void XjsLoadConfig() {
                 p.match.caseSensitive = XjsConfig::Bool(mo, "区分大小写", false);
                 p.match.emptyShowsAll = XjsConfig::Bool(mo, "搜索词为空时显示所有文件", true);
             }
+            /* 搜索范围 (每窗, 2026-10-11 设置页入口): 启用开关 + 白名单数组 [{"路径","递归子目录"}] */
+            p.scopeOn = XjsConfig::Bool(o, K_SCOPEON, false);
+            if (auto scit = o.find(K_SCOPE); scit != o.end() && scit->second.is<picojson::array>()) {
+                for (auto& se : scit->second.get<picojson::array>()) {
+                    if (!se.is<picojson::object>() || (int)p.scopePaths.size() >= XJS_SCOPE_MAX) continue;
+                    picojson::object& so = se.get<picojson::object>();
+                    std::wstring path = XjsConfig::Str(so, "路径", L"");
+                    if (!path.empty()) p.scopePaths.push_back({ path, XjsConfig::Bool(so, "递归子目录", true) });
+                }
+            }
             /* 显示字段: {列表:{顺序,宽度,弹性,显隐}, 详情:{...}} (缺省沿用当前默认列) */
             if (auto cfit = o.find(K_COLS); cfit != o.end() && cfit->second.is<picojson::object>()) {
                 picojson::object& co = cfit->second.get<picojson::object>();
@@ -2279,6 +2318,9 @@ void XjsLoadConfig() {
         g_openAsync = p0->openAsync;
         g_openHideWindow = p0->openHideWindow;
         g_match = p0->match;                   /* 搜索匹配×8/列表框行为×3 (每窗字段, 曾漏同步 = 重启回落默认) */
+        XjsSearchWindow::Cur()->scopeOn = p0->scopeOn;       /* 搜索范围 (每窗): 槽 0 档案 → 主窗字段 + 重建派生 JSON */
+        XjsSearchWindow::Cur()->scopePaths = p0->scopePaths;
+        XjsScopeSyncFor(XjsSearchWindow::Cur());
         g_driveProgress = p0->driveProgress;
         g_rowHover = p0->rowHover;
         g_rowHoverFade = p0->rowHoverFade;
@@ -2448,6 +2490,18 @@ void XjsSaveConfig() {
             mo["区分大小写"] = picojson::value(p->match.caseSensitive);
             mo["搜索词为空时显示所有文件"] = picojson::value(p->match.emptyShowsAll);
             o[K_MATCH] = picojson::value(mo);
+        }
+        /* 搜索范围 (每窗, 2026-10-11 设置页入口): 启用 + 白名单数组 (内键同引擎 SearchFilterConfig) */
+        {
+            o[K_SCOPEON] = picojson::value(p->scopeOn);
+            picojson::array sarr;
+            for (auto& sp : p->scopePaths) {
+                picojson::object so;
+                so["路径"] = picojson::value(Utf16ToUtf8(sp.first.c_str()));
+                so["递归子目录"] = picojson::value(sp.second);
+                sarr.push_back(picojson::value(so));
+            }
+            o[K_SCOPE] = picojson::value(sarr);
         }
         /* 私有搜索模式: 存储位置即作用域 (scope=1 且归属 = 本条目窗口名称) */
         {

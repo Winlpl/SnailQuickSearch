@@ -22,7 +22,8 @@
  *       故 hotkey= 一律忽略并弹提示告知用户 (写法非法 / 被别的程序占用 同样提示, 不静默丢弃)。
  *       sort=<字段>&order=asc|desc: 建窗即套用初始排序并写入本窗档案默认排序 (字段=引擎口径中文串)。
  *       scope=<JSON>: 搜索范围白名单, 与 ms 同口径 — [{"p":路径,"rec":bool}..] 或 ["路径"..] (rec 缺省 true=递归, false=仅本层);
- *       逐路径独立设递归, 只收绝对路径 (含: 或 \, 无通配 *?)。旧式 '|' 分隔写法已废弃 (见 UrlParseScopeJson)。
+ *       逐路径独立设递归, 只收绝对路径 (含: 或 \, 无通配 *?)。写每窗结构化白名单 (设置-搜索匹配"搜索范围"
+ *       同一事实源, 随档案持久化)。旧式 '|' 分隔写法已废弃 (见 UrlParseScopeJson)。
  *
  * 校验: 一律按"不可信输入"处理 — 枚举 clamp, 未知键忽略, 载荷 >32KB 拒, scheme 不匹配丢。
  *       总口径 = 协议能搜、能改界面, 但**不能让本机运行它递来的程序**:
@@ -112,19 +113,7 @@ static bool UrlPair(const std::wstring& v, int* a, int* b) {
 }
 /* pos= 坐标哨兵: 屏幕坐标可为负 (主屏左/上方的副屏), 不能用 -1 当"未给"; 取 INT_MIN。 */
 static const int kNoCoord = -2147483647 - 1;
-/* 路径列表(各带递归标志) → 引擎 SearchFilterConfig JSON (UTF-8 窄串); 每路径独立"递归子目录" */
-static std::string UrlScopeJson(const std::vector<std::pair<std::wstring,bool>>& paths) {
-    picojson::array arr;
-    for (auto& pr : paths) {
-        picojson::object o;
-        o["路径"] = picojson::value(Utf16ToUtf8(pr.first.c_str()));
-        o["递归子目录"] = picojson::value(pr.second);
-        arr.push_back(picojson::value(o));
-    }
-    picojson::object root;
-    root["搜索范围"] = picojson::value(arr);
-    return picojson::value(root).serialize();
-}
+/* (UrlScopeJson 已删: 白名单→引擎 JSON 序列化收口 xjs_engine.cpp XjsScopeFilterJson, 与设置页共用) */
 /* 按名称查找本窗可见的自定义模式 (名称忽略大小写; 作用范围经 XjsCmApplies) */
 static const XjsCustomMode* UrlFindCustomMode(const std::wstring& name, const std::wstring& winName) {
     for (auto& cm : g_customModes)
@@ -755,8 +744,14 @@ static void UrlApply(const XjsUrlReq& req, std::wstring* err, XjsSearchWindow* w
         std::string sf = Utf16ToUtf8(req.sortField.c_str());
         XjsResultSetSortField(g_result, sf.c_str(), asc ? TRUE : FALSE);
     }
-    /* 搜索范围: 路径列表 → 引擎 JSON, 存每窗字段 (必须在下方 SetText 触发搜索前设好) */
-    if (!req.scopePaths.empty()) w->searchScope = UrlScopeJson(req.scopePaths);
+    /* 搜索范围: 路径列表 → 每窗结构化白名单 (与设置页"搜索范围"同一事实源, 随档案持久化),
+       重建派生 JSON 并落盘; 必须在下方 SetText 触发搜索前设好, 使首搜即带上范围 */
+    if (!req.scopePaths.empty()) {
+        w->scopePaths = req.scopePaths;
+        w->scopeOn = true;
+        XjsScopeSyncFor(w);
+        XjsSaveConfig();
+    }
     /* 匹配开关: 三态命中才覆写, 有变更则下推引擎 (XjsApplyMatchSettingsFor 直传 w, 不依赖 Cur) */
     {
         XjsMatchSettings& mt = w->match; bool dirty = false;

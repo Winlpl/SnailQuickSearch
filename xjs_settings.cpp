@@ -28,6 +28,8 @@ enum XjsSetAct {
     ACT_VIEW_MENU = 3500,   /* +0..4 视图档序 (下拉结果) */
     ACT_SKIN_MENU = 3600,   /* +皮肤索引 (下拉结果, 上限 = 扫描到的皮肤数) */
     ACT_MATCH = 300,  /* +0..7 搜索匹配开关 (下发 SetSearchSettings) */
+    ACT_SCOPE_SW = 308,    /* 搜索范围总开关 (每窗, 搜索匹配页; 关=不限定, 条目保留) */
+    ACT_SCOPE_ADD = 309,   /* 添加搜索范围目录 (文件夹选择器; 满 XJS_SCOPE_MAX 拒绝) */
     ACT_EXCL_ADD = 310,
     ACT_DCCTRL = 311,
     ACT_ENGINE = 321,      /* 绘制引擎 D2D/GDI+ (进程共享, 重启生效; 菜单回传 901/902) */
@@ -74,6 +76,10 @@ enum XjsSetAct {
     ACT_PERF_SYNCLR = 397,  /* 同步统计 清零 (xjs_sync_ClearPerformanceText, 无开关 API) */
     ACT_EXCL_DEL = 400,  /* +排除目录索引 (上限 1024) */
     ACT_OPEN = 1640,     /* +0..2 打开文件行为 (每窗: 继承管理员/异步线程/打开后隐藏) */
+    /* 搜索范围逐条行段 (每窗, 搜索匹配页; 占窗口管理删除段之后 1900..1999 的空隙, 各半):
+       条目上限 = XJS_SCOPE_MAX (xjs_app.h, 行 id 段宽与配置载入钳制共用) */
+    ACT_SCOPE_REC = 1900,  /* +行下标 切换该目录 递归子目录/仅本层 */
+    ACT_SCOPE_DEL = 1950,  /* +行下标 删除该目录条目 */
     /* (插件管理页已撤 — 启停/重扫/开目录管理并进插件商城窗, 2026-10-06; 段 1600 空闲) */
     /* 文件分类/别名 表格编辑 (全局, 2026-09-22 抄自正式版设置): 段 2000.. 上方空闲。
        两张表已并入同一分类页 (2026-10-06), 不能再按 s_set.cat 路由 — 别名表动作拆独立段 */
@@ -98,6 +104,10 @@ static_assert(ACT_SKIN_MENU + 300 <= 4096, "皮肤下拉结果段越出保留区
 static_assert(ACT_EXCL_DEL + 1024 <= ACT_WINGM_REN, "排除目录删除段与重命名段重叠");
 static_assert(ACT_WINGM_REN + XJS_WINGM_SLOTS <= ACT_OPEN, "窗口重命名段与打开行为段重叠");
 static_assert(ACT_OPEN + 3 <= ACT_WINGM_DEL, "打开行为段与窗口管理删除段重叠");
+static_assert(ACT_SCOPE_ADD + 1 <= ACT_EXCL_ADD, "搜索范围动作段与排除目录添加动作重叠");
+static_assert(ACT_WINGM_DEL + XJS_WINGM_SLOTS <= ACT_SCOPE_REC, "窗口管理删除段与搜索范围行段重叠");
+static_assert(ACT_SCOPE_REC + XJS_SCOPE_MAX <= ACT_SCOPE_DEL, "搜索范围递归段与删除段重叠");
+static_assert(ACT_SCOPE_DEL + XJS_SCOPE_MAX <= ACT_TSAVE, "搜索范围删除段与文件分类表格段重叠");
 
 /* 出现位置档位文字 (设置行当前值 + 下拉菜单同源; 档位序 = xjs_app.h XJS_APPEAR_*)。
    合成串走函数内 static 缓冲: 两处调用都即时拷进 std::wstring, 不跨调用持有 */
@@ -902,6 +912,20 @@ static bool XjsSetBuildRows() {
             addRow(ACT_MATCH + 5, CT_SWITCH, XjsT(L"设置.搜索匹配.问号通配符"), XjsT(L"设置.搜索匹配.问号通配符.说明"), L"", g_match.wildcardQuestion, false);
             addRow(ACT_MATCH + 6, CT_SWITCH, XjsT(L"设置.搜索匹配.星号通配符"), XjsT(L"设置.搜索匹配.星号通配符.说明"), L"", g_match.wildcardStar, false);
             addRow(ACT_MATCH + 7, CT_SWITCH, XjsT(L"设置.搜索匹配.全角半角"), XjsT(L"设置.搜索匹配.全角半角.说明"), L"", g_match.matchFullWidth, false);
+            /* 搜索范围 (每窗, 2026-10-11): 白名单目录 + 逐条递归选项。事实源 = scopeOn/scopePaths,
+               任何改动即 XjsScopeSyncFor 重建派生 JSON 并重跑当前搜索 (范围过滤发生在 Query 时) */
+            newCard(XjsT(L"设置.搜索范围"));
+            addRow(ACT_SCOPE_SW, CT_SWITCH, XjsT(L"设置.搜索范围.启用"), XjsT(L"设置.搜索范围.启用.说明"), L"", g_scopeOn, false);
+            addRow(ACT_SCOPE_ADD, CT_BUTTON, XjsT(L"设置.搜索范围.添加目录"), XjsT(L"设置.搜索范围.添加目录.说明"),
+                   XjsT(L"通用词.选择目录"), false, false);
+            if (g_scopePaths.empty()) {
+                addRow(ACT_NONE, CT_INFO, XjsT(L"设置.搜索范围.尚未设置"), XjsT(L"设置.搜索范围.尚未设置.说明"), L"", false, false);
+            } else {
+                for (int i = 0; i < (int)g_scopePaths.size() && i < XJS_SCOPE_MAX; i++)
+                    addRow(ACT_SCOPE_REC + i, CT_BUTTON, g_scopePaths[i].first.c_str(), L"",
+                           XjsT(g_scopePaths[i].second ? L"设置.搜索范围.递归子目录" : L"设置.搜索范围.仅本层"),
+                           false, false, false, ACT_SCOPE_DEL + i, XjsT(L"通用词.删除"), true);
+            }
             break;
         }
         case SC_APPEAR: {  /* 外观 (每窗: 界面语言+界面缩放+主题皮肤) */
@@ -2590,6 +2614,32 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
             break;
         }
         case ACT_REBUILD:   XjsSetOpenRebuildDialog(); break;
+        case ACT_SCOPE_SW: {
+            /* 搜索范围总开关 (每窗): 关=不限定 (目录条目保留); 重建派生 JSON + 重跑当前搜索即时生效 */
+            g_scopeOn = !g_scopeOn;
+            XjsScopeSyncFor(XjsSearchWindow::Cur());
+            XjsSaveConfig();
+            XjsSearchNow(false);
+            break;
+        }
+        case ACT_SCOPE_ADD: {
+            /* 添加搜索范围目录 (每窗): 文件夹选择器。对话框泵消息期间 Cur 会被别的窗口重绑,
+               一律先认 owner 指针 (红线: 辅助窗口绑定 owner), 回来校验存活并重新钉作用域再改 */
+            XjsSearchWindow* ow = XjsSetOwner();
+            std::wstring dir;
+            if (!ow || !XjsPickFolder(s_set.hwnd, dir) || !XjsSearchWindow::Alive(ow)) break;
+            XjsWindowScope rePin(ow);   /* 选择器泵消息期间 Cur 可能被重绑, 改动前重新钉回 owner */
+            bool dup = false;
+            for (auto& pr : g_scopePaths) dup = dup || _wcsicmp(pr.first.c_str(), dir.c_str()) == 0;
+            if (dup) { XjsToastShow(s_set.hwnd, XjsT(L"提示.目录已在范围中"), XTOAST_WARN, SS(1)); break; }
+            if ((int)g_scopePaths.size() >= XJS_SCOPE_MAX) { XjsToastShow(s_set.hwnd, XjsT(L"提示.搜索范围已满"), XTOAST_WARN, SS(1)); break; }
+            g_scopePaths.push_back({ dir, true });   /* 新条目默认递归子目录 (逐条可再切换) */
+            g_scopeOn = true;   /* 添加即视为要限定 (总开关就在上方, 状态可见) */
+            XjsScopeSyncFor(XjsSearchWindow::Cur());
+            XjsSaveConfig();
+            XjsSearchNow(false);
+            break;
+        }
         case ACT_EXCL_ADD: {
             std::wstring dir;
             if (XjsPickFolder(s_set.hwnd, dir)) {
@@ -2740,6 +2790,27 @@ static void XjsSetActivateRow(const XjsSetRow& r, int actOverride = 0) {
                 XjsJsonStringArray(g_engine ? xjs_db_GetExcludedDirs(g_engine) : NULL, &dirs);
                 if (i < (int)dirs.size() && !xjs_db_RemoveExcludedDir(g_engine, Utf16ToUtf8(dirs[i].c_str()).c_str()))
                     XjsToastShow(s_set.hwnd, XjsT(L"错误.删除失败"), XTOAST_WARN, SS(1));
+                break;
+            }
+            if (act >= ACT_SCOPE_REC && act < ACT_SCOPE_REC + XJS_SCOPE_MAX) {
+                /* 搜索范围条目: 切换 递归子目录/仅本层 (行值文字随 rowsDirty 重建刷新) */
+                int i = act - ACT_SCOPE_REC;
+                if (i < (int)g_scopePaths.size()) {
+                    g_scopePaths[i].second = !g_scopePaths[i].second;
+                    XjsScopeSyncFor(XjsSearchWindow::Cur());
+                    XjsSaveConfig();
+                    XjsSearchNow(false);
+                }
+                break;
+            }
+            if (act >= ACT_SCOPE_DEL && act < ACT_SCOPE_DEL + XJS_SCOPE_MAX) {
+                int i = act - ACT_SCOPE_DEL;
+                if (i < (int)g_scopePaths.size()) {
+                    g_scopePaths.erase(g_scopePaths.begin() + i);
+                    XjsScopeSyncFor(XjsSearchWindow::Cur());
+                    XjsSaveConfig();
+                    XjsSearchNow(false);
+                }
                 break;
             }
             if (act >= ACT_FDEL && act < ACT_FDEL + 256) {   /* 文件分类行删除 (字段析构自动摘登记) */

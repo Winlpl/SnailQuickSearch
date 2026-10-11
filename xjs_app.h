@@ -976,6 +976,9 @@ struct XjsMatchSettings {
     bool emptyShowsAll = true;     /* 搜索词为空时显示所有文件 */
 };
 
+/* 搜索范围白名单条目数上限 (每窗): 设置页逐行行 id 段宽与配置载入钳制共用 (见 xjs_settings.cpp ACT_SCOPE_*) */
+static const int XJS_SCOPE_MAX = 50;
+
 /* 窗口激活或创建时位置 (每窗设置 appearPos): 档位序 = 设置菜单顺序, 下拉文字/落点计算/配置读写
  * 三处同源 (XjsAppearPosLabel 给文字, ApplyAppearPos 给落点, K_APPEAR 给持久化)。
  * 一切落点夹在显示器工作区 (rcWork) 内 —— 不覆盖任务栏 (贴角/贴光标越界同样收回)。
@@ -1010,6 +1013,8 @@ struct XjsUiProfile {
     bool openAsync = true;                /* 打开文件: 异步线程执行 (防卡主线程), 默认开 */
     bool openHideWindow = false;          /* 打开文件后隐藏窗口到托盘, 默认关 */
     XjsMatchSettings match;               /* 搜索匹配 ×8 (搜索设置) */
+    bool scopeOn = false;                 /* 搜索范围启用 (关=不限定, 目录条目保留); 条目在 scopePaths */
+    std::vector<std::pair<std::wstring, bool>> scopePaths;   /* 搜索范围白名单 (路径, 递归子目录), 上限 XJS_SCOPE_MAX */
     std::vector<std::wstring> history[XMODE_COUNT];   /* 搜索历史 (每窗, 条目"搜索历史"; 按搜索模式分档, 下标=XjsSearchMode; 旧版单列表已迁入"通配符"档) */
     bool driveProgress = true;            /* 绘制驱动器占用进度条 (列表框) */
     bool rowHover = true;                 /* 高亮鼠标经过行 (列表框) */
@@ -1084,7 +1089,12 @@ public:
     bool openAsync = true;
     bool openHideWindow = false;
     XjsMatchSettings match;      /* 搜索匹配 ×8 (每窗, 随 uiWindows 档案持久化) */
-    std::string searchScope;     /* 搜索范围: 引擎 SearchFilterConfig JSON (UTF-8 窄串), 空=不限定 (URL 协议运行时注入) */
+    /* 搜索范围 (每窗, 随 uiWindows 档案持久化; 2026-10-11 设置页入口): 事实源 = scopeOn+scopePaths,
+       searchScope 只是派生缓存 (xjs_result_Query 的 SearchFilterConfig 直读) —— 改完必须调
+       XjsScopeSyncFor 重建, 禁止绕过直写 searchScope */
+    bool scopeOn = false;
+    std::vector<std::pair<std::wstring, bool>> scopePaths;   /* (路径, 递归子目录), 上限 XJS_SCOPE_MAX */
+    std::string searchScope;     /* 搜索范围: 引擎 SearchFilterConfig JSON (UTF-8 窄串), 空=不限定 (派生缓存, 见上) */
     std::vector<std::wstring> history[XMODE_COUNT];   /* 搜索历史 (每窗; 按搜索模式分档, 下标=XjsSearchMode) */
     std::wstring histPending;            /* 待落账搜索词 (历史落账制: 停止输入/焦点交列表 且搜索成功完成才进 history) */
     int histPendingMode = 0;             /* 待记词所属搜索模式 (arm 时快照 g_mode, 防落账前切档记错档) */
@@ -1463,7 +1473,9 @@ void XjsUiProfilesPush(const XjsUiProfile& p);
 #define g_sbDragFromPt    (XjsSearchWindow::Cur()->sbDragFromPt)
 #define g_sbDragPt        (XjsSearchWindow::Cur()->sbDragPt)
 #define g_previewVisible  (XjsSearchWindow::Cur()->previewVisible)
-#define g_searchScope     (XjsSearchWindow::Cur()->searchScope)   /* 搜索范围 JSON (URL 协议注入, 每窗运行时) */
+#define g_searchScope     (XjsSearchWindow::Cur()->searchScope)    /* 搜索范围 JSON (派生缓存, 见 XjsScopeSyncFor) */
+#define g_scopeOn         (XjsSearchWindow::Cur()->scopeOn)        /* 搜索范围启用 (每窗, 事实源) */
+#define g_scopePaths      (XjsSearchWindow::Cur()->scopePaths)     /* 搜索范围白名单 (每窗, 事实源) */
 #define g_openElevated    (XjsSearchWindow::Cur()->openElevated)     /* 打开文件: 继承管理员权限 (每窗) */
 #define g_openAsync       (XjsSearchWindow::Cur()->openAsync)        /* 打开文件: 异步线程执行 (每窗) */
 #define g_openHideWindow  (XjsSearchWindow::Cur()->openHideWindow)   /* 打开文件后隐藏窗口 (每窗) */
@@ -1692,6 +1704,11 @@ void XjsDoubleCtrlApply();        /* 按目标有效性实时启停钩子 (下�
 
 /* 搜索匹配设置: 结构体 XjsMatchSettings 见上 (每窗字段), 应用见 XjsApplyMatchSettingsFor */
 void XjsApplyMatchSettingsFor(XjsSearchWindow* w);   /* w->match → w->result (xjs_result_SetSearchSettings) */
+
+/* 搜索范围 (每窗, 事实源 = w->scopeOn + w->scopePaths): 白名单 → 引擎 SearchFilterConfig JSON (UTF-8);
+   空=返回空串 (调用方按 NULL 不下推)。设置页/URL 协议/配置载入 共用, 序列化收口此一处 */
+std::string XjsScopeFilterJson(const std::vector<std::pair<std::wstring, bool>>& paths);
+void XjsScopeSyncFor(XjsSearchWindow* w);   /* 按 scopeOn/scopePaths 重建 w->searchScope 派生缓存 */
 void XjsDismissWindow(HWND hwnd);   /* 窗口消失统一策略入口 (✕/热键/失焦关闭/双击Ctrl/Esc末级): 主窗藏托盘, 子窗真销毁 */
 void XjsElevateAndRestart();
 
